@@ -279,6 +279,7 @@ struct ClusterConfig {
     // inside the attention layers, and whether adjacent ranges merge.
     bool l2_prefetch = true;
     std::string l2_prefetch_form = "load";
+    std::string l2_prefetch_full_form = "16x8";
     int l2_prefetch_window_mib = 12;
     int l2_prefetch_boundary_window_mib = 20;
     std::string l2_prefetch_boundary_rate = "light";

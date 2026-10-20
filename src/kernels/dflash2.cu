@@ -324,7 +324,13 @@ __global__ void block_attn_split_kernel(const uint16_t* __restrict__ q, int64_t 
 }
 
 // One warp per (row, head): the splits' partials merged at the global max
-// (fixed order over the splits), the output rounded once to bf16.
+// (fixed order over the splits), the output rounded once to bf16. Lane s
+// holds split s's m and l (kBlockAttnSplits = the warp's lanes): the maximum
+// by shuffle, each split's weight formed once by its lane and broadcast in
+// split order (2026-10-20: every lane read every split's m for the maximum
+// and its m and l again in the merge, and computed the weight itself — the
+// same arithmetic in the same order, so the outputs are bitwise).
+static_assert(kBlockAttnSplits == 32, "block_attn_combine_kernel: one lane per split");
 __global__ void block_attn_combine_kernel(const float* __restrict__ partials, int heads, int dim,
                                           uint16_t* __restrict__ out) {
   dgpp_pdl_wait();
@@ -332,17 +338,22 @@ __global__ void block_attn_combine_kernel(const float* __restrict__ partials, in
   const int head = blockIdx.y;
   const int lane = threadIdx.x;
   const float* base = partials + static_cast<size_t>(row * heads + head) * kBlockAttnSplits * (dim + 2);
-  float M = -INFINITY;
-  for (int s = 0; s < kBlockAttnSplits; ++s) M = fmaxf(M, base[s * (dim + 2) + dim]);
+  const float m_lane = base[lane * (dim + 2) + dim];
+  const float l_lane = base[lane * (dim + 2) + dim + 1];
+  float M = m_lane;
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) M = fmaxf(M, __shfl_xor_sync(0xffffffffu, M, o));
+  const float w_lane = (M != -INFINITY && m_lane != -INFINITY) ? std::exp(m_lane - M) : 0.0f;
   const int d0 = lane * 4;
   float l = 0.0f, acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   if (M != -INFINITY) {
     for (int s = 0; s < kBlockAttnSplits; ++s) {
-      const float* part = base + s * (dim + 2);
-      const float ms = part[dim];
+      const float ms = __shfl_sync(0xffffffffu, m_lane, s);
       if (ms == -INFINITY) continue;
-      const float w = std::exp(ms - M);
-      l += part[dim + 1] * w;
+      const float w = __shfl_sync(0xffffffffu, w_lane, s);
+      const float ls = __shfl_sync(0xffffffffu, l_lane, s);
+      const float* part = base + s * (dim + 2);
+      l += ls * w;
 #pragma unroll
       for (int j = 0; j < 4; ++j) acc[j] += part[d0 + j] * w;
     }

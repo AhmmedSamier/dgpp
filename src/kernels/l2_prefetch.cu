@@ -30,8 +30,12 @@ constexpr int kThreads = 256;
 // Light: 16 x 2 = 128 KB in flight — 187 GB/s cold, x1.01 on the chain.
 // (96 x 8 = 3 MB reached 215 GB/s and made every memory access on the box
 // wait ~12 us: the bus handshake went 9 -> 26 us.)
-constexpr int kFullBlocks = 16;
-constexpr int kFullUnroll = 8;
+// Both forms stay built: engine.l2_prefetch_full_form picks one per template
+// (the narrow form is the default; GLM-5.3 ships the wide one).
+constexpr int kNarrowBlocks = 16;
+constexpr int kNarrowUnroll = 8;
+constexpr int kWideBlocks = 48;
+constexpr int kWideUnroll = 4;
 constexpr int kLightUnroll = 2;
 constexpr int kLightBlocksDefault = 16;
 // DGPP_L2_PREFETCH_LIGHT_BLOCKS: the Light rate's grid (tuning knob).
@@ -81,6 +85,8 @@ __global__ __launch_bounds__(kThreads) void l2_prefetch_lines_kernel(
 }
 
 L2PrefetchSettings g_l2_settings;  // l2_prefetch_configure, before any model is built
+bool full_form_wide() { return g_l2_settings.full_form == L2FullForm::Wide48x4; }
+int full_blocks() { return full_form_wide() ? kWideBlocks : kNarrowBlocks; }
 bool env_prefetch_form_lines() { return g_l2_settings.form == L2PrefetchForm::Lines; }
 
 // The touch form (2026-09-29, the Qwen depth-3 profiles with the prefetch on
@@ -135,6 +141,11 @@ L2PrefetchForm l2_prefetch_form(const std::string& name) {
   if (name == "lines") return L2PrefetchForm::Lines;
   if (name == "touch") return L2PrefetchForm::Touch;
   throw std::invalid_argument("l2 prefetch form: load, lines or touch (got '" + name + "')");
+}
+L2FullForm l2_prefetch_full_form(const std::string& name) {
+  if (name == "16x8") return L2FullForm::Narrow16x8;
+  if (name == "48x4") return L2FullForm::Wide48x4;
+  throw std::invalid_argument("l2 prefetch full form: 16x8 or 48x4 (got '" + name + "')");
 }
 
 namespace {
@@ -209,14 +220,19 @@ void launch_l2_prefetch(const void* ptr, size_t bytes, PrefetchRate rate,
   const uint4* p = reinterpret_cast<const uint4*>(begin);
   const size_t vecs = (end_clamped - begin) / 16;
   if (persisting) {
-    if (rate == PrefetchRate::Full)
-      launch_persisting<kFullUnroll>(p, vecs, kFullBlocks, stream);
+    if (rate == PrefetchRate::Full && full_form_wide())
+      launch_persisting<kWideUnroll>(p, vecs, kWideBlocks, stream);
+    else if (rate == PrefetchRate::Full)
+      launch_persisting<kNarrowUnroll>(p, vecs, kNarrowBlocks, stream);
     else
       launch_persisting<kLightUnroll>(p, vecs, light_blocks(), stream);
     return;
   }
   if (rate == PrefetchRate::Full) {
-    l2_prefetch_kernel<kFullUnroll><<<kFullBlocks, kThreads, 0, stream>>>(p, vecs);
+    if (full_form_wide())
+      l2_prefetch_kernel<kWideUnroll><<<kWideBlocks, kThreads, 0, stream>>>(p, vecs);
+    else
+      l2_prefetch_kernel<kNarrowUnroll><<<kNarrowBlocks, kThreads, 0, stream>>>(p, vecs);
   } else if (env_prefetch_form_touch()) {
     const size_t sb = env_touch_stride_bytes();
     const size_t touches = (end_clamped - begin + sb - 1) / sb;
@@ -244,7 +260,7 @@ void launch_l2_release(const void* ptr, size_t bytes, cudaStream_t stream) {
   const uintptr_t begin = reinterpret_cast<uintptr_t>(ptr) & ~uintptr_t{127};
   const uintptr_t end = (reinterpret_cast<uintptr_t>(ptr) + bytes + 127) & ~uintptr_t{127};
   const size_t lines = (end - begin) / 128;
-  l2_release_kernel<<<kFullBlocks, kThreads, 0, stream>>>(reinterpret_cast<const uint8_t*>(begin), lines);
+  l2_release_kernel<<<full_blocks(), kThreads, 0, stream>>>(reinterpret_cast<const uint8_t*>(begin), lines);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

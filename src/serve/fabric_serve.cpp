@@ -436,6 +436,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
                      s.l2_prefetch_window_mib, s.l2_prefetch_boundary_window_mib);
   out += ",\"l2f\":";
   append_json_string(&out, s.l2_prefetch_form);
+  out += ",\"l2ff\":";
+  append_json_string(&out, s.l2_prefetch_full_form);
   out += ",\"l2b\":";
   append_json_string(&out, s.l2_prefetch_boundary_rate);
   out += ",\"l2l\":";
@@ -716,6 +718,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (const dgpp::minijson::Value* w = v.find("l2w")) s.l2_prefetch_window_mib = static_cast<int>(w->as_int());
     if (const dgpp::minijson::Value* w = v.find("l2bw")) s.l2_prefetch_boundary_window_mib = static_cast<int>(w->as_int());
     if (const dgpp::minijson::Value* f = v.find("l2f")) s.l2_prefetch_form = std::string(f->as_string());
+    if (const dgpp::minijson::Value* f = v.find("l2ff")) s.l2_prefetch_full_form = std::string(f->as_string());
     if (const dgpp::minijson::Value* r = v.find("l2b")) s.l2_prefetch_boundary_rate = std::string(r->as_string());
     if (const dgpp::minijson::Value* r = v.find("l2l")) s.l2_prefetch_layer_rate = std::string(r->as_string());
     // The expert GEMM's form and companions (2026-09-30): records before them carry the defaults.

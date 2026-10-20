@@ -119,7 +119,7 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
                "mtp_schedule_sampled_scale": 0.5, "mtp_draft_temperature": 0.7, "mtp_verify": "block",
                "prefill_dense": "streaming", "prefill_fold_overlap": false, "decode_pdl": false, "prefill_window": "scalar", "decode_window": "scalar", "collective_transport": "send",
                "dflash_batch_rows": 32, "dflash_weights": "fp8", "prefill_group": false,
-               "l2_prefetch": false, "l2_prefetch_form": "touch", "l2_prefetch_window_mib": 8,
+               "l2_prefetch": false, "l2_prefetch_form": "touch", "l2_prefetch_full_form": "48x4", "l2_prefetch_window_mib": 8,
                "l2_prefetch_boundary_window_mib": 0, "l2_prefetch_boundary_rate": "full",
                "l2_prefetch_layer_rate": "off", "l2_prefetch_merge": false},
     "paths": {"log_dir": "/var/log/dgpp"}
@@ -144,13 +144,15 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
               c.engine.collective_transport == "send" &&
               c.engine.mtp_draft_temperature == 0.7 && c.engine.mtp_verify == "block" &&
               c.engine.dflash_batch_rows == 32 && c.engine.dflash_weights == "fp8" && !c.engine.prefill_group &&
-              !c.engine.l2_prefetch && c.engine.l2_prefetch_form == "touch" && c.engine.l2_prefetch_window_mib == 8 &&
+              !c.engine.l2_prefetch && c.engine.l2_prefetch_form == "touch" && c.engine.l2_prefetch_full_form == "48x4" &&
+              c.engine.l2_prefetch_window_mib == 8 &&
               c.engine.l2_prefetch_boundary_window_mib == 0 && c.engine.l2_prefetch_boundary_rate == "full" &&
               c.engine.l2_prefetch_layer_rate == "off" && !c.engine.l2_prefetch_merge,
           "the given engine knobs");
   {
     const dgpp::serve::ClusterConfig d = dgpp::serve::parse_cluster_config(R"({"model":"m","nodes":["h"]})", "t");
-    require(d.engine.l2_prefetch && d.engine.l2_prefetch_form == "load" && d.engine.l2_prefetch_window_mib == 12 &&
+    require(d.engine.l2_prefetch && d.engine.l2_prefetch_form == "load" && d.engine.l2_prefetch_full_form == "16x8" &&
+            d.engine.l2_prefetch_window_mib == 12 &&
                 d.engine.l2_prefetch_boundary_window_mib == 20 && d.engine.l2_prefetch_boundary_rate == "light" &&
                 d.engine.l2_prefetch_layer_rate == "light" && d.engine.l2_prefetch_merge,
             "the L2 prefetcher's defaults");
@@ -478,6 +480,8 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
        "'engine.l2_prefetch_layer_rate' must be off, light or full"},
       {R"({"model":"m","nodes":["h"],"engine":{"l2_prefetch_form":"walk"}})",
        "'engine.l2_prefetch_form' must be load, lines or touch"},
+      {R"({"model":"m","nodes":["h"],"engine":{"l2_prefetch_full_form":"32x8"}})",
+       "'engine.l2_prefetch_full_form' must be 16x8 or 48x4"},
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_schedule_sampled_scale":1.5}})",
        "'engine.mtp_schedule_sampled_scale' must be in [0, 1]"},
       {R"({"model":"m","nodes":["h"],"engine":{"prefill_dense":"fast"}})",

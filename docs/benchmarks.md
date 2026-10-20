@@ -308,7 +308,7 @@ One template, measured as shipped on the bench port, yields every row the tables
 | Long context (decode at context, prefill per bucket) | 0 / 32K / 64K / 128K / 256K / 512K parcel documents: one cold request, two identical | `serve_context_matrix.py` |
 | Quality | the 300-item HumanEval / GSM8K / extraction set at the deployment's slot count | `serve_eval.py` |
 | Transcript checks | the API check; five classes × three greedy transcripts in the shipped mode and again in a second boot without the drafter (the plain/default match); prompt 0 alone against beside slots−1 others (the isolation check) | `serve_api_check.py`, `serve_load.py` |
-| Decode modes | a boot per extra mode (`--mode NAME="<knobs>"`): the C1 sweep | `timed_load.py` |
+| Decode modes | a boot per extra mode (`--mode NAME="<knobs>"`): the C1 sweep; the DSpark columns boot with `--mtp-depth N --no-mtp-schedule` (a fixed verify depth; a scheduled template refuses a fixed depth without the second flag) and the plain column with `--no-mtp` | `timed_load.py` |
 
 ### Validity
 

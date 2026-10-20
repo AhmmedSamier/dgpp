@@ -2816,6 +2816,7 @@ __global__ __launch_bounds__(dense::kThreads, (attn_flash_min_blocks<KV, SD, kLi
   publish(m_hi, m_hi_run, l_hi, 1);
 }
 
+constexpr int kCombineStagedSplits = 128;
 __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
                                     const float* c_ws, int n_split,
                                     int local_heads, int kv_lora,
@@ -2823,13 +2824,50 @@ __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
   dgpp_pdl_wait();
   // One block per (row, head): the old (row)-block form launched one block
   // for single-row decode — a single SM merging 64 heads x 512 dims.
+  // Every split's m and l are staged once per block, one thread per split
+  // (2026-10-20: every thread read every split's m for the maximum and its
+  // m and l again per element, and recomputed the exponentials; thread 0
+  // now forms the maximum, the weights p_s = exp(m_s - mhat) and the
+  // denominator from shared memory — the same arithmetic in the same
+  // order, so the outputs are bitwise; csa2's finish has the same form);
+  // the element loop reads its n_split c values and the staged weights.
+  __shared__ float s_m[kCombineStagedSplits];
+  __shared__ float s_l[kCombineStagedSplits];
+  __shared__ float s_p[kCombineStagedSplits];
+  __shared__ float s_mhat;
+  __shared__ float s_den;
   const int64_t r = blockIdx.x;
   const int h = blockIdx.y;
   const int64_t base_m = (r * n_split) * local_heads + h;
-  float mhat = -INFINITY;
-  for (int s = 0; s < n_split; ++s)
-    mhat = fmaxf(mhat, m_ws[base_m + int64_t(s) * local_heads]);
   const int64_t total = int64_t(local_heads) * kv_lora;
+  const bool staged = n_split <= kCombineStagedSplits;
+  float mhat = -INFINITY;
+  if (staged) {
+    for (int s = threadIdx.x; s < n_split; s += blockDim.x) {
+      s_m[s] = m_ws[base_m + int64_t(s) * local_heads];
+      s_l[s] = l_ws[base_m + int64_t(s) * local_heads];
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      float mx = -INFINITY;
+      for (int s = 0; s < n_split; ++s) mx = fmaxf(mx, s_m[s]);
+      float den = 0.0f;
+      if (mx != -INFINITY) {
+        for (int s = 0; s < n_split; ++s) {
+          const float p = expf(s_m[s] - mx);
+          s_p[s] = p;
+          den += p * s_l[s];
+        }
+      }
+      s_mhat = mx;
+      s_den = den;
+    }
+    __syncthreads();
+    mhat = s_mhat;
+  } else {
+    for (int s = 0; s < n_split; ++s)
+      mhat = fmaxf(mhat, m_ws[base_m + int64_t(s) * local_heads]);
+  }
   for (int64_t i = int64_t(h) * kv_lora + threadIdx.x;
        i < int64_t(h + 1) * kv_lora; i += blockDim.x) {
     if (mhat == -INFINITY) {
@@ -2838,11 +2876,16 @@ __global__ void attn_combine_kernel(const float* m_ws, const float* l_ws,
     }
     float num = 0.0f;
     float den = 0.0f;
-    for (int s = 0; s < n_split; ++s) {
-      const float p =
-          expf(m_ws[base_m + int64_t(s) * local_heads] - mhat);
-      num += p * c_ws[(r * n_split + s) * total + i];
-      den += p * l_ws[base_m + int64_t(s) * local_heads];
+    if (staged) {
+      for (int s = 0; s < n_split; ++s) num += s_p[s] * c_ws[(r * n_split + s) * total + i];
+      den = s_den;
+    } else {
+      for (int s = 0; s < n_split; ++s) {
+        const float p =
+            expf(m_ws[base_m + int64_t(s) * local_heads] - mhat);
+        num += p * c_ws[(r * n_split + s) * total + i];
+        den += p * l_ws[base_m + int64_t(s) * local_heads];
+      }
     }
     c_out[r * total + i] = (den > 0.0f) ? num / den : 0.0f;
   }

@@ -1561,7 +1561,8 @@ int main(int argc, char** argv) {
   bool dflash_verify_graph = true, dflash_draft_batch = true;
   bool prefill_group = true;  // engine.prefill_group: several cold prompts as one walk
   bool l2_prefetch = true, l2_prefetch_merge = true;  // engine.l2_prefetch*
-  std::string l2_prefetch_form = "load", l2_prefetch_boundary_rate = "light", l2_prefetch_layer_rate = "light";
+  std::string l2_prefetch_form = "load", l2_prefetch_full_form = "16x8", l2_prefetch_boundary_rate = "light",
+              l2_prefetch_layer_rate = "light";
   int l2_prefetch_window_mib = 12, l2_prefetch_boundary_window_mib = 20;
   int dflash_depth = 0;
   std::string dflash_weights = "checkpoint";  // engine.dflash_weights: checkpoint | fp8
@@ -1759,6 +1760,7 @@ int main(int argc, char** argv) {
     prefill_group = e.prefill_group;
     l2_prefetch = e.l2_prefetch;
     l2_prefetch_form = e.l2_prefetch_form;
+    l2_prefetch_full_form = e.l2_prefetch_full_form;
     l2_prefetch_window_mib = e.l2_prefetch_window_mib;
     l2_prefetch_boundary_window_mib = e.l2_prefetch_boundary_window_mib;
     l2_prefetch_boundary_rate = e.l2_prefetch_boundary_rate;
@@ -1898,6 +1900,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-prefill-group") prefill_group = false;
     else if (a == "--no-l2-prefetch") l2_prefetch = false;
     else if (a == "--l2-prefetch-form") l2_prefetch_form = next();
+    else if (a == "--l2-prefetch-full-form") l2_prefetch_full_form = next();
     else if (a == "--l2-prefetch-window-mib") l2_prefetch_window_mib = std::stoi(next());
     else if (a == "--l2-prefetch-boundary-window-mib") l2_prefetch_boundary_window_mib = std::stoi(next());
     else if (a == "--l2-prefetch-boundary-rate") l2_prefetch_boundary_rate = next();
@@ -1917,6 +1920,10 @@ int main(int argc, char** argv) {
     }
     else if (a == "--mtp-schedule") {
       mtp_schedule = true;
+      mtp_schedule_cli = true;
+    }
+    else if (a == "--no-mtp-schedule") {  // a fixed verify depth from a scheduled template (the campaign's mode knob)
+      mtp_schedule = false;
       mtp_schedule_cli = true;
     }
     else if (a == "--mtp-schedule-row-ms") mtp_schedule_row_ms = std::stod(next());
@@ -2181,6 +2188,7 @@ int main(int argc, char** argv) {
         ws.prefill_group = prefill_group;
         ws.l2_prefetch = l2_prefetch;
         ws.l2_prefetch_form = l2_prefetch_form;
+        ws.l2_prefetch_full_form = l2_prefetch_full_form;
         ws.l2_prefetch_window_mib = l2_prefetch_window_mib;
         ws.l2_prefetch_boundary_window_mib = l2_prefetch_boundary_window_mib;
         ws.l2_prefetch_boundary_rate = l2_prefetch_boundary_rate;
@@ -2289,6 +2297,7 @@ int main(int argc, char** argv) {
         prefill_group = ws.prefill_group;
         l2_prefetch = ws.l2_prefetch;
         l2_prefetch_form = ws.l2_prefetch_form;
+        l2_prefetch_full_form = ws.l2_prefetch_full_form;
         l2_prefetch_window_mib = ws.l2_prefetch_window_mib;
         l2_prefetch_boundary_window_mib = ws.l2_prefetch_boundary_window_mib;
         l2_prefetch_boundary_rate = ws.l2_prefetch_boundary_rate;
@@ -2493,6 +2502,7 @@ int main(int argc, char** argv) {
     l2.boundary_window_bytes = static_cast<size_t>(l2_prefetch_boundary_window_mib) << 20;
     try {
       l2.form = dgpp::l2_prefetch_form(l2_prefetch_form);
+      l2.full_form = dgpp::l2_prefetch_full_form(l2_prefetch_full_form);
       l2.boundary_rate = dgpp::l2_prefetch_rate(l2_prefetch_boundary_rate);
       l2.layer_rate = dgpp::l2_prefetch_rate(l2_prefetch_layer_rate);
       dgpp::l2_prefetch_configure(l2);
@@ -2878,11 +2888,8 @@ int main(int argc, char** argv) {
     if (std::string(family->name()) != "qwen4_exp" && mtp_expert_format != "fp8")
       DGPP_LOG_WARN("serve: --mtp-expert-format {} applies to the Qwen draft experts only; the {} family loads as shipped",
                     mtp_expert_format, family->name());
-    if (bf16_weights != "checkpoint" && std::string(family->name()) == "deepseek_v4")
-      DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride the "
-                    "tensor-core kernels): the bf16 bytes serve as shipped",
-                    bf16_weights, family->name());
-    if (bf16_weights != "checkpoint" && std::string(family->name()) == "deepseek_v41")
+    if (bf16_weights != "checkpoint" &&
+        (std::string(family->name()) == "deepseek_v4" || std::string(family->name()) == "deepseek_v41"))
       DGPP_LOG_INFO("serve: --bf16-weights {} on the {} family packs the lm head: the tensor-core decode form reads "
                     "its 12-bit companion (the bf16 bytes stay resident for the prefill forms); the other bf16 sites "
                     "serve as shipped",

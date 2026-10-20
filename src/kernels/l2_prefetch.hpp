@@ -72,10 +72,17 @@ void launch_l2_release(const void* ptr, size_t bytes, cudaStream_t stream);
 // slowed the small kernels it ran beside by as much as it saved on the
 // projection) and whether adjacent ranges merge into one launch.
 enum class L2PrefetchForm { Load, Lines, Touch };  // engine.l2_prefetch_form: load | lines | touch
+// The full-rate window's shape (engine.l2_prefetch_full_form): 16 blocks x 8
+// loads (512 KB in flight, the DRAM rate at the light form's SM footprint;
+// DeepSeek-V4.1's gap kernels run unstretched beside it) or 48 x 4 (768 KB
+// in flight on every SM; GLM-5.3's windows keep their share beside its
+// streaming kernels — 2026-10-20, +0.3-0.8 % a pass at the narrow form).
+enum class L2FullForm { Narrow16x8, Wide48x4 };
 struct L2PrefetchSettings {
   bool enabled = true;
   bool merge = true;
   L2PrefetchForm form = L2PrefetchForm::Load;
+  L2FullForm full_form = L2FullForm::Narrow16x8;
   size_t window_bytes = size_t{12} << 20;           // engine.l2_prefetch_window_mib
   size_t boundary_window_bytes = size_t{20} << 20;  // engine.l2_prefetch_boundary_window_mib (0: the window budget)
   PrefetchRate boundary_rate = PrefetchRate::Light;
@@ -87,6 +94,8 @@ const L2PrefetchSettings& l2_prefetch_settings();
 PrefetchRate l2_prefetch_rate(const std::string& name);
 // "load" | "lines" | "touch" (throws on anything else).
 L2PrefetchForm l2_prefetch_form(const std::string& name);
+// "16x8" | "48x4" (throws on anything else).
+L2FullForm l2_prefetch_full_form(const std::string& name);
 const char* l2_prefetch_rate_name(PrefetchRate rate);
 class WeightPrefetcher {
  public:

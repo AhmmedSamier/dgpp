@@ -5,6 +5,70 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The day's DeepSeek-V4.1 levers ported where they apply; the campaign's
+  C8 cell on a six-slot template read** (2026-10-20). Inventory of the
+  2026-10-20 commits: the lm head's bf12 tensor-core form lives in the GEMM
+  dispatch and every family packs its bf16 head already; the L2 window's
+  full form, the Markov bias and hidden-copy kernels and the bus
+  instrumentation are shared code — so those reach every family as
+  committed. Restricted to DeepSeek-V4.1 were the attention finish's staged
+  `l` (csa2's kernel, shared with DeepSeek-V4), the draft block's rows on
+  the listed flash form and the head companion. Ported, each bitwise the
+  kernel it replaces: the DSA decode combine (`attn_combine_kernel`;
+  GLM-5.3, GLM-5.3-Flash and Qwen's QSA layers) stages every split's `m`
+  and `l` one thread per split and thread 0 forms the maximum, the weights
+  and the denominator from shared memory (combine_bench, one block per
+  (row, head) at 128 threads: 10.24 → 8.20 µs at 32 splits, 6.15 level at
+  16, 4.23 → 4.10 at 8, rows 1–8); Qwen's full-attention combine
+  (`full_attn_combine_kernel`) stages the group's (head, split) `m` and
+  `l` and one thread per head forms the maximum, weights and denominator
+  (25.4 → 16.4 µs at a group of 8, 14.3 → 10.2 at 4, rows 1–16, 32
+  splits); the DFlash2 drafter's `block_attn_combine_kernel` holds split
+  `s` in lane `s`, the maximum by shuffle, each weight formed once and
+  broadcast in split order. DeepSeek-V4 gains the head's 12-bit companion
+  (`Bf12Companions`, the plan entry, the prefetch view through
+  `resident_view`; the loader grants no release, so the bf16 bytes stay for
+  the prefill forms) and its draft block's rows attend on the listed flash
+  form split like the decode rows; `dsv4_tp_test` gains
+  `dsv4_lm_head_bf12_companion_matches_the_bf16_head`, and the DSpark
+  exactness gates cover the draft block. Not ported: GLM-4.7's
+  `glm4_attn.cu` combine and MiMo's non-fused fallback combine (no
+  checkpoint on the box to measure the first; the second is not the served
+  path). Legs at C1 (code/prose/json ms per pass, three repeats, the
+  2026-10-19 binary `0d69d565` → the ported one): Qwen3.8-27B FP8 w4 with
+  DFlash2 46.55/45.88/46.66 → 45.31/44.67/45.48 (−2.7 %); Qwen3.8-Flash-Next
+  FP8 w4 23.23/22.97/23.19 → 22.91/22.82/22.96 (−1.4/−0.7/−1.0 %);
+  GLM-5.3-Flash NVFP4-FP8 w4 31.19/30.42/31.44 → 30.63/30.01/30.21
+  (−1.8/−1.3/−3.9 %); GLM-5.3 Mixed346 w4 62.29/61.13/61.78 → 62.47/61.30/61.99 and
+  62.78/61.20/61.97 on two boots of the narrow window form, 62.20/61.16/61.85
+  on the wide one. That last pair is the one shared change of the day that
+  did not pay everywhere: the full-rate window's 16 × 8 form (db097d49)
+  reaches every family's `WeightPrefetcher::open` (its default rate is
+  Full), and GLM-5.3's windows lose their bandwidth share beside its
+  streaming kernels at 512 KB in flight — the 48 × 4 form rebuilt for
+  attribution read 62.29/61.21/61.88, the 2026-10-19 figures. So the form
+  is a template key, `engine.l2_prefetch_full_form` (`16x8`, the default
+  that DeepSeek-V4.1, Qwen and GLM-5.3-Flash measured ahead on; `48x4`),
+  parsed, journaled (`l2ff`), on the CLI (`--l2-prefetch-full-form`), in
+  `docs/configuration.md` and `cluster_config_test`; the three GLM-5.3
+  templates ship `48x4`. DeepSeek-V4 could not be measured: the
+  DeepSeek-V4-Flash-0731 checkpoint is no longer in the box's cache (the
+  disk at 99 %), so its port stands on the gates and on the V4.1
+  measurement of the same kernels. `dgpp-serve --no-mtp-schedule` (a fixed
+  verify depth from a scheduled template) is the campaign's DSpark mode
+  knob (`--mode d3="--mtp-depth 3 --no-mtp-schedule"`; the server refuses
+  a fixed depth with the schedule on). The 1017 campaign's C8 code/json
+  cells read below the 2026-10-19 row's while every other cell rose: the
+  template serves six slots (the family's 32-row decode batch at depth 4),
+  so C8 is six live and two queued, 4.0 rows a step as at C4, and the
+  three-repeat json cell spans 123–157 ms/pass in either campaign; a
+  dedicated A/B (six repeats at C8, three at C6) has the day's binary
+  faster at every class — C8 json 152.5 → 138.4 ms/pass, code 127.4 →
+  119.0, math 123.5 → 104.7; C6 171.4 → 162.2, 125.2 → 117.0, 131.2 →
+  125.2 — and the head's tensor-core companion form ahead of the bf16 form
+  at m 12–32 (1120/1156/1274/1355 µs vs 1444/1442/1808/1460). The model
+  card carries both tables.
+
 - **The folds' arrival spread decomposed across ranks; the Engram staging
   joins per table** (2026-10-20). `DGPP_BUS_TIMELINE_DUMP=<dir>` (a node
   setting) makes every rank append its collectives' stamps (own clock:

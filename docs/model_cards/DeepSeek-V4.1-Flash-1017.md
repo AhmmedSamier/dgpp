@@ -183,6 +183,25 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## The six-slot template at C6 and C8 (2026-10-20)
+
+The template serves six slots: the family's decode batch is bounded at 32 rows and six slots at depth 4 are 30.
+The serving table's C8 cell is therefore six live requests and two queued — the eight run as a six-wide batch
+until the first completes, then the two that waited run alone — and the engine's rows per step average 4.0 at C8,
+as at C4. The cell's repeat spread is wide for the same reason (the tail's composition and the adaptive depth's
+choices): the 2026-10-19 campaign's three json repeats read 123, 132 and 157 ms/pass, the 2026-10-20 campaign's
+122, 144 and 153, so a three-repeat median moves by one draw. The two binaries A/B'd on the same template
+(256-token completions; six repeats at C8, three at C6; medians):
+
+| binary | C6 json | C6 code | C6 math | C8 json | C8 code | C8 math |
+|---|---|---|---|---|---|---|
+| 2026-10-19 (`0d69d565`) | 171.4 ms/pass, 144.5 tok/s | 125.2, 114.5 | 131.2, 119.5 | 152.5, 108.1 | 127.4, 89.5 | 123.5, 103.2 |
+| 2026-10-20 (`388111ef`) | 162.2, 154.6 | 117.0, 125.8 | 125.2, 132.9 | 138.4, 124.2 | 119.0, 95.7 | 104.7, 123.9 |
+
+C6 is the template's steady state and its peak, 126–155 tok/s; the day's binary is faster at every class at both
+concurrencies (C8 json −9 %, code −7 %, math −15 % per pass). The campaign's C8 cells that read lower than the
+2026-10-19 row's were one draw of that spread, not a slower pass.
+
 ## The folds' spread, decomposed (2026-10-20)
 
 With every rank dumping its collectives' stamps (`DGPP_BUS_TIMELINE_DUMP`)
@@ -267,6 +286,11 @@ that touch DRAM — the mHC stream update (×1.7), the fold's write kernel
 (×1.3–1.4), the router dots (×1.2–1.5) — stretch under the window's
 traffic. Light stays; the full rate is a lever for after the gap
 kernels stop touching DRAM.
+
+At the six-slot batch's row counts the tensor-core companion form stays ahead of the bf16 form it replaces
+(head_bench, n 32320 × k 5120, the median of 15 launches): m 12 1,120 µs vs 1,444; m 16 1,156 vs 1,442; m 24 1,274 vs
+1,808; m 32 1,355 vs 1,460 (the form's rate falls from 228 to 183 GB/s past 16 rows, the bf16 form's own 2-tile shape
+dips at 24). Above 32 rows the dispatch declines the companion and the bf16 form runs as before.
 
 ## The decode chain as two resources (2026-10-20)
 

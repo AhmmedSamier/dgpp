@@ -140,7 +140,8 @@ struct WorldSettings {
   bool prefill_group = true;  // engine.prefill_group (2026-10-05): every rank admits the same way
   // engine.l2_prefetch* (2026-10-05): every rank prefetches the same way (the step's timing).
   bool l2_prefetch = true, l2_prefetch_merge = true;
-  std::string l2_prefetch_form = "load", l2_prefetch_boundary_rate = "light", l2_prefetch_layer_rate = "light";
+  std::string l2_prefetch_form = "load", l2_prefetch_full_form = "16x8", l2_prefetch_boundary_rate = "light",
+              l2_prefetch_layer_rate = "light";
   int l2_prefetch_window_mib = 12, l2_prefetch_boundary_window_mib = 20;
   bool dflash_draft_batch = true;
   int dflash_depth = 0;
