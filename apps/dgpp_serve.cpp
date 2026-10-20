@@ -253,6 +253,7 @@ struct ServeGraphEngine {
   virtual void set_proposal_temperature_scale(float scale) = 0;
   // engine.mtp_verify: block verification (true) or the token rule, before the warm capture.
   virtual void set_block_verify(bool on) = 0;
+  virtual void set_decode_pdl(bool on) = 0;
   // engine.dflash_batch_rows: the block drafter's batched verify rows budget, before the warm capture.
   virtual void configure_block_rows_budget(int budget) = 0;
   // engine.mtp_schedule_sampled_scale, before the warm capture.
@@ -278,6 +279,7 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   void set_proposal_drafts(bool on) override { eng.set_proposal_drafts(on); }
   void set_proposal_temperature_scale(float scale) override { eng.set_proposal_temperature_scale(scale); }
   void set_block_verify(bool on) override { eng.set_block_verify(on); }
+  void set_decode_pdl(bool on) override { eng.set_decode_pdl(on); }
   void configure_block_rows_budget(int budget) override { eng.configure_block_rows_budget(budget); }
   void set_sampled_schedule_scale(float scale) override { eng.set_sampled_schedule_scale(scale); }
   void set_lookup_drafts(bool on, int nmin, int nstrong, int agree) override {
@@ -735,6 +737,14 @@ struct Dsv41Family final : ServeFamily {
   int decode_rows_cap() const override { return dgpp::Dsv41Model::decode_rows_cap(); }
   int default_mtp_depth() const override { return cfg.dspark_block_size; }
   int draft_block_rows() const override { return cfg.dspark_block_size; }
+  // Measured 2026-10-19 (four nodes, temperature 1, C1, 256 tokens x 3 per
+  // class): the block's argmax under the token rule 2.87 / 1.77 / 4.25
+  // tokens per pass (code / prose / JSON) against a draw from it 3.19 /
+  // 2.11 / 4.18 — but a sampled-draft slot verifies the whole block every
+  // pass (the depth schedule is for greedy slots), so the draw's passes
+  // cost 53 ms against 46 / 40 / 51: 60.1 / 39.2 / 78.4 tok/s against
+  // 62.2 / 45.4 / 84.1, and 69.5 / 49.9 / 84.8 with mtp_verify block.
+  bool greedy_draft_default() const override { return true; }
   // The widest fold the decode graph records: the Engram kv partial
   // [rows, (hc + 1) x hidden] on layers 1 and 14.
   size_t lat_slot_bytes(int decode_rows) const override {
@@ -1551,7 +1561,8 @@ int main(int argc, char** argv) {
   bool dflash_verify_graph = true, dflash_draft_batch = true;
   bool prefill_group = true;  // engine.prefill_group: several cold prompts as one walk
   bool l2_prefetch = true, l2_prefetch_merge = true;  // engine.l2_prefetch*
-  std::string l2_prefetch_form = "load", l2_prefetch_boundary_rate = "light", l2_prefetch_layer_rate = "light";
+  std::string l2_prefetch_form = "load", l2_prefetch_full_form = "16x8", l2_prefetch_boundary_rate = "light",
+              l2_prefetch_layer_rate = "light";
   int l2_prefetch_window_mib = 12, l2_prefetch_boundary_window_mib = 20;
   int dflash_depth = 0;
   std::string dflash_weights = "checkpoint";  // engine.dflash_weights: checkpoint | fp8
@@ -1572,7 +1583,7 @@ int main(int argc, char** argv) {
   std::string draft_head = "exact";         // the MTP draft head's read: exact | screen (engine.draft_head)
   int draft_head_blocks = 32;               // the screen's candidate cap (engine.draft_head_blocks)
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
-  std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused
+  std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused | bf16 (qwen3_5 MoE)
   std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string draft_vocab;                  // the Qwen draft head's vocabulary slice (engine.draft_vocab)
   bool prefill_bf16_partials = false;       // the opt-in prefill levers (engine.prefill_*; 2026-09-30)
@@ -1588,6 +1599,12 @@ int main(int argc, char** argv) {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;               // engine.ngram_prestage (Qwen)
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
+  std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+  bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
+  bool decode_pdl = true;              // the decode graph's kernel edges programmatic (engine/graph_pdl.hpp)
+  std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
+  std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
+  std::string collective_transport = "write";  // the latency collectives' transport: write | send
   // The opt-in YaRN rope ramp (engine.rope_scaling): absent = the plain
   // table, the default and the behaviour every earlier build had.
   std::optional<dgpp::RopeScaling> rope_scaling;
@@ -1717,6 +1734,12 @@ int main(int argc, char** argv) {
     expert_gemm_pair = e.expert_gemm_pair;
     ngram_prestage = e.ngram_prestage;
     prefill = e.prefill;
+    prefill_dense = e.prefill_dense;
+    prefill_fold_overlap = e.prefill_fold_overlap;
+    decode_pdl = e.decode_pdl;
+    prefill_window = e.prefill_window;
+    decode_window = e.decode_window;
+    collective_transport = e.collective_transport;
     rope_scaling = e.rope_scaling;
     embed_sharding = e.embed_sharding;
     mtp_head = e.mtp_head;
@@ -1737,6 +1760,7 @@ int main(int argc, char** argv) {
     prefill_group = e.prefill_group;
     l2_prefetch = e.l2_prefetch;
     l2_prefetch_form = e.l2_prefetch_form;
+    l2_prefetch_full_form = e.l2_prefetch_full_form;
     l2_prefetch_window_mib = e.l2_prefetch_window_mib;
     l2_prefetch_boundary_window_mib = e.l2_prefetch_boundary_window_mib;
     l2_prefetch_boundary_rate = e.l2_prefetch_boundary_rate;
@@ -1876,6 +1900,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-prefill-group") prefill_group = false;
     else if (a == "--no-l2-prefetch") l2_prefetch = false;
     else if (a == "--l2-prefetch-form") l2_prefetch_form = next();
+    else if (a == "--l2-prefetch-full-form") l2_prefetch_full_form = next();
     else if (a == "--l2-prefetch-window-mib") l2_prefetch_window_mib = std::stoi(next());
     else if (a == "--l2-prefetch-boundary-window-mib") l2_prefetch_boundary_window_mib = std::stoi(next());
     else if (a == "--l2-prefetch-boundary-rate") l2_prefetch_boundary_rate = next();
@@ -1895,6 +1920,10 @@ int main(int argc, char** argv) {
     }
     else if (a == "--mtp-schedule") {
       mtp_schedule = true;
+      mtp_schedule_cli = true;
+    }
+    else if (a == "--no-mtp-schedule") {  // a fixed verify depth from a scheduled template (the campaign's mode knob)
+      mtp_schedule = false;
       mtp_schedule_cli = true;
     }
     else if (a == "--mtp-schedule-row-ms") mtp_schedule_row_ms = std::stod(next());
@@ -2081,7 +2110,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} pfw={} dcw={} ctr={} pdl={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -2093,7 +2122,8 @@ int main(int argc, char** argv) {
         kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
         draft_head,
         draft_head_blocks, mtp_head,
-        attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, embed_sharding,
+        attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, prefill_dense,
+        prefill_fold_overlap ? 1 : 0, prefill_window, decode_window, collective_transport, decode_pdl ? 1 : 0, embed_sharding,
         default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
@@ -2158,6 +2188,7 @@ int main(int argc, char** argv) {
         ws.prefill_group = prefill_group;
         ws.l2_prefetch = l2_prefetch;
         ws.l2_prefetch_form = l2_prefetch_form;
+        ws.l2_prefetch_full_form = l2_prefetch_full_form;
         ws.l2_prefetch_window_mib = l2_prefetch_window_mib;
         ws.l2_prefetch_boundary_window_mib = l2_prefetch_boundary_window_mib;
         ws.l2_prefetch_boundary_rate = l2_prefetch_boundary_rate;
@@ -2172,6 +2203,12 @@ int main(int argc, char** argv) {
         ws.expert_gemm_pair = expert_gemm_pair;
         ws.ngram_prestage = ngram_prestage;
         ws.prefill = prefill;
+        ws.prefill_dense = prefill_dense;
+        ws.prefill_fold_overlap = prefill_fold_overlap;
+        ws.decode_pdl = decode_pdl;
+        ws.prefill_window = prefill_window;
+        ws.decode_window = decode_window;
+        ws.collective_transport = collective_transport;
         ws.rope_scaling = rope_scaling;
         ws.embed_sharding = embed_sharding;
         ws.mtp_head = mtp_head;
@@ -2260,6 +2297,7 @@ int main(int argc, char** argv) {
         prefill_group = ws.prefill_group;
         l2_prefetch = ws.l2_prefetch;
         l2_prefetch_form = ws.l2_prefetch_form;
+        l2_prefetch_full_form = ws.l2_prefetch_full_form;
         l2_prefetch_window_mib = ws.l2_prefetch_window_mib;
         l2_prefetch_boundary_window_mib = ws.l2_prefetch_boundary_window_mib;
         l2_prefetch_boundary_rate = ws.l2_prefetch_boundary_rate;
@@ -2274,6 +2312,12 @@ int main(int argc, char** argv) {
         expert_gemm_pair = ws.expert_gemm_pair;
         ngram_prestage = ws.ngram_prestage;
         prefill = ws.prefill;
+        prefill_dense = ws.prefill_dense;
+        prefill_fold_overlap = ws.prefill_fold_overlap;
+        decode_pdl = ws.decode_pdl;
+        prefill_window = ws.prefill_window;
+        decode_window = ws.decode_window;
+        collective_transport = ws.collective_transport;
         rope_scaling = ws.rope_scaling;
         embed_sharding = ws.embed_sharding;
         mtp_head = ws.mtp_head;
@@ -2437,6 +2481,10 @@ int main(int argc, char** argv) {
   }
   // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
   dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
+  dgpp::Dsv41Model::set_default_prefill_dense_tile(prefill_dense == "tile");
+  dgpp::Dsv41Model::set_default_prefill_fold_overlap(prefill_fold_overlap);
+  dgpp::Dsv41Model::set_default_prefill_window_flash(prefill_window == "flash");
+  dgpp::Dsv41Model::set_default_decode_window_flash(decode_window == "flash");
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
   {
     // The L2 weight prefetcher's settings, before any model builds its prefetcher.
@@ -2454,6 +2502,7 @@ int main(int argc, char** argv) {
     l2.boundary_window_bytes = static_cast<size_t>(l2_prefetch_boundary_window_mib) << 20;
     try {
       l2.form = dgpp::l2_prefetch_form(l2_prefetch_form);
+      l2.full_form = dgpp::l2_prefetch_full_form(l2_prefetch_full_form);
       l2.boundary_rate = dgpp::l2_prefetch_rate(l2_prefetch_boundary_rate);
       l2.layer_rate = dgpp::l2_prefetch_rate(l2_prefetch_layer_rate);
       dgpp::l2_prefetch_configure(l2);
@@ -2507,6 +2556,7 @@ int main(int argc, char** argv) {
   if (prefill_fp8_per_tensor)
     DGPP_LOG_INFO("serve: engine.prefill_fp8_per_tensor on — prefill GEMMs on per-tensor e4m3 (not transcript-preserving)");
   dgpp::QwenLayerStream::set_ngram_prestage(ngram_prestage);
+  dgpp::Dsv41EngramLayer::set_prestage(ngram_prestage);  // the DeepSeek-V4.1 Engram tables' chunk-ahead staging
   if (expert_gemm != "wide" || expert_gemm_prefetch != 3 || !expert_tile_list || expert_gemm_pair || !ngram_prestage)
     DGPP_LOG_INFO("expert GEMM settings: form={} prefetch={} tile_list={} pair={} ngram_prestage={}", expert_gemm,
                   expert_gemm_prefetch, expert_tile_list ? 1 : 0, expert_gemm_pair ? 1 : 0, ngram_prestage ? 1 : 0);
@@ -2520,13 +2570,18 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  if (mtp_expert_format != "fp8" && mtp_expert_format != "bf16_fused") {
-    DGPP_LOG_ERROR("--mtp-expert-format must be fp8 or bf16_fused, got '{}'", mtp_expert_format);
+  if (mtp_expert_format != "fp8" && mtp_expert_format != "bf16_fused" &&
+      mtp_expert_format != "bf16") {
+    DGPP_LOG_ERROR("--mtp-expert-format must be fp8, bf16_fused or bf16 (qwen3_5 MoE draft), got '{}'",
+                   mtp_expert_format);
     return 2;
   }
   // The RadixArk fusion flag: set before the plan and the load (both read it
   // through QwenLayerStream::mtp_experts_bf16_fused and loader_format()).
+  // The qwen3_5 MoE draft flag rides beside it (per-expert BF16 encoded to
+  // block FP8 at load when "bf16").
   dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
+  dgpp::Qwen35LayerStream::set_mtp_expert_format(mtp_expert_format);
   // The draft head's screen (engine.draft_head; kernels/draft_head.hpp): a
   // process-wide setting every family reads at construction (its memory
   // plan too) — the decode drafts' head reads through the 2-bit copy.
@@ -2835,13 +2890,15 @@ int main(int argc, char** argv) {
         dense_weights != "checkpoint")
       DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
                     dense_weights, family->name());
-    if (std::string(family->name()) != "qwen4_exp" && mtp_expert_format != "fp8")
+    if (std::string(family->name()) != "qwen4_exp" &&
+        std::string(family->name()) != "qwen3_5" && mtp_expert_format != "fp8")
       DGPP_LOG_WARN("serve: --mtp-expert-format {} applies to the Qwen draft experts only; the {} family loads as shipped",
                     mtp_expert_format, family->name());
     if (bf16_weights != "checkpoint" &&
-        (std::string(family->name()) == "deepseek_v41" || std::string(family->name()) == "deepseek_v4"))
-      DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride the "
-                    "tensor-core kernels): the bf16 bytes serve as shipped",
+        (std::string(family->name()) == "deepseek_v4" || std::string(family->name()) == "deepseek_v41"))
+      DGPP_LOG_INFO("serve: --bf16-weights {} on the {} family packs the lm head: the tensor-core decode form reads "
+                    "its 12-bit companion (the bf16 bytes stay resident for the prefill forms); the other bf16 sites "
+                    "serve as shipped",
                     bf16_weights, family->name());
     if (bf16_weights == "bf12" && std::string(family->name()) == "qwen3_5")
       DGPP_LOG_INFO("serve: --bf16-weights bf12 on the {} family packs the drafter's layers and fc taps, the MTP fc "
@@ -3090,6 +3147,9 @@ int main(int argc, char** argv) {
             rank, world, fabric_port, peer, rendezvous_timeout_ms, family->lat_slot_bytes(decode_rows));
         if (bulk_pace_gbps >= 0) bus_options.bulk_pace_gbps = bulk_pace_gbps;
         if (bulk_inflight >= 0) bus_options.bulk_inflight_per_lane = bulk_inflight;
+        bus_options.latency_transport = collective_transport == "write"
+                                            ? dgpp::net::BusLatencyTransport::kWrite
+                                            : dgpp::net::BusLatencyTransport::kSend;
         bus = std::make_unique<dgpp::net::CollectiveBus>(bus_options);
         std::string err;
         if (!bus->start(&err))
@@ -3208,6 +3268,7 @@ int main(int argc, char** argv) {
                         graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "");
           graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           graph_engine->set_block_verify(mtp_verify == "block");
+          graph_engine->set_decode_pdl(decode_pdl);
           graph_engine->set_prefill_group(prefill_group);
           graph_engine->set_lookup_drafts(lookup_draft, lookup_nmin, lookup_nstrong, lookup_agree);
           if (lookup_draft)

@@ -262,6 +262,12 @@ void test_settings_handshake() {
   sent.mtp_schedule_row_ms = 3.7;
   sent.mtp_schedule_base_ms = 24.3;
   sent.mtp_schedule_sampled_scale = 0.9;
+  sent.prefill_dense = "streaming";
+  sent.prefill_fold_overlap = false;
+  sent.decode_pdl = false;
+  sent.prefill_window = "scalar";
+  sent.decode_window = "scalar";
+  sent.collective_transport = "send";
   sent.lookup_draft = true;
   sent.lookup_nmin = 3;
   sent.lookup_nstrong = 5;
@@ -297,6 +303,12 @@ void test_settings_handshake() {
     require(got.mtp_draft == "greedy", "the sampled requests' draft rule travels with the settings");
     require(got.mtp_schedule && got.mtp_schedule_sampled_scale == 0.9,
             "the sampled requests' schedule scale travels with the settings");
+    require(got.prefill_dense == "streaming", "the prefill dense form travels with the settings");
+    require(!got.prefill_fold_overlap, "the prefill fold overlap flag travels with the settings");
+    require(!got.decode_pdl, "the decode pdl flag travels with the settings");
+    require(got.prefill_window == "scalar", "the prefill window kernel travels with the settings");
+    require(got.decode_window == "scalar", "the decode window kernel travels with the settings");
+    require(got.collective_transport == "send", "the collective transport travels with the settings");
     require(got.lookup_draft && got.lookup_nmin == 3 && got.lookup_nstrong == 5 && got.lookup_agree == 1,
             "the lookup thresholds travel with the settings");
     require(got.lookup_tail == 2, "the lookup tail travels with the settings");

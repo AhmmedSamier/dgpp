@@ -1,4 +1,5 @@
 #include "kernels/qwen_moe.hpp"
+#include "kernels/pdl.cuh"
 
 #include <stdexcept>
 #include <type_traits>
@@ -76,6 +77,7 @@ __global__ void shared_gate_up_swiglu_kernel(const uint16_t* __restrict__ x, siz
                                              const uint16_t* __restrict__ g,
                                              uint16_t* __restrict__ act, float* __restrict__ sw,
                                              int tokens, int S, int H, int row_blocks, int rs, int cs) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sx[];
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   if (static_cast<int>(blockIdx.x) == row_blocks) {
@@ -140,6 +142,7 @@ __global__ void shared_down_accum_round_kernel(const uint16_t* __restrict__ act,
                                                const float* __restrict__ sw,
                                                SharedAcc src,
                                                uint16_t* __restrict__ out, int H, int S, int rs, int cs) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sx[];
   // The folded accumulation's inputs for this block's kWarps rows: the
   // slot contributions [kRows][K][kWarps] staged with the loads coalesced
@@ -295,6 +298,7 @@ void tail_rows(const uint16_t* x, size_t x_stride, const void* gate_w, const flo
 __global__ void shared_gate_kernel(const uint16_t* __restrict__ x,
                                    const uint16_t* __restrict__ g,
                                    float* __restrict__ w, int tokens, int hidden) {
+  dgpp_pdl_wait();
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int t = blockIdx.x * kGateWarps + warp;
   if (t >= tokens) return;

@@ -4,6 +4,7 @@
 // K/V codes are copied to shared memory verbatim. The online softmax and
 // accumulators stay fp32. See docs/qwen_fp8_kv_plan.md for the recipe.
 #include "kernels/qsa.hpp"
+#include "kernels/pdl.cuh"
 
 #include <algorithm>
 #include <cmath>
@@ -64,6 +65,7 @@ __global__ __launch_bounds__(32) void attention(
     const int32_t* __restrict__ counts, int heads, int kv_heads, int block_tokens,
     const int32_t* __restrict__ tables, int blocks_per_request, float scale, int splits,
     float* __restrict__ mw, float* __restrict__ lw, float* __restrict__ cw, float* __restrict__ out) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint8_t sm[];
   uint8_t* kt = sm;
   uint8_t* vt = sm + kPlaneBytes;

@@ -78,6 +78,9 @@ planner adds a separate 4 GiB headroom allowance to these totals.
 | [cluster_qwen3.8-27b_nvfp4_w1_yarn768k.example.json](cluster_qwen3.8-27b_nvfp4_w1_yarn768k.example.json) | the same ramp at factor ×3 (ceiling 786 432, a 1 048 576-token pool that seats one full-length stream beside a 262K one, a 20 GiB prefix arena, 101.6 GiB planned; 827 392 tokens and 1.5 GiB until 2026-10-17). Release-checked on one Spark on 2026-10-15: the needle at depth 0.5 of a 783 780-token prompt found, the 4K control found, cold prefill 3 282 s (54.7 min, 4.2 ms/token on average: the full-attention cost grows with context, 1.0 ms/token at 8K to 7 at 780K) | the validated 512K template: [cluster_qwen3.8-27b_nvfp4_w1_yarn512k.example.json](cluster_qwen3.8-27b_nvfp4_w1_yarn512k.example.json) |
 | [cluster_qwen3.8-27b_nvfp4_w2.example.json](cluster_qwen3.8-27b_nvfp4_w2.example.json) | the same on two nodes: a 2 097 152-token pool (one full context per slot) under full admission, a 32 GiB prefix arena (105.2 GiB planned a rank) | ditto |
 | [cluster_qwen3.8-27b_nvfp4_w4.example.json](cluster_qwen3.8-27b_nvfp4_w4.example.json) | the same on four nodes: a 2 097 152-token pool under full admission, a 32 GiB prefix arena (73.9 GiB planned a rank) | ditto |
+| [cluster_qwen3.5-122b-a10b_nvfp4_w1.example.json](cluster_qwen3.5-122b-a10b_nvfp4_w1.example.json) | Qwen3.5-122B-A10B-NVFP4 on one node: routed NVFP4 experts, BF16 attention and shared experts, BF16 KV, eight request slots, MTP depth 2 with `mtp_expert_format: "bf16"`. Performance validation of the shipped template is pending. | plain decode: `--no-mtp`; depth 1: `--mtp-depth 1`; depth 3: `--mtp-depth 3` |
+| [cluster_qwen3.5-122b-a10b_nvfp4_w2.example.json](cluster_qwen3.5-122b-a10b_nvfp4_w2.example.json) | the same on two nodes | ditto |
+| [cluster_qwen3.5-122b-a10b_nvfp4_w4.example.json](cluster_qwen3.5-122b-a10b_nvfp4_w4.example.json) | the same on four nodes | ditto |
 | [cluster_glm-5.3_nf4i8_w4.example.json](cluster_glm-5.3_nf4i8_w4.example.json) | the full GLM-5.3 in the NF4I8 GPTQ H32 g128 checkpoint (`HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128`: sixteen-level codebook routed experts, int8 attention and shared expert) on four nodes: MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded, the BF16 decode weights in their 12-bit form (93.7 GiB of weights per rank) | T=1: `--no-mtp`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |
 | [cluster_glm-5.3_mixed346_w4.example.json](cluster_glm-5.3_mixed346_w4.example.json) | the full GLM-5.3 in the Mixed346 GPTQ H32 A8 g128 checkpoint (`HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128`: 3/4/6-bit codebook routed experts with int8 activation codes, 116 int4 fallback experts, int8 attention and shared expert) on four nodes: MTP depth 1, eight request slots, 272K fp8 context, the embedding vocab-sharded, the BF16 decode weights in their 12-bit form (92.1 GiB of weights per rank; 62.7 ms a pass at one request on 2026-10-10) | T=1: `--no-mtp`; depth 2 at two slots: `--mtp-depth 2 --max-concurrency 2` |
 | [cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json](cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) | MiMo-V2.6-Flash as shipped on four nodes: MTP depth 1 (the first of the release's three draft layers), the BF16 o_proj / head / eh_proj resident in their 12-bit form alone (`"bf12"`), 128K context (every layer's K/V paged, the sliding-window layers read theirs through the window), four request slots; text prompts only (the vision and audio encoders are not served) | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` |
@@ -107,7 +110,12 @@ fixed depth 2 and 99–105 under the schedule against 107–112 at depth 1
 (NVFP4/FP8, four nodes) — so its templates keep depth 1; an interactive
 Flash deployment sets `engine.mtp_depth: 2`, `engine.mtp_schedule: true`,
 `engine.mtp_schedule_min_depth: 1`, `engine.mtp_schedule_row_ms: 7` and
-`engine.mtp_schedule_base_ms: 17`.
+`engine.mtp_schedule_base_ms: 17`. The DeepSeek-V4.1-Flash-1017 template
+carries the schedule's measured cost model, `engine.mtp_schedule_row_ms:
+5.2` and `engine.mtp_schedule_base_ms: 31.1` (fixed-depth sweeps on four
+nodes, 2026-10-18: every class on 31.1 ms + 5.17 ms per verify row, the
+draft itself 5.1 ms); set them from a depth sweep of the deployment, as
+the keys' documentation says, rather than from the defaults.
 
 The Qwen3.8-Flash-Next, GLM-5.3-Flash, full GLM-5.3 and Qwen3.8-27B
 templates set `engine.draft_head: "screen"` (2026-10-13; the AutoRound
