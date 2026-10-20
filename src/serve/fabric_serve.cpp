@@ -211,13 +211,14 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out.push_back(']');
       }
       // The sampling spec rides for stochastic requests and for greedy ones
-      // that ask for logprobs; a plain greedy request's record is
+      // that ask for logprobs or carry penalties; a plain greedy request's record is
       // byte-identical to the pre-sampling format.
       if (r.logprobs >= 0) {
         out += ",\"lp\":";
         append_json_int(&out, r.logprobs);
       }
-      if (r.sampling.temperature > 0.0f || r.logprobs >= 0) {
+      if (r.sampling.temperature > 0.0f || r.logprobs >= 0 ||
+          sample::needs_context_penalties(r.sampling)) {
         const sample::Params& g = r.sampling;
         out += ",\"g\":{\"t\":";
         append_json_int(&out, float_bits(g.temperature));
@@ -1044,7 +1045,7 @@ JournalRecord decode_journal_line(std::string_view line) {
                                    "' carries an invalid sampling spec: " +
                                    e.what());
         }
-        if (!(p.temperature > 0.0f) && r.logprobs < 0)
+        if (!(p.temperature > 0.0f) && r.logprobs < 0 && !sample::needs_context_penalties(p))
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' carries a greedy sampling spec");
         if (r.logprobs >= 0 && p.logprobs != r.logprobs)

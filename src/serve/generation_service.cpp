@@ -428,6 +428,10 @@ std::string model_object(const ServiceConfig& scfg, const std::string& model_id,
   append_json_float(&out, d.min_p);
   out.append(",\"repetition_penalty\":");
   append_json_float(&out, d.repetition_penalty);
+  out.append(",\"frequency_penalty\":");
+  append_json_float(&out, d.frequency_penalty);
+  out.append(",\"presence_penalty\":");
+  append_json_float(&out, d.presence_penalty);
   out.append("}},\"tools\":{\"available\":");
   out.append(tools_available ? "true" : "false");
   out.append(",\"constrained\":");
@@ -608,14 +612,14 @@ GenerationService::GenerationService(const ServiceConfig& cfg,
                            static_cast<uint64_t>(std::random_device{}()));
   DGPP_LOG_INFO(
       "serve: sampling {} — defaults temperature {} top_p {} top_k {} min_p "
-      "{} repetition_penalty {}; seedless requests {}",
+      "{} repetition_penalty {} frequency_penalty {} presence_penalty {}; seedless requests {}",
       sampling_available_ ? "available" : "unavailable (greedy engine)",
       cfg_.sampling_defaults.temperature, cfg_.sampling_defaults.top_p,
       cfg_.sampling_defaults.top_k, cfg_.sampling_defaults.min_p,
-      cfg_.sampling_defaults.repetition_penalty,
-      cfg_.fixed_seed.has_value()
-          ? "use the fixed seed " + std::to_string(*cfg_.fixed_seed)
-          : std::string("draw a fresh seed each"));
+      cfg_.sampling_defaults.repetition_penalty, cfg_.sampling_defaults.frequency_penalty,
+      cfg_.sampling_defaults.presence_penalty,
+      cfg_.fixed_seed.has_value() ? "use the fixed seed " + std::to_string(*cfg_.fixed_seed)
+                                  : std::string("draw a fresh seed each"));
   DGPP_LOG_INFO(
       "serve: tool calls {}; tool_choice/parallel_tool_calls {}; reasoning {}",
       markers_.tool_calls_available()

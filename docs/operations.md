@@ -7,49 +7,43 @@ Other model templates use the same launcher with their own memory and
 engine settings. See the [configuration reference](configuration.md) for
 settings, defaults and their effects.
 
-## Host penalty preparation
+## Sampling penalty defaults
 
-The default build retains context counting and penalty arithmetic in the host
-sampler. To omit that preparation when repetition is 1 and frequency/presence
-are positive zero, rebuild with the optional CMake setting:
+Set `engine.repetition_penalty`, `engine.frequency_penalty` and
+`engine.presence_penalty` in deployment JSON to change the defaults for
+requests. For example:
 
-```sh
-cmake --preset release -DDGPP_HOST_NEUTRAL_PENALTY_SKIP=ON
-cmake --build --preset release -j 4
+```json
+"engine": {
+  "repetition_penalty": 1.1,
+  "frequency_penalty": 0.2,
+  "presence_penalty": 0
+}
 ```
 
-The option defaults to OFF. Reconfigure with `-DDGPP_HOST_NEUTRAL_PENALTY_SKIP=OFF`
-and rebuild to restore the original path; CMake retains an explicitly enabled
-value in its build-directory cache. Use the same build on every rank.
+Process flags override deployment defaults; request fields override those
+served values. Requests that omit a field or set it to null inherit its
+default. Check `/v1/models` for the effective values. Every rank receives
+the effective request parameters, including greedy requests without logprobs.
 
-This affects the full host sampler, eager greedy reporting and bus sampling
-fold. It guards before constructing context counts; logits copies, bias,
-grammar/EOS masks, selection, reports and RNG handling remain in place. Active
-penalties and negative-zero additive settings take the original path. The
-reference samplers and ordinary graph replay are unchanged; replay already
-avoids neutral penalty work. No end-to-end serving gain is established.
+The host sampler automatically skips neutral penalty preparation after
+these overrides are resolved. Requests with active penalties keep the
+original calculation. See [sampling configuration](configuration.md) for
+ranges and the numerical contract. This reduces work in affected host
+sampling calls; it establishes no end-to-end serving throughput gain.
 
-The enabled shortcut's bit-equality contract is limited to non-NaN logits,
-round-to-nearest and gradual underflow (flush-to-zero and denormals-are-zero
-disabled). NaN handling, other rounding/underflow modes and floating-point
-exception flags or traps can differ because the arithmetic is omitted. The
-option does not check or change the floating-point environment. Leave it OFF
-when these conditions cannot be guaranteed, and validate the intended model
-and execution paths before enabling it in a deployment.
-
-`host_penalties_bench` reports median preparation and complete host-sampler
-times for deterministic synthetic logits/context, with active penalties as a
-control. Build that target with `DGPP_BUILD_BENCHMARKS=ON`, compare OFF and ON
-on the same idle host, and keep these measurements separate from serving rates:
+The synthetic host microbenchmark compares automatic preparation with the
+original count-and-apply reference in one executable, for both neutral and
+active parameters. It also measures the full stochastic host sampler:
 
 ```sh
-cmake --preset release -DDGPP_BUILD_BENCHMARKS=ON -DDGPP_HOST_NEUTRAL_PENALTY_SKIP=OFF
-cmake --build build-release --target host_penalties_bench -j 4
-build-release/host_penalties_bench
-cmake --preset release -DDGPP_BUILD_BENCHMARKS=ON -DDGPP_HOST_NEUTRAL_PENALTY_SKIP=ON
-cmake --build build-release --target host_penalties_bench -j 4
-build-release/host_penalties_bench
+cmake --preset ci
+cmake --build build-ci --target host_penalties_bench -j 4
+build-ci/host_penalties_bench
 ```
+
+These host timings are not decode throughput. Use the serving procedure in
+[the benchmark guide](benchmarks.md#reproduce) for model-level measurements.
 
 ## MiMo native MTP and prefill options
 

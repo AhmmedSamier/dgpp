@@ -51,12 +51,11 @@ and GPU recovery coverage for both resident loader implementations.
 
 ## Serving support
 
-Host sampling can skip neutral penalty preparation with the default-off
-CMake option `DGPP_HOST_NEUTRAL_PENALTY_SKIP`. Focused sampler regressions
-cover the build modes, active and signed-zero penalties, bias, masks,
-reports and RNG state. Ordinary graph replay already avoids neutral penalty
-work; this option makes no serving-throughput claim. Numerical limits and
-the rebuild command are in [operations](docs/operations.md#host-penalty-preparation).
+Host sampling automatically omits neutral penalty preparation using the
+effective request parameters. Deployment defaults and request overrides
+are covered by config, sampler, HTTP and journal regressions, including
+greedy penalties without logprobs. This is a host-work reduction; serving
+throughput gains require deployment measurements.
 
 The mixed `unsloth/Qwen3.8-27B-NVFP4` checkpoint runs at TP 1/2/4
 with the shipped DFlash2 recipes. Its dense FP4 prefill kernel reuses

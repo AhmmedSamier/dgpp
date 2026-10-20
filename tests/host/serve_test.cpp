@@ -41,6 +41,7 @@
 #include "common/log.hpp"
 #include "common/test.hpp"
 #include "sched/scheduler.hpp"
+#include "serve/cluster_config.hpp"
 #include "serve/generation_service.hpp"
 #include "serve/http_server.hpp"
 #include "serve/image_inputs.hpp"
@@ -2045,8 +2046,8 @@ DGPP_TEST(serve_sampling_defaultsFillOmittedFieldsAndReachTheEngine) {
     const std::string ml = models.read_available(800);
     require(ml.find("\"sampling\":{\"available\":true,\"defaults\":{"
                     "\"temperature\":1,\"top_p\":0.95,\"top_k\":0,"
-                    "\"min_p\":0,\"repetition_penalty\":1}}") !=
-                std::string::npos,
+                    "\"min_p\":0,\"repetition_penalty\":1,"
+                    "\"frequency_penalty\":0,\"presence_penalty\":0}}") != std::string::npos,
             "models sampling surface: " + ml.substr(0, 400));
   }
 
@@ -2089,6 +2090,64 @@ DGPP_TEST(serve_sampling_defaultsFillOmittedFieldsAndReachTheEngine) {
           "temperature 0 is the greedy spec");
   require(armed[0].seed != armed[2].seed,
           "seedless requests draw distinct seeds");
+}
+
+DGPP_TEST(serve_sampling_penaltyDefaultsAndRequestOverrides) {
+  // Exercise both HTTP routes and both greedy and stochastic requests.
+  for (bool chat : {false, true}) {
+    for (float temperature : {0.0f, 0.8f}) {
+      const auto deployment = dgpp::serve::parse_cluster_config(
+          R"({"model":"m","world_size":1,"engine":{"repetition_penalty":1.25,"frequency_penalty":0.5,"presence_penalty":0.25}})",
+          "penalty defaults");
+      auto defaults = model_defaults();
+      defaults.temperature = temperature;
+      defaults.repetition_penalty = *deployment.engine.repetition_penalty;
+      defaults.frequency_penalty = *deployment.engine.frequency_penalty;
+      defaults.presence_penalty = *deployment.engine.presence_penalty;
+      ServiceRig rig(8, defaults, true);
+      const std::vector<std::string> overrides{
+          "",
+          ",\"frequency_penalty\":0",
+          ",\"repetition_penalty\":1,\"frequency_penalty\":0,\"presence_penalty\":0",
+          ",\"repetition_penalty\":null,\"frequency_penalty\":null,\"presence_penalty\":null",
+          ",\"repetition_penalty\":1,\"frequency_penalty\":-0.0,\"presence_penalty\":0",
+          ",\"repetition_penalty\":1,\"frequency_penalty\":0,\"presence_penalty\":-0.5"};
+      for (const auto& extra : overrides) {
+        Client c(rig.port());
+        const std::string body =
+            chat ? chat_body("abcd", 2, extra)
+                 : "{\"model\":\"glm-5.3-flash-fp8\",\"prompt\":\"abcd\",\"max_tokens\":2" + extra +
+                       "}";
+        c.send_all("POST " + std::string(chat ? "/v1/chat/completions" : "/v1/completions") +
+                   " HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: " +
+                   std::to_string(body.size()) + "\r\n\r\n" + body);
+        require(c.read_until("usage", 3000).find("200 OK") != std::string::npos,
+                "penalty request completes");
+      }
+      const auto armed = rig.engine.armed();
+      require(armed.size() == overrides.size(), "all penalty requests reached the engine");
+      const float expected[][3] = {{1.25f, 0.5f, 0.25f}, {1.25f, 0.0f, 0.25f}, {1.0f, 0.0f, 0.0f},
+                                   {1.25f, 0.5f, 0.25f}, {1.0f, -0.0f, 0.0f},  {1.0f, 0.0f, -0.5f}};
+      for (size_t i = 0; i < armed.size(); ++i) {
+        const auto& p = armed[i].params;
+        require(same_float(p.repetition_penalty, expected[i][0]) &&
+                    same_float(p.frequency_penalty, expected[i][1]) &&
+                    same_float(p.presence_penalty, expected[i][2]) &&
+                    same_float(p.temperature, temperature),
+                "only explicit request values override deployment defaults");
+        require(dgpp::sample::needs_context_penalties(p) == (i != 2),
+                "the effective parameters select neutral versus active preparation");
+      }
+      Client models(rig.port());
+      models.send_all("GET /v1/models HTTP/1.1\r\nHost: t\r\n\r\n");
+      const auto advertised = models.read_until("presence_penalty", 3000);
+      require(
+          advertised.find(
+              "\"repetition_penalty\":1.25,\"frequency_penalty\":0.5,\"presence_penalty\":0.25") !=
+              std::string::npos,
+          "model metadata advertises deployment defaults, unchanged by requests");
+    }
+  }
 }
 
 DGPP_TEST(serve_sampling_validationNamesTheField) {

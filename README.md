@@ -384,10 +384,9 @@ selected, `up` stages `build-release/dgpp-serve` to the peers. Use
 
 ## Configuration
 
-The default-off build option `DGPP_HOST_NEUTRAL_PENALTY_SKIP` removes neutral
-penalty preparation from selected host sampling paths. It requires an explicit
-rebuild and has a limited floating-point contract; see
-[host penalty preparation](docs/operations.md#host-penalty-preparation).
+Sampling penalties can default from deployment settings and be overridden
+per request. Host sampling automatically skips neutral penalty preparation;
+see [sampling defaults](docs/operations.md#sampling-penalty-defaults).
 
 Use the [configuration reference](docs/configuration.md) for site settings,
 deployment options, defaults and their effects on memory, response time and
