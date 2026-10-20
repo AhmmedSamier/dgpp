@@ -5,6 +5,35 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The full-rate window's partners, measured** (2026-10-20). Two
+  complementary changes for `l2_prefetch_boundary_rate: full` were
+  tried on the DeepSeek-V4.1 C1 pass with the per-layer instrument. The
+  decode slot kernels' expert loads as evict-first lines
+  (`DGPP_FP4_SLOT_STREAMING`, the 2026-09-22 form awaiting its A/B) is
+  level at the light rate (layer 885 → 885 µs, the pass within its
+  spread) and, under the full rate, leaves the gaps' stretch as it was
+  (B 107 → 94 µs with the projections L2-fed; A +11, E +12, F +12, H +7;
+  the layer +20, the pass +1 %): the expert stream is not what evicts the
+  gap kernels' lines. The gap kernels that stretch (the mHC dots and
+  stream update, the router dots) are L2-feed-bound, so the window's own
+  traffic through L2 at 232 GB/s is what slows them, whatever their data's
+  residency; the flag stays off. The `lines` form (one `prefetch.global.L2`
+  a line, no L2-to-SM transfer) was then measured as the other partner: on
+  the GB10 its prefetches do not land ahead of the consumer — a cold 18 MiB
+  window read right behind the lines kernel takes 67–76 µs against 22
+  L2-resident and 80 cold, at 8 to 96 blocks — so the load form is the
+  only fill, and its traffic through L2 is what the full rate costs the
+  gaps. The lever pays only once the gap kernels' own L2 bytes shrink (the
+  mHC dots' redundant stream and coefficient re-reads).
+
+- **The engine loop's iteration histogram** (2026-10-20). The collective
+  bus logs, per graph window, a histogram of its poll loop's iteration
+  times (<2 <5 <10 <20 <50 ≥50 µs) and the maximum: on the DeepSeek-V4.1
+  C1 pass 99.9 % of iterations take under 2 µs and the maxima are 11–16
+  µs, so the handshake's notice latency is not where the folds' 11–15 µs
+  of arrival spread comes from; the spread is the ranks' GPU-side timing
+  under L2 and DRAM contention.
+
 - **The collective timeline's minimums, and the attention finish's l
   values staged in parallel** (2026-10-20). The graph window timeline
   keeps each window's shortest handshake and, per peer, the shortest
