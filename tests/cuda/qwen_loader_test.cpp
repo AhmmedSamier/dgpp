@@ -6,11 +6,12 @@
 // byte formulas equal actual usage and the source-byte plan equals the
 // bytes read; the globals and the n-gram table slice; resident cache hits
 // and the image round trip; and a tampered hash buffer is refused.
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -18,17 +19,17 @@
 
 #include <cuda_runtime.h>
 
-#include <fstream>
-#include "kernels/packq_head.hpp"
-#include "loaders/packq_quant.hpp"
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
+#include "kernels/latent_format.hpp"
+#include "kernels/packq_head.hpp"
+#include "loaders/packq_quant.hpp"
 #include "models/qwen/binding.hpp"
 #include "models/qwen/config.hpp"
 #include "models/qwen/loader.hpp"
-#include "kernels/latent_format.hpp"
 #include "qwen_fixture.hpp"
+#include "resident_image_fixture.hpp"
 
 namespace {
 namespace fs = std::filesystem;
@@ -765,6 +766,39 @@ DGPP_TEST(qwen_loader_resident_mode_and_image_round_trip) {
   }
   QwenLayerStream::set_resident_image_dir(saved);
   fs::remove_all(cache);
+}
+
+DGPP_TEST(qwen_loader_rebuilds_rejected_resident_images) {
+  const Fixture fx = write_fixture();
+  imagefx::Cache<QwenLayerStream> cache(fs::path(fx.dir) / "rejected-cache");
+  for (const size_t field : {0, 8, 16}) {
+    std::vector<uint8_t> expected;
+    {
+      QwenLayerStream stream(fx.cfg, fx.dir, 1, 2, dgpp::QwenResidency::Resident);
+      (void)stream.load_layer(0);
+      (void)stream.load_layer(1);
+      const auto [base, bytes] = stream.resident_layer_span(0);
+      expected = device_bytes(base, bytes);
+    }
+    cache.corrupt(field);
+    {
+      QwenLayerStream stream(fx.cfg, fx.dir, 1, 2, dgpp::QwenResidency::Resident);
+      const auto& layer = stream.load_layer(0);
+      (void)stream.load_layer(1);
+      check_layer(fx, stream, layer);
+      const auto [base, bytes] = stream.resident_layer_span(0);
+      require(device_bytes(base, bytes) == expected, "rebuilt Qwen layer matches checkpoint");
+      require(stream.image_layers_captured() == 1 && stream.image_layers_restored() == 1,
+              "rebuild rejected Qwen layer and restore its neighbor");
+      require(stream.source_bytes_read() > 0, "rebuild reads source weights");
+    }
+    {
+      QwenLayerStream stream(fx.cfg, fx.dir, 1, 2, dgpp::QwenResidency::Resident);
+      (void)stream.load_layer(0);
+      require(stream.image_layers_restored() == 1 && stream.source_bytes_read() == 0,
+              "repaired Qwen layer restores on next startup");
+    }
+  }
 }
 
 DGPP_TEST(qwen_loader_refuses_tampered_hash_buffers) {

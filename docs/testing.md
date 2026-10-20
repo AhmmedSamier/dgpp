@@ -1,5 +1,12 @@
 # Tests
 
+`resident_image_*` unit tests cover malformed offsets and lengths, truncated
+blobs, default payload verification, its explicit opt-out and recoverable
+read/size failures. `glm_loader_rebuilds_rejected_resident_images` and
+`qwen_loader_rebuilds_rejected_resident_images` corrupt an image's table and
+verify that the affected layer rebuilds, its neighbor restores and the repaired
+cache is reusable. Run the GPU loader suites on idle hardware.
+
 `serve_preparation_*` checks the fixed preparation pool at configured engine
 concurrencies of 1, 2, 4 and 16, completion ordering, responsive health/SSE
 traffic during blocked preparation, count/payload bounds, disconnects, worker

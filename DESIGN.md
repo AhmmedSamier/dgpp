@@ -205,6 +205,19 @@ ambiguous or missing snapshots are errors. `--checkpoint-dir` also
 accepts fixture or staged directories. Each rank loads its own slices
 from the node's checkpoint.
 
+The safetensors reader validates header lengths and payload-relative tensor
+offsets before constructing mapped views. Dimensions and offsets must be
+nonnegative integers; the checked shape product and dtype width must match
+the tensor's byte interval. Scalars and empty tensors remain supported.
+Validation preserves the raw header hash used by resident-image cache keys.
+Resident-image entries are checked for aligned offsets beyond the header/table
+and for byte ranges wholly inside the file. Invalid entries are treated as
+missing layers and rebuilt from the checkpoint.
+Resident-image payload folds are verified before upload by default;
+`DGPP_RESIDENT_CACHE_VERIFY=0` opts out of the payload pass. A read failure,
+size mismatch or failed fold causes that layer to be rebuilt and recached.
+This validation runs during loading and does not change resident inference.
+
 Resident serving loads the rank's weights at startup and keeps them for
 the process lifetime. GLM-5.3-Flash-FP8 requires TP=4 on 128 GB Sparks:
 the main stack occupies about 81.77 GiB per rank, and MTP adds about

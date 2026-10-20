@@ -23,8 +23,9 @@
 // blobs. A layer's entry is published AFTER its blob is fully written and
 // synced, so a crash mid-write leaves that layer absent (rebuilt and
 // re-appended next time) and never a torn blob with a valid entry. Every
-// entry carries a 64-bit word fold of its blob; verification on read is
-// opt-in (it costs a pass over 82 GiB).
+// entry carries a 64-bit word fold of its blob, verified on read by default.
+// DGPP_RESIDENT_CACHE_VERIFY=0 skips this payload pass; structural checks
+// always apply.
 //
 // Bitwise: the restored bytes ARE the built bytes — glm_loader_test pins a
 // build-vs-restore round trip byte-for-byte on the fixture.
@@ -75,11 +76,19 @@ class ResidentImage {
   size_t layer_bytes(int layer) const;  // 0 when absent
   const std::string& path() const { return path_; }
 
+  // Only an explicit "0" disables payload verification.
+  static bool verification_enabled();
+
   // pread the layer's blob into `dst` (`bytes` must equal layer_bytes).
   // `verify` re-folds the bytes against the entry. Throws on mismatch.
   // `dst` should be 4 KiB-aligned to take the direct path (pinned
   // allocations are); anything else reads buffered, correctly but slower.
-  void read_layer(int layer, void* dst, size_t bytes, bool verify) const;
+  void read_layer(int layer, void* dst, size_t bytes, bool verify = verification_enabled()) const;
+
+  // Recoverable cache read for loaders: absent, stale, unreadable or corrupt
+  // layers return false and are marked absent. The caller must rebuild before
+  // using dst, which may contain a partial or rejected read.
+  bool try_read_layer(int layer, void* dst, size_t bytes);
 
   // Appends the blob at the next 4 KiB boundary, fdatasyncs, then
   // publishes the entry. An already-present layer is rewritten (new blob,

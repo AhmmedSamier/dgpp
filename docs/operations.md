@@ -1095,15 +1095,27 @@ The first start of a resident rank builds its layers from the checkpoint
 `~/.cache/dgpp/resident/<key>.img` on that node (~82 GiB per rank for GLM;
 the key covers the checkpoint's shard headers, `config.json`, world, rank,
 head sharding and the loader's format version; a `payload` note beside it
-holds a fold of every shard's weight bytes, because a refined release can
+holds a fingerprint of sampled weight bytes from every shard, because a refined release can
 re-ship the same tensors in the same shards byte-identical in header and
 config — DeepSeek-V4.1-Flash-1017 against V4.1-Flash, 2026-10-18 — and an
 image whose note disagrees is discarded and rebuilt rather than restoring
 the other checkpoint's layers; an image from before the note adopts the
-checkpoint it next opens with). Every later start streams that image instead with
-O_DIRECT reads at the drive's line rate — 15-25 s to a ready model against
-~4.5 minutes from the checkpoint. The boot digest is cached beside it
-(`<key>.digest`). Knobs:
+checkpoint it next opens with). Later starts stream that image with O_DIRECT.
+Earlier GLM measurements with payload verification disabled reached readiness
+in 15–25 s against roughly 4.5 minutes from the checkpoint; those timings do
+not include the default verification pass. The boot digest is cached beside
+the image (`<key>.digest`).
+
+Every startup validates resident-image offsets, alignment and file bounds.
+Each restored layer must match the size computed by the loader and, by default,
+its stored payload fold before any bytes are uploaded. Missing, malformed,
+unreadable or corrupt layers are rebuilt from the checkpoint and recached;
+other valid layers can still restore. These checks do not run during inference.
+The payload fold adds a pass over the restored bytes in host staging without
+another weight allocation. Set `DGPP_RESIDENT_CACHE_VERIFY=0` to skip that pass;
+unset, empty and other values keep verification enabled. Metadata and size
+checks always apply. The launcher propagates this setting from `.env` or the
+exported environment to every rank.
 
 The first boot after a change that invalidates the images (a loader
 format version bump or a new checkpoint) rebuilds every rank's image from the
@@ -1117,7 +1129,7 @@ run `glm_gen_check` once on the fabric first, whose rendezvous waits.
 ```
 DGPP_RESIDENT_CACHE=off            disable (always build from the checkpoint)
 DGPP_RESIDENT_CACHE_DIR=/path      put the images somewhere else
-DGPP_RESIDENT_CACHE_VERIFY=1       re-fold every blob on read (a pass over 82 GiB)
+DGPP_RESIDENT_CACHE_VERIFY=0       opt out of payload verification (enabled by default)
 ```
 
 Delete the file to force a rebuild; the loader's log line says how many
