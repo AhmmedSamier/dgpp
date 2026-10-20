@@ -1,5 +1,6 @@
 // The exact fp8-weight GEMM (fp8w_gemm.hpp).
 #include "kernels/fp8w_gemm.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cuda_bf16.h>
 
@@ -86,6 +87,7 @@ __global__ __launch_bounds__(kThreads, 1) void fp8w_gemm_kernel(const uint16_t* 
                                                                const float* __restrict__ w_scales,
                                                                OutT* __restrict__ out, int m, int n, int k,
                                                                size_t out_stride, int rs, int cs) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(128) uint8_t smem[];
   uint8_t* sa = smem;
   uint8_t* sw = smem + kStages * kTileBytes;  // two W tiles
@@ -142,8 +144,12 @@ __global__ __launch_bounds__(kThreads, 1) void fp8w_gemm_kernel(const uint16_t* 
     place4(h ? r.z : r.x, p[0], p[1]);
     place4(h ? r.w : r.y, p[2], p[3]);
     if constexpr (kPerWeight) {
-      const float sp =
-          w_scales[static_cast<size_t>((n0 + wrow) >> rs) * wrow_scale_cols + ((step * kBK + wk) >> cs)] * kTwoPow120;
+      // The row's scale, guarded like its codes: a row past n in the last
+      // n-tile has no scale row (the grid ends at ceil(n / 2^rs)); the
+      // unguarded read ran up to 2^(7 - rs) - 1 rows past it (2026-10-19).
+      const float sp = w_ok
+          ? w_scales[static_cast<size_t>((n0 + wrow) >> rs) * wrow_scale_cols + ((step * kBK + wk) >> cs)] * kTwoPow120
+          : 0.f;
 #pragma unroll
       for (int i = 0; i < 4; ++i) p[i] = scale_pair(p[i], sp);
     }

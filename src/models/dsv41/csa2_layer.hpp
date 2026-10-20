@@ -105,6 +105,21 @@ class Csa2Layer {
   // prefill_tile): the fp8-weight tile GEMM (true) or the streaming decode
   // form (false) for every projection a prefill enqueue runs.
   void set_prefill_dense_tile(bool on) { prefill_dense_tile_ = on; }
+  // The prefill's window source on the flash listed kernel (true, the
+  // default; engine.prefill_window flash) or the scalar partial kernel
+  // (scalar, the decode window's kernel: the decode audit's form).
+  void set_prefill_window_flash(bool on) { prefill_window_flash_ = on; }
+  // The decode window (engine.decode_window, 2026-10-19): flash = the
+  // flash listed kernel unsplit (one block per row and head group); scalar
+  // = the scalar partial kernel split kWinDecodeSplit ways (the form until
+  // then). And the side stream the decode window runs on beside the main
+  // source's kernel (set by the model; null = in line).
+  void set_decode_window_flash(bool on) { decode_window_flash_ = on; }
+  void set_decode_side(cudaStream_t stream, cudaEvent_t fork, cudaEvent_t join) {
+    side_stream_ = stream;
+    side_fork_ = fork;
+    side_join_ = join;
+  }
   // GEMM plans for `tokens` rows and the shared-memory opt-ins; outside capture.
   bool prepare(int tokens);
 
@@ -215,7 +230,8 @@ class Csa2Layer {
   void require_shape(const SelShape& have, const SelShape& want, const char* what) const;
 
   // The projections and the window row of `tokens` rows at `pos` (device).
-  void project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
+  // rope_q false: the q rope is left to the decode tail kernel (enqueue_decode).
+  void project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream, bool rope_q = true);
   void project_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
   void indexer_query(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
   // The index keys and the main rows of `n` entries (entries_ / ent_pos_
@@ -232,7 +248,7 @@ class Csa2Layer {
   void attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, const uint8_t* win_cache, int win_block_tokens,
                    const int32_t* win_table, const int32_t* req_ids_main, const int64_t* pos, int row0, int rows,
                    int n_split_main, cudaStream_t stream, const int32_t* list, int list_stride,
-                   const int32_t* counts, bool split_window = false, int sel_base = 0);
+                   const int32_t* counts, bool split_window = false, int sel_base = 0, bool flash_window = false);
   void project_out(int tokens, void* out, cudaStream_t stream);
   void validate_pool(const Csa2StatePool& pool) const;
 
@@ -250,6 +266,11 @@ class Csa2Layer {
   // rows keep the streaming form. Set by the prefill entry points.
   bool prefill_tile_ = false;
   bool prefill_dense_tile_ = true;  // the configured form (set_prefill_dense_tile)
+  bool prefill_window_flash_ = true;  // set_prefill_window_flash
+  bool decode_window_flash_ = true;   // set_decode_window_flash
+  cudaStream_t side_stream_ = nullptr;  // set_decode_side
+  cudaEvent_t side_fork_ = nullptr;
+  cudaEvent_t side_join_ = nullptr;
 
   IGemm& gemm_;
   Csa2Config cfg_;

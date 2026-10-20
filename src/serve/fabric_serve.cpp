@@ -436,6 +436,8 @@ std::string encode_journal_settings(const WorldSettings& s) {
                      s.l2_prefetch_window_mib, s.l2_prefetch_boundary_window_mib);
   out += ",\"l2f\":";
   append_json_string(&out, s.l2_prefetch_form);
+  out += ",\"l2ff\":";
+  append_json_string(&out, s.l2_prefetch_full_form);
   out += ",\"l2b\":";
   append_json_string(&out, s.l2_prefetch_boundary_rate);
   out += ",\"l2l\":";
@@ -449,6 +451,14 @@ std::string encode_journal_settings(const WorldSettings& s) {
   append_json_string(&out, s.prefill);
   out += ",\"pfd\":";
   append_json_string(&out, s.prefill_dense);
+  out += std::format(",\"pfo\":{}", s.prefill_fold_overlap ? 1 : 0);
+  out += std::format(",\"pdl\":{}", s.decode_pdl ? 1 : 0);
+  out += ",\"pfw\":";
+  append_json_string(&out, s.prefill_window);
+  out += ",\"dcw\":";
+  append_json_string(&out, s.decode_window);
+  out += ",\"ctr\":";
+  append_json_string(&out, s.collective_transport);
   // The opt-in YaRN ramp: absent when off, so a record from a plain run
   // carries no key at all (an older peer decodes it to "off", which is
   // what it would have run anyway — a world never mixes the two).
@@ -708,6 +718,7 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (const dgpp::minijson::Value* w = v.find("l2w")) s.l2_prefetch_window_mib = static_cast<int>(w->as_int());
     if (const dgpp::minijson::Value* w = v.find("l2bw")) s.l2_prefetch_boundary_window_mib = static_cast<int>(w->as_int());
     if (const dgpp::minijson::Value* f = v.find("l2f")) s.l2_prefetch_form = std::string(f->as_string());
+    if (const dgpp::minijson::Value* f = v.find("l2ff")) s.l2_prefetch_full_form = std::string(f->as_string());
     if (const dgpp::minijson::Value* r = v.find("l2b")) s.l2_prefetch_boundary_rate = std::string(r->as_string());
     if (const dgpp::minijson::Value* r = v.find("l2l")) s.l2_prefetch_layer_rate = std::string(r->as_string());
     // The expert GEMM's form and companions (2026-09-30): records before them carry the defaults.
@@ -721,6 +732,18 @@ JournalRecord decode_journal_line(std::string_view line) {
     // Records before 2026-10-18 carry no prefill dense form: the tile GEMM.
     if (const dgpp::minijson::Value* pfd = v.find("pfd")) s.prefill_dense = std::string(pfd->as_string());
     else s.prefill_dense = "tile";
+    // Records before the fold overlap key (2026-10-18) carry none: on.
+    s.prefill_fold_overlap = v.find("pfo") ? flag("pfo") : true;
+    s.decode_pdl = v.find("pdl") ? flag("pdl") : true;
+    // Records before the window kernel key (2026-10-18) carry none: flash.
+    if (const dgpp::minijson::Value* pfw = v.find("pfw")) s.prefill_window = std::string(pfw->as_string());
+    else s.prefill_window = "flash";
+    if (const dgpp::minijson::Value* dcw = v.find("dcw")) s.decode_window = std::string(dcw->as_string());
+    else s.decode_window = "flash";
+    // Records before the transport key (2026-10-19) carry none: send,
+    // the form every such binary runs.
+    if (const dgpp::minijson::Value* ctr = v.find("ctr")) s.collective_transport = std::string(ctr->as_string());
+    else s.collective_transport = "send";
     // Records without the rope ramp key carry none: the plain table
     // (records before the knob, 2026-09-18, and every plain run since).
     if (const dgpp::minijson::Value* rs = v.find("rs")) {
@@ -809,6 +832,9 @@ JournalRecord decode_journal_line(std::string_view line) {
         !parse_bf16_residency(s.bf16_weights, nullptr) ||
         (s.prefill != "bounded" && s.prefill != "exact") ||
         (s.prefill_dense != "tile" && s.prefill_dense != "streaming") ||
+        (s.prefill_window != "flash" && s.prefill_window != "scalar") ||
+        (s.decode_window != "flash" && s.decode_window != "scalar") ||
+        (s.collective_transport != "write" && s.collective_transport != "send") ||
         (s.embed_sharding != "replicated" && s.embed_sharding != "vocab") ||
         (s.mtp_head != "checkpoint" && s.mtp_head != "fp8") ||
         (s.prefill_attention != "bf16" && s.prefill_attention != "fp8") ||

@@ -212,6 +212,19 @@ struct ClusterConfig {
     // row, the parity mode).
     std::string prefill = "bounded";
     std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+    std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
+    std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
+    // The fabric's latency-class collective transport for the decode
+    // step's folds and the pick (2026-10-19): "write" = rows RDMA-written
+    // into the peers' write rings as self-describing chunks, folded by a
+    // grid of warps as they prove; "send" = payload + doorbell SEND pairs
+    // claimed through door cells by one block, hash-gated, acked, credited.
+    std::string collective_transport = "write";
+    bool prefill_fold_overlap = true;
+    // The decode graph's kernel edges programmatic (2026-10-20): a kernel's
+    // blocks scheduled as its predecessor drains, each waiting for the
+    // predecessor's completion before its first read (engine/graph_pdl.hpp).
+    bool decode_pdl = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
     // The opt-in YaRN rope ramp (2026-09-18, the Qwen3.8-Flash-Next 512K
     // recipe): absent is the default and leaves every table and every
     // kernel argument exactly as they were; present builds the Qwen QSA
@@ -266,6 +279,7 @@ struct ClusterConfig {
     // inside the attention layers, and whether adjacent ranges merge.
     bool l2_prefetch = true;
     std::string l2_prefetch_form = "load";
+    std::string l2_prefetch_full_form = "16x8";
     int l2_prefetch_window_mib = 12;
     int l2_prefetch_boundary_window_mib = 20;
     std::string l2_prefetch_boundary_rate = "light";

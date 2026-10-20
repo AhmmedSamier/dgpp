@@ -451,7 +451,8 @@ add_library(dgpp_models_qwen_loader STATIC
   src/models/qwen/vision.cpp
   src/models/qwen/loader.cpp
   src/models/qwen/loader35.cpp
-  src/models/qwen/dflash2.cpp)
+  src/models/qwen/dflash2.cpp
+  src/models/qwen/dflash.cpp)
 target_include_directories(dgpp_models_qwen_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders dgpp_kernels CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_qwen_loader)
@@ -502,6 +503,9 @@ add_test(NAME qwen_qsa_prefill
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda/qwen_qsa_prefill_test.py
           $<TARGET_FILE:qwen_forward_test>)
 set_tests_properties(qwen_qsa_prefill PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+# The decode graph's programmatic edges need every kernel to wait first (engine/graph_pdl.hpp).
+add_test(NAME pdl_wait_audit COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/pdl_wait_audit.py ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(pdl_wait_audit PROPERTIES LABELS "host")
 # QSA always sees BF16 activations, across both expert formats and dense modes.
 foreach(_dense_fp8 IN ITEMS 0 1)
   add_test(NAME qwen_qsa_prefill_nvfp4_dense_${_dense_fp8}
@@ -666,6 +670,9 @@ dgpp_set_common(glm_dsa_bind_check)
 add_executable(dsv41_bind_check apps/dsv41_bind_check.cpp)
 target_link_libraries(dsv41_bind_check PRIVATE dgpp_models_dsv41 dgpp_loaders)
 dgpp_set_common(dsv41_bind_check)
+add_executable(qwen35_bind_check apps/qwen35_bind_check.cpp)
+target_link_libraries(qwen35_bind_check PRIVATE dgpp_models_qwen_loader dgpp_loaders)
+dgpp_set_common(qwen35_bind_check)
 add_executable(dsv4_forward_check apps/dsv4_forward_check.cpp)
 target_include_directories(dsv4_forward_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(dsv4_forward_check PRIVATE dgpp_models_dsv4_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
@@ -850,6 +857,7 @@ add_executable(unit_tests
   tests/unit/utf8_test.cpp
   tests/unit/arena_test.cpp
   tests/unit/safetensors_test.cpp
+  tests/unit/resident_image_test.cpp
   tests/unit/fp8_test.cpp
   tests/unit/fp4_test.cpp
   tests/unit/latent_format_test.cpp
@@ -873,6 +881,7 @@ add_executable(unit_tests
   tests/unit/qwen35_config_test.cpp
   tests/unit/qwen35_binding_test.cpp
   tests/unit/qwen_dflash2_config_test.cpp
+  tests/unit/qwen_dflash_config_test.cpp
   tests/unit/dflash2_speculator_test.cpp
   tests/unit/qwen_rope_scaling_test.cpp
   tests/unit/glm4_config_test.cpp
@@ -1395,6 +1404,39 @@ add_test(NAME qwen35_mixed_test
   COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MIXED_FIXTURE}
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_teacher.q35dump)
 set_tests_properties(qwen35_mixed_test PROPERTIES DEPENDS qwen35_mixed_generate_teacher)
+# The MoE release (122B layout at toy widths: ModelOpt NVFP4 routed experts,
+# BF16 rest): smoke/rows/group and independent reference/teacher parity.
+set(QWEN35_MOE_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_fixture)
+add_test(NAME qwen35_moe_fixture COMMAND qwen35_forward_test --write-fixture-moe ${QWEN35_MOE_FIXTURE})
+add_test(NAME qwen35_moe_smoke COMMAND qwen35_forward_test --smoke ${QWEN35_MOE_FIXTURE})
+set_tests_properties(qwen35_moe_smoke PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_rows_invariance COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MOE_FIXTURE})
+set_tests_properties(qwen35_moe_rows_invariance PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_group_invariance COMMAND qwen35_forward_test --group-invariance ${QWEN35_MOE_FIXTURE})
+set_tests_properties(qwen35_moe_group_invariance PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_generate
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MOE_FIXTURE} --tokens 16 --no-mtp
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_ref.q35dump)
+set_tests_properties(qwen35_moe_generate PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_e2e
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MOE_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_ref.q35dump --relaxed
+          --engine-states ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_states.bin)
+set_tests_properties(qwen35_moe_e2e PROPERTIES DEPENDS qwen35_moe_generate)
+add_test(NAME qwen35_moe_generate_teacher
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MOE_FIXTURE} --tokens 16 --no-mtp
+          --teacher ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_states.bin
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_teacher.q35dump)
+set_tests_properties(qwen35_moe_generate_teacher PROPERTIES DEPENDS qwen35_moe_e2e)
+add_test(NAME qwen35_moe_test
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MOE_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_teacher.q35dump)
+set_tests_properties(qwen35_moe_test PROPERTIES DEPENDS qwen35_moe_generate_teacher)
+set_tests_properties(qwen35_moe_fixture qwen35_moe_smoke qwen35_moe_rows_invariance
+    qwen35_moe_group_invariance qwen35_moe_generate qwen35_moe_e2e
+    qwen35_moe_generate_teacher qwen35_moe_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
 # Exercise the FP4 prefill dispatch at its 1024-row boundary.
 # The short mixed fixture above stays on the decode/short-prefill kernel.
 add_test(NAME qwen35_mixed_prefill_generate
@@ -1978,6 +2020,20 @@ target_link_libraries(bf12_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
 dgpp_set_common(bf12_gemv_test)
 add_test(NAME bf12_gemv_test COMMAND bf12_gemv_test)
 set_tests_properties(bf12_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+
+add_executable(qwen_mtp_test tests/cuda/qwen_mtp_test.cu)
+target_include_directories(qwen_mtp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(qwen_mtp_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(qwen_mtp_test)
+add_test(NAME qwen_mtp_test COMMAND qwen_mtp_test)
+set_tests_properties(qwen_mtp_test PROPERTIES SKIP_RETURN_CODE 2)
+
+add_executable(dsv41_dspark_test tests/cuda/dsv41_dspark_test.cu)
+target_include_directories(dsv41_dspark_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(dsv41_dspark_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(dsv41_dspark_test)
+add_test(NAME dsv41_dspark_test COMMAND dsv41_dspark_test)
+set_tests_properties(dsv41_dspark_test PROPERTIES SKIP_RETURN_CODE 2)
 
 add_executable(mma_gemv_test tests/cuda/mma_gemv_test.cu)
 target_include_directories(mma_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

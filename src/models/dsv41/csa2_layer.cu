@@ -9,6 +9,7 @@
 
 #include "common/cuda_check.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/mma_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 
 namespace dgpp {
@@ -261,26 +262,51 @@ void Csa2Layer::validate_pool(const Csa2StatePool& pool) const {
 
 // ---- the projections -------------------------------------------------------------------------
 
+// The decode projections' split-K (2026-10-19): the narrow matrices (wkv's
+// 512 rows, wq_a's 1,280, a wo_a group's 1,024) under-fill the grid unsplit
+// — in isolation 86, 161 and 136 GB/s at four rows against the 233.6 GB/s
+// ceiling — and take the workspace so the k range splits across blocks
+// (157, 168, 180 GB/s); wq_b, the indexer's wq_b and wo_b fill the grid
+// already and lose 2–15 % to the split's reduce, so they stay unsplit
+// (micro_mma_gemv_shapes -d). A row's chain is the split form's, the same
+// whatever rows ride in the launch.
 void Csa2Layer::project_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wkv.payload, w_.wkv.scales, kv_, tokens, kCsa2Latent,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
+                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
   csa2_rmsnorm_bf16(kv_, kCsa2Latent, w_.kv_norm, kv_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
   csa2_rope_apply(kv_ + (kCsa2Latent - kCsa2Rope), kCsa2Latent, kCsa2Latent, 1, kCsa2Rope, pos, w_.inv_freq, false,
                   tokens, stream);
 }
 
-void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
+void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream, bool rope_q) {
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
   const int lh = cfg_.local_heads();
-  launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wq_a.payload, w_.wq_a.scales, qr_, tokens, cfg_.q_lora,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
-  csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
-  project_kv(hidden_in, tokens, pos, stream);
+  // wq_a and wkv read the same hidden: one decode launch for both when the
+  // pair form holds (mma_gemv_pair_ok: the same split alone, whole blocks),
+  // each row's chain its own launch's — one ramp and drain instead of two
+  // (2026-10-20); otherwise the two launches.
+  const bool paired = cfg_.dense_mma && !prefill_tile_ &&
+                      mma_gemv_pair_ok(w_.wq_a.payload, w_.wkv.payload, h, h, size_t(cfg_.hidden), tokens, cfg_.q_lora,
+                                       kCsa2Latent, cfg_.hidden, gemm_ws_, gemm_ws_bytes_);
+  if (paired) {
+    launch_mma_gemv_fp8_bf16_pair(h, w_.wq_a.payload, w_.wq_a.scales, qr_, cfg_.q_lora, size_t(cfg_.q_lora), h,
+                                  w_.wkv.payload, w_.wkv.scales, kv_, kCsa2Latent, size_t(kCsa2Latent), size_t(cfg_.hidden),
+                                  tokens, cfg_.hidden, 5, 5, stream, gemm_ws_, gemm_ws_bytes_);
+    // The two norms and the kv rope in one launch (csa2_norms_rope, 2026-10-20).
+    csa2_norms_rope(qr_, cfg_.q_lora, w_.q_norm, cfg_.q_lora, kv_, kCsa2Latent, w_.kv_norm, kCsa2Latent, cfg_.eps,
+                    kCsa2Latent - kCsa2Rope, kCsa2Rope, pos, w_.inv_freq, tokens, stream);
+  } else {
+    launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wq_a.payload, w_.wq_a.scales, qr_, tokens, cfg_.q_lora,
+                                cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
+    csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
+    project_kv(hidden_in, tokens, pos, stream);
+  }
   launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b.payload, w_.wq_b.scales, q_, tokens,
                               lh * kCsa2Latent, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
-  csa2_rope_apply(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
-                  w_.inv_freq, false, tokens, stream);
+  if (rope_q)
+    csa2_rope_apply(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
+                    w_.inv_freq, false, tokens, stream);
 }
 
 void Csa2Layer::indexer_query(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
@@ -319,7 +345,7 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
                             int win_block_tokens, const int32_t* win_table, const int32_t* req_ids_main,
                             const int64_t* pos, int row0, int rows, int n_split_main, cudaStream_t stream,
                             const int32_t* list, int list_stride, const int32_t* counts, bool split_window,
-                            int sel_base) {
+                            int sel_base, bool flash_window) {
   const int lh = cfg_.local_heads();
   if (rows > ws_win_rows_ || rows * n_split_main > ws_slots_) throw std::logic_error("csa2 layer: attention tile too wide");
   const uint16_t* q = q_ + size_t(row0) * lh * kCsa2Latent;
@@ -333,10 +359,49 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   // longer bit-identical to the forward's single block — a different fp32
   // combine order, the rounding class the decode audit certifies.
   // n_split_win <= n_split_main, so it fits ws_slots.
+  // The prefill's window on the flash listed kernel (2026-10-18,
+  // engine.prefill_window flash): the window scratch is a one-block cache
+  // and the slot lists are per-row selections, the listed kernel's inputs;
+  // it reads a tile's keys once into shared memory per slab instead of
+  // once per thread of the scalar kernel (287 us per 128-row tile in the
+  // 32K prefill's ledger, 12 % of the walk). Its S sums in the mma's
+  // fragment order — the rounding class the forward-parity gates certify
+  // for the main source; the model test gates it against the scalar form.
+  // The decode window on the same kernel unsplit (2026-10-19,
+  // engine.decode_window flash): the 128-key window is latency, not bytes
+  // — the scalar kernel at eight splits took 27-29 us a layer at C1
+  // where the flash kernel's one block per row and head group takes ~7 —
+  // and it runs on the side stream beside the main source's kernel when
+  // the layer has one (the two read disjoint caches and write disjoint
+  // partials; the finish joins them). The draft block's rows take the same
+  // form (2026-10-20; they kept the scalar kernel before: 131-170 us a
+  // draft layer).
+  const bool flash_try = lh >= 16 && lh % 16 == 0 && (split_window ? decode_window_flash_ : flash_window);
+  const bool beside = split_window && side_stream_ != nullptr && w_.ratio > 0;
+  cudaStream_t wstream = stream;
+  if (beside) {
+    DGPP_CUDA_OK(cudaEventRecord(side_fork_, stream));
+    DGPP_CUDA_OK(cudaStreamWaitEvent(side_stream_, side_fork_, 0));
+    wstream = side_stream_;
+  }
+  // Decode's window is split like the scalar form's (eight splits of a
+  // 128-key window: one 16-token tile per block — the unsplit flash
+  // kernel walked the eight tiles in one block at 36 µs a layer, the
+  // scalar kernel's 29; prefill keeps one split, its row tile fills the
+  // GPU).
   const int n_split_win = split_window ? std::min(n_split_main, kWinDecodeSplit) : 1;
-  dsa_attn_partial(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
-                   n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
-                   stream, Csa2StatePool::kRingFormat, nullptr, 0);
+  // The window table has one entry per request (the ring: request r's
+  // region r; the prefill scratch: block 0): the physical bound is the
+  // ring's region count, not the row width.
+  const int win_blocks_total = split_window ? pool.shape().max_requests : 1;
+  if (!(flash_try &&
+        dsa_attn_listed(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
+                        n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
+                        wstream, Csa2StatePool::kRingFormat, nullptr, 0, win_blocks_total))) {
+    dsa_attn_partial(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
+                     n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
+                     wstream, Csa2StatePool::kRingFormat, nullptr, 0);
+  }
   int n_main = 0;
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
@@ -352,6 +417,10 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
                        epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
                        stream, Csa2StatePool::kMainFormat, nullptr, 0);
   }
+  if (beside) {
+    DGPP_CUDA_OK(cudaEventRecord(side_join_, side_stream_));
+    DGPP_CUDA_OK(cudaStreamWaitEvent(stream, side_join_, 0));
+  }
   csa2_attn_finish(n_main ? m_main_ : nullptr, n_main ? l_main_ : nullptr, n_main ? c_main_ : nullptr, n_main, m_win_,
                    l_win_, c_win_, n_split_win, w_.attn_sink, rows, lh, pos, w_.inv_freq,
                    o_ + size_t(row0) * lh * kCsa2Latent, stream);
@@ -361,11 +430,25 @@ void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {
   const int lh = cfg_.local_heads(), lg = cfg_.local_groups(), hpg = cfg_.heads_per_group();
   const int K = hpg * kCsa2Latent;
   // wo_a is block-diagonal over the groups: group g projects its own heads.
-  for (int g = 0; g < lg; ++g) {
-    const size_t row_off = size_t(g) * cfg_.o_lora;
-    launch_scale_gemm_grid_bf16(o_ + size_t(g) * K, size_t(lh) * kCsa2Latent, w_.wo_a.payload + row_off * K,
-                                w_.wo_a.scales + (row_off / 32) * (size_t(K) / 32), oa_ + row_off, tokens, cfg_.o_lora, K,
-                                stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
+  // Two groups take one decode launch (the pair form, 2026-10-20: the same
+  // k, each group's chain its own launch's); otherwise one launch per group.
+  const size_t act_stride = size_t(lh) * kCsa2Latent;
+  const size_t row_off1 = size_t(cfg_.o_lora), scale_off1 = (row_off1 / 32) * (size_t(K) / 32);
+  const bool paired = lg == 2 && cfg_.dense_mma && !prefill_tile_ &&
+                      mma_gemv_pair_ok(w_.wo_a.payload, w_.wo_a.payload + row_off1 * K, o_, o_ + K, act_stride, tokens,
+                                       cfg_.o_lora, cfg_.o_lora, K, gemm_ws_, gemm_ws_bytes_);
+  if (paired) {
+    launch_mma_gemv_fp8_bf16_pair(o_, w_.wo_a.payload, w_.wo_a.scales, oa_, cfg_.o_lora, size_t(lg) * cfg_.o_lora,
+                                  o_ + K, w_.wo_a.payload + row_off1 * K, w_.wo_a.scales + scale_off1, oa_ + row_off1,
+                                  cfg_.o_lora, size_t(lg) * cfg_.o_lora, act_stride, tokens, K, 5, 5, stream, gemm_ws_,
+                                  gemm_ws_bytes_);
+  } else {
+    for (int g = 0; g < lg; ++g) {
+      const size_t row_off = size_t(g) * cfg_.o_lora;
+      launch_scale_gemm_grid_bf16(o_ + size_t(g) * K, act_stride, w_.wo_a.payload + row_off * K,
+                                  w_.wo_a.scales + (row_off / 32) * (size_t(K) / 32), oa_ + row_off, tokens, cfg_.o_lora, K,
+                                  stream, size_t(lg) * cfg_.o_lora, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
+    }
   }
   launch_scale_gemm_grid_bf16(oa_, size_t(lg) * cfg_.o_lora, w_.wo_b.payload, w_.wo_b.scales,
                               static_cast<uint16_t*>(out), tokens, cfg_.hidden, lg * cfg_.o_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
@@ -413,14 +496,41 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
     ~WindowScope() { windows = false; }
   } window_scope{prefetch_windows_};
 
-  project_q_kv(hidden_in, tokens, pos, stream);
-  if (w_.ratio == 0) open_output_window(stream);  // a window-only layer: nothing between q and the attention
-  // The window row into the ring (this batch's rows are visible to its
-  // own queries: the ring is read after the append).
-  csa2_ring_slot_positions(pos, slots_, tokens, cfg_.ring_slots, stream);
-  dsa_latent_append(kv_, req_ids, slots_, tokens, pool.ring_table(), 1, cfg_.ring_slots, pool.ring(layer_), kCsa2Latent,
-                    stream, Csa2StatePool::kRingFormat);
-  csa2_window_slots_decode(pos, tokens, cfg_.window, cfg_.ring_slots, wlist_, wcounts_, stream);
+  const int lh = cfg_.local_heads();
+  project_q_kv(hidden_in, tokens, pos, stream, /*rope_q=*/false);  // the q rope rides the decode tail below
+  // The output window of a layer without an index source (2026-10-20):
+  // wo_b alone, opened behind the q/kv projections at the layer rate — it
+  // streams under the appends, the selection, the attention and the first
+  // output GEMV (whose lines it does not share) and lands for wo_b. At the
+  // full rate it landed too (wo_b 372 GB/s) but stretched the small kernels
+  // behind the projections by 43 us a layer, the level pass again. Opened at the layer's start it shared
+  // L2 with the attention-side window's wq_b and displaced it (the
+  // per-layer instrument: wq_b 295 -> 148 GB/s, wo_b 162 -> 368, the layer
+  // level); behind the projections wq_b's lines are consumed. wo_a stays
+  // out: it is the first output GEMV and a window still streaming its
+  // lines when it starts reads them beside it (measured 2026-10-19).
+  if (windows() && !(w_.ratio > 0 && w_.index_source)) {
+    prefetch_->open_window(stream, kWindowBudget, prefetch_->layer_rate());
+    window_fp8(w_.wo_b);
+  }
+  // A window-only layer opens no output window (2026-10-19): with the
+  // decode window beside the main source its attention is 12-20 us, and
+  // the 1.5 MB of wo_a and wo_b have no cover there — at the light rate
+  // they were still streaming when the first output GEMV read the same
+  // lines (150 us GEMVs), at the full rate they slowed the attention's
+  // own cache reads, and at the layer's start they slowed the q and kv
+  // projections. The GEMVs read them from DRAM; an index-source layer's
+  // window keeps its cover under the selection and the attention.
+  // The decode tail in one launch per row (dsa_decode_tail_fp8block,
+  // 2026-10-20): the q rope, the ring slot, the window slot list, the entry
+  // position on a layer with a ratio, and the window row's append into the
+  // ring (this batch's rows are visible to its own queries: the ring is
+  // read after the append) — the five launches it replaces, bitwise.
+  static_assert(Csa2StatePool::kRingFormat == LatentFormat::kFp8Block, "the decode tail appends the ring's fp8-block rows");
+  dsa_decode_tail_fp8block(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
+                           w_.inv_freq, slots_, cfg_.ring_slots, cfg_.window, wlist_, wcounts_,
+                           w_.ratio > 0 ? pos_sel_ : nullptr, w_.ratio, kv_, req_ids, pool.ring_table(), pool.ring(layer_),
+                           kCsa2Latent, tokens, stream);
 
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
@@ -442,7 +552,7 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
       }
       publish_entries(pool, req_ids, tokens, stream);
     }
-    csa2_entry_positions(pos, pos_sel_, tokens, w_.ratio, stream);
+    // (the entry positions came with the decode tail above)
     if (w_.index_source) {
       indexer_query(hidden_in, tokens, pos, stream);
       open_output_window(stream);  // behind the indexer's projection, under the selection and the attention
@@ -471,7 +581,6 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
                           stream, true);
       sel_at(0) = shape;
     } else {
-      open_output_window(stream);  // a reusing layer: behind the compressor, under the attention
       require_shape(sel_at(0), shape, "the selection");
     }
   }
@@ -512,8 +621,13 @@ void Csa2Layer::enqueue_draft_block(const void* hidden_in, Csa2StatePool& pool, 
   dsa_latent_append(kv_, req_ids, slots_, rows, pool.ring_table(), 1, cfg_.ring_slots, pool.ring(layer_), kCsa2Latent,
                     stream, Csa2StatePool::kRingFormat);
   csa2_dspark_window_slots(pos, rows, block, cfg_.window, cfg_.ring_slots, dlist_, dcounts_, stream);
-  attend_rows(pool, req_ids, pool.ring(layer_), cfg_.ring_slots, pool.ring_table(), req_ids, pos, 0, rows, 1, stream,
-              dlist_, cfg_.window + block, dcounts_);  // the builder's stride
+  // The block's rows attend like the decode rows (2026-10-20): the listed
+  // flash kernel split like the scalar form under engine.decode_window —
+  // the scalar kernel took 131-170 us a draft layer at C1 (five rows, one
+  // block per row) against the decode rows' ~20; the lists are the
+  // builder's (its stride window + block).
+  attend_rows(pool, req_ids, pool.ring(layer_), cfg_.ring_slots, pool.ring_table(), req_ids, pos, 0, rows,
+              decode_n_split_, stream, dlist_, cfg_.window + block, dcounts_, /*split_window=*/true);
   project_out(rows, out, stream);
 }
 
@@ -667,7 +781,7 @@ void Csa2Layer::enqueue_prefill(const void* hidden_in, Csa2StatePool& pool, int 
   for (int row0 = 0; row0 < tokens; row0 += kPrefillAttnRows) {
     const int rows = std::min(kPrefillAttnRows, tokens - row0);
     attend_rows(pool, req_zero_, wscratch_, win_rows, one_block_, req_ids_, pos_ + row0, row0, rows, kPrefillSplit,
-                stream, wlist_, cfg_.window, wcounts_, false, row_base);
+                stream, wlist_, cfg_.window, wcounts_, false, row_base, prefill_window_flash_);
   }
   csa2_window_ring_writeback(wscratch_, cfg_.window, pos0, tokens, cfg_.ring_slots, rb, ring, stream);
   project_out(tokens, out, stream);

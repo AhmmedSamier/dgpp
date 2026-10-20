@@ -1,4 +1,5 @@
 #include "kernels/scale_gemm.hpp"
+#include "kernels/pdl.cuh"
 
 #include <algorithm>
 #include <cstdlib>
@@ -41,6 +42,7 @@ __global__ void scale_gemm_kernel(const uint16_t* __restrict__ act,
                                   const float* __restrict__ scales,
                                   OutT* __restrict__ out, int m, int n,
                                   int k, size_t out_stride, int rs, int cs) {
+  dgpp_pdl_wait();
   const int n0 = blockIdx.x * BN;
   const int m0 = blockIdx.y * BM;
   const int scale_cols = (k + (1 << cs) - 1) >> cs;
@@ -170,6 +172,7 @@ __global__ void scale_gemv_kernel(const uint16_t* __restrict__ act,
                                   const float* __restrict__ scales,
                                   OutT* __restrict__ out, int n, int k,
                                   size_t out_stride, int rs, int cs, int span) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sx[];
   fp8_gemv::stage_activations<kRows>(act, act_stride, k, sx);
   __syncthreads();
@@ -559,6 +562,7 @@ struct Fp8GemvMulti {
 template <int kRows>
 __global__ void scale_gemv_multi_kernel(Fp8GemvMulti mp, const uint16_t* __restrict__ act,
                                         size_t act_stride, int k) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sx[];
   const int bid = static_cast<int>(blockIdx.x);
   int which = 0;

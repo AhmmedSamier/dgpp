@@ -1,4 +1,5 @@
 #include "kernels/csa2.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
@@ -53,6 +54,7 @@ __device__ __forceinline__ float block_sum_256(float v, float* red /*[8]*/) {
 // one bf16 rounding at the end.
 __global__ void rmsnorm_kernel(const uint16_t* x, int64_t x_stride, const uint16_t* w,
                                uint16_t* y, int64_t y_stride, int dim, float eps) {
+  dgpp_pdl_wait();
   __shared__ float red[8];
   const int64_t r = blockIdx.x;
   const uint16_t* xr = x + r * x_stride;
@@ -70,10 +72,64 @@ __global__ void rmsnorm_kernel(const uint16_t* x, int64_t x_stride, const uint16
   }
 }
 
+// The two norms behind the paired q/kv projection and the kv rope in one
+// launch per row (2026-10-20): rmsnorm_kernel's chain twice (block_sum_256
+// over the same 256 threads, the same ops) then rope_apply_kernel's per-pair
+// math over the kv row's rope pairs — bitwise the three kernels.
+__global__ void __launch_bounds__(kCsa2Threads) norms_rope_kernel(
+    uint16_t* q, int64_t q_stride, const uint16_t* q_w, int q_dim, uint16_t* kv, int64_t kv_stride,
+    const uint16_t* kv_w, int kv_dim, float eps, int64_t rope_off, int half, const int64_t* pos,
+    const float* inv_freq) {
+  dgpp_pdl_wait();
+  __shared__ float red[8];
+  const int64_t r = blockIdx.x;
+  {
+    uint16_t* xr = q + r * q_stride;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < q_dim; i += blockDim.x) {
+      const float v = bf16_bits_to_float(xr[i]);
+      ss = __fmaf_rn(v, v, ss);
+    }
+    const float total = block_sum_256(ss, red);
+    const float rs = rsqrtf(__fadd_rn(__fdiv_rn(total, float(q_dim)), eps));
+    for (int i = threadIdx.x; i < q_dim; i += blockDim.x) {
+      const float v = __fmul_rn(bf16_bits_to_float(xr[i]), rs);
+      xr[i] = float_to_bf16_bits(__fmul_rn(bf16_bits_to_float(q_w[i]), v));
+    }
+  }
+  {
+    uint16_t* xr = kv + r * kv_stride;
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < kv_dim; i += blockDim.x) {
+      const float v = bf16_bits_to_float(xr[i]);
+      ss = __fmaf_rn(v, v, ss);
+    }
+    const float total = block_sum_256(ss, red);
+    const float rs = rsqrtf(__fadd_rn(__fdiv_rn(total, float(kv_dim)), eps));
+    for (int i = threadIdx.x; i < kv_dim; i += blockDim.x) {
+      const float v = __fmul_rn(bf16_bits_to_float(xr[i]), rs);
+      xr[i] = float_to_bf16_bits(__fmul_rn(bf16_bits_to_float(kv_w[i]), v));
+    }
+  }
+  __syncthreads();  // the normed kv row is written before its rope
+  const int64_t p = pos[r];
+  if (p < 0) return;
+  for (int i = threadIdx.x; i < half; i += blockDim.x) {
+    uint16_t* v = kv + r * kv_stride + rope_off + 2 * i;
+    const float ang = __fmul_rn(float(p), inv_freq[i]);
+    const float c = cosf(ang);
+    const float sn = sinf(ang);
+    const float x0 = bf16_bits_to_float(v[0]), x1 = bf16_bits_to_float(v[1]);
+    v[0] = float_to_bf16_bits(x0 * c - x1 * sn);
+    v[1] = float_to_bf16_bits(x1 * c + x0 * sn);
+  }
+}
+
 // ---- rotation ------------------------------------------------------------------------
 __global__ void rope_apply_kernel(uint16_t* x, int64_t row_stride, int64_t head_stride,
                                   int heads, int half, const int64_t* pos,
                                   const float* inv_freq, bool inverse, int64_t total) {
+  dgpp_pdl_wait();
   const int64_t idx = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx >= total) return;
   const int i = int(idx % half);
@@ -93,6 +149,7 @@ __global__ void rope_apply_kernel(uint16_t* x, int64_t row_stride, int64_t head_
 
 // ---- positions ------------------------------------------------------------------------
 __global__ void entry_positions_kernel(const int64_t* pos, int64_t* out, int rows, int ratio) {
+  dgpp_pdl_wait();
   const int r = blockIdx.x * blockDim.x + threadIdx.x;
   if (r >= rows) return;
   const int64_t p = pos[r];
@@ -100,12 +157,14 @@ __global__ void entry_positions_kernel(const int64_t* pos, int64_t* out, int row
 }
 __global__ void scaled_positions_kernel(const int64_t* src, int64_t* out, int rows, int64_t mul,
                                         int64_t add) {
+  dgpp_pdl_wait();
   const int r = blockIdx.x * blockDim.x + threadIdx.x;
   if (r >= rows) return;
   const int64_t p = src[r];
   out[r] = p < 0 ? -1 : p * mul + add;
 }
 __global__ void ring_slot_positions_kernel(const int64_t* pos, int64_t* out, int rows, int ring_slots) {
+  dgpp_pdl_wait();
   const int r = blockIdx.x * blockDim.x + threadIdx.x;
   if (r >= rows) return;
   const int64_t p = pos[r];
@@ -114,11 +173,13 @@ __global__ void ring_slot_positions_kernel(const int64_t* pos, int64_t* out, int
 
 // ---- the window ring ----------------------------------------------------------------------
 __global__ void ring_table_kernel(int32_t* table, int n) {
+  dgpp_pdl_wait();
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) table[i] = i;
 }
 __global__ void window_slots_decode_kernel(const int64_t* pos, int rows, int window,
                                            int ring_slots, int32_t* list, int32_t* counts) {
+  dgpp_pdl_wait();
   const int r = blockIdx.x;
   const int64_t p = pos[r];
   const int n = p < 0 ? 0 : int(min(int64_t(window), p + 1));
@@ -130,6 +191,7 @@ __global__ void window_slots_decode_kernel(const int64_t* pos, int rows, int win
 }
 __global__ void dspark_window_slots_kernel(const int64_t* pos, int rows, int block, int window, int ring_slots,
                                            int32_t* list, int32_t* counts) {
+  dgpp_pdl_wait();
   const int r = blockIdx.x;
   const int stride = window + block;
   const int64_t p = pos[r];
@@ -146,6 +208,7 @@ __global__ void dspark_window_slots_kernel(const int64_t* pos, int rows, int blo
 }
 __global__ void window_slots_prefill_kernel(int64_t pos0, int T, int window, int64_t floor, int32_t* list,
                                             int32_t* counts) {
+  dgpp_pdl_wait();
   const int i = blockIdx.x;
   const int64_t p = pos0 + i;
   const int64_t first = p - window + 1 < floor ? floor : p - window + 1;
@@ -158,6 +221,7 @@ __global__ void window_slots_prefill_kernel(int64_t pos0, int T, int window, int
 }
 __global__ void window_scratch_prologue_kernel(const uint8_t* ring, int ring_slots, int64_t pos0,
                                                int window, int64_t floor, size_t row_bytes, uint8_t* scratch) {
+  dgpp_pdl_wait();
   const int j = blockIdx.x;  // scratch row j: position pos0 - (window - 1) + j
   const int64_t q = pos0 - (window - 1) + j;
   uint4* dst = reinterpret_cast<uint4*>(scratch + size_t(j) * row_bytes);
@@ -172,6 +236,7 @@ __global__ void window_scratch_prologue_kernel(const uint8_t* ring, int ring_slo
 __global__ void window_ring_writeback_kernel(const uint8_t* scratch, int window, int64_t pos0,
                                              int i0, int T, int ring_slots, size_t row_bytes,
                                              uint8_t* ring) {
+  dgpp_pdl_wait();
   const int i = i0 + blockIdx.x;
   if (i >= T) return;
   const uint4* src = reinterpret_cast<const uint4*>(scratch + size_t(window - 1 + i) * row_bytes);
@@ -211,6 +276,7 @@ __device__ __forceinline__ void index_row_quant(const uint16_t* x, uint8_t* out_
 }
 __global__ void index_q_quant_kernel(const uint16_t* q, uint8_t* q_fp8, float* q_scale,
                                      unsigned* violations) {
+  dgpp_pdl_wait();
   __shared__ int s_kmax[4];
   const int64_t row = blockIdx.x;  // (token, head)
   index_row_quant(q + row * kCsa2IndexDim, q_fp8 + row * kCsa2IndexDim, q_scale + row, violations,
@@ -220,6 +286,7 @@ __global__ void index_k_append_kernel(const uint16_t* k, const int32_t* req_ids,
                                       const int64_t* entries, const int32_t* block_tables,
                                       int blocks_per_request, int entries_per_block,
                                       uint8_t* index_k, float* index_scale, unsigned* violations) {
+  dgpp_pdl_wait();
   __shared__ int s_kmax[4];
   const int64_t i = blockIdx.x;
   const int64_t e = entries[i];
@@ -230,6 +297,7 @@ __global__ void index_k_append_kernel(const uint16_t* k, const int32_t* req_ids,
                   violations, s_kmax);
 }
 __global__ void fold_weights_kernel(const uint16_t* w, const float* q_scale, float* out, int64_t n) {
+  dgpp_pdl_wait();
   const int64_t i = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i >= n) return;
   out[i] = __fmul_rn(__fmul_rn(bf16_bits_to_float(w[i]), 0.015625f), q_scale[i]);
@@ -271,6 +339,7 @@ __device__ __forceinline__ void pool_pair_and_norm(const float* kv0, const float
 __global__ void compress_pairs_prefill_kernel(const float* kv, const float* score, int T,
                                               const uint16_t* norm_w, float eps,
                                               uint16_t* latent_out, float* tail) {
+  dgpp_pdl_wait();
   __shared__ float red[8];
   const int j = blockIdx.x;
   if (2 * j + 1 < T) {
@@ -292,6 +361,7 @@ __global__ void compress_decode_update_kernel(const float* kv, const float* scor
                                               const int32_t* req_spans, const uint16_t* norm_w,
                                               float eps, float* tails, uint16_t* latent_out,
                                               int64_t* entries_out, float* tail_snapshots) {
+  dgpp_pdl_wait();
   __shared__ float red[8];
   const int q = blockIdx.x;
   const int start = req_spans[2 * q], len = req_spans[2 * q + 1];
@@ -383,6 +453,7 @@ constexpr int kCandTile = 2 * kSelectTile;  // prefill top-2048 block selection
 // list order, then the newest partial block's [nb * bs, visible).
 __device__ __forceinline__ int64_t pool_entry(const int32_t* cand, int n_blocks, int block_size, int64_t visible,
                                               int64_t i) {
+  dgpp_pdl_wait();
   const int64_t listed = int64_t(n_blocks) * block_size;
   if (i < listed) {
     const int32_t b = cand[i / block_size];
@@ -509,6 +580,7 @@ __global__ void csa_decode_scores_kernel(
     const int32_t* block_tables, int blocks_per_request, const uint8_t* index_k,
     const float* index_scale, int entries_per_block, const int32_t* cand, int cand_stride,
     const int32_t* cand_counts, int block_size, int select_k, uint64_t* keys, int64_t keys_stride) {
+  dgpp_pdl_wait();
   __shared__ uint2 q8[16 * 32];
   __shared__ float w[32];
   __shared__ uint32_t krows[8 * 4 * 32];
@@ -607,6 +679,7 @@ __global__ void csa_decode_select_kernel(const uint64_t* keys, int64_t keys_stri
                                          int cand_stride, const int32_t* cand_counts,
                                          int block_size, int select_k, int32_t* out,
                                          int32_t* counts) {
+  dgpp_pdl_wait();
   const int r = blockIdx.x;
   const int64_t p = pos_sel[r], visible = p + 1;
   const int n_blocks = !Candidates && cand && p >= 0 ? cand_counts[r] : 0;
@@ -651,6 +724,7 @@ size_t decode_select_smem(int select_k) {
 __global__ void logits_prefill_kernel(const float* dot, int64_t dot_stride, const float* w_folded,
                                       const float* k_scale, const int64_t* pos_sel, int64_t n, int heads,
                                       float* logits, int64_t logits_stride) {
+  dgpp_pdl_wait();
   const int r = blockIdx.y;
   const int64_t p = pos_sel[r];
   const int64_t visible = p < 0 ? 0 : p + 1;
@@ -685,6 +759,7 @@ constexpr int kScoreTile = 128;
 __global__ void __launch_bounds__(128, 4)
 score_prefill_kernel(const uint8_t* q_fp8, const uint8_t* k, const float* w_folded, const float* k_scale,
                      const int64_t* pos_sel, int rows, int64_t n, float* logits, int64_t logits_stride) {
+  dgpp_pdl_wait();
   constexpr int S = 144, N = kScoreTile;
   __shared__ __align__(16) uint8_t a[32 * S];
   __shared__ __align__(16) uint8_t b[N * S];
@@ -794,6 +869,7 @@ __global__ void select_rows_prefill_kernel(const float* logits, int64_t logits_s
                                            const int64_t* pos_sel, int select_k, const int32_t* cand,
                                            int cand_stride, const int32_t* cand_counts, int block_size,
                                            int32_t* topk_out, int32_t* counts) {
+  dgpp_pdl_wait();
   extern __shared__ uint8_t smem_raw[];
   uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_raw);
   uint32_t* best_lo = best_hi + select_k;
@@ -837,6 +913,7 @@ struct RowBlockKeyFn {
 __global__ void select_candidates_prefill_kernel(const float* logits, int64_t logits_stride,
                                                  const int64_t* pos_sel, int block_size, int topk_blocks,
                                                  int cand_stride, int32_t* cand_out, int32_t* cand_counts) {
+  dgpp_pdl_wait();
   extern __shared__ uint8_t smem_raw[];
   uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_raw);
   uint32_t* best_lo = best_hi + topk_blocks;
@@ -882,10 +959,12 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
                                    int n_main, const float* m_win, const float* l_win, const float* c_win,
                                    int n_win, const float* sink, int local_heads, const int64_t* pos,
                                    const float* inv_freq, uint16_t* out) {
+  dgpp_pdl_wait();
   __shared__ float o[kCsa2Latent];
   __shared__ float s_w[kFinishMaxSplits];          // exp(m - mhat) of the live splits, in order
   __shared__ const float* s_c[kFinishMaxSplits];   // their c rows [kCsa2Latent]
   __shared__ float s_m[kFinishMaxSplits];
+  __shared__ float s_l[kFinishMaxSplits];          // every split's l, staged beside its m (2026-10-20)
   __shared__ float s_den;
   __shared__ int s_live;
   const int r = blockIdx.x, h = blockIdx.y;
@@ -897,10 +976,18 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
   }
   const int64_t total = int64_t(local_heads) * kCsa2Latent;
   const int n_all = n_main + n_win;
-  // Every split's m, one thread per split.
-  for (int s = threadIdx.x; s < n_all; s += blockDim.x)
-    s_m[s] = s < n_main ? m_main[(int64_t(r) * n_main + s) * local_heads + h]
-                        : m_win[(int64_t(r) * n_win + (s - n_main)) * local_heads + h];
+  // Every split's m and l, one thread per split — the l beside the m
+  // (2026-10-20: thread 0's loop below loaded each live split's l as it
+  // went, a dependent L2 round trip per split on the block's critical
+  // path; 13 us a launch at eight window splits, the same arithmetic in
+  // the same order from shared memory).
+  for (int s = threadIdx.x; s < n_all; s += blockDim.x) {
+    const bool main = s < n_main;
+    const int64_t i = main ? (int64_t(r) * n_main + s) * local_heads + h
+                           : (int64_t(r) * n_win + (s - n_main)) * local_heads + h;
+    s_m[s] = main ? m_main[i] : m_win[i];
+    s_l[s] = main ? l_main[i] : l_win[i];
+  }
   __syncthreads();
   if (threadIdx.x == 0) {
     float mhat = -INFINITY;
@@ -911,10 +998,8 @@ __global__ void attn_finish_kernel(const float* m_main, const float* l_main, con
       for (int s = 0; s < n_all; ++s) {
         if (s_m[s] == -INFINITY) continue;
         const bool main = s < n_main;
-        const int64_t i = main ? (int64_t(r) * n_main + s) * local_heads + h
-                               : (int64_t(r) * n_win + (s - n_main)) * local_heads + h;
         const float w = expf(s_m[s] - mhat);
-        den += w * (main ? l_main[i] : l_win[i]);
+        den += w * s_l[s];
         s_w[live] = w;
         s_c[live] = main ? c_main + (int64_t(r) * n_main + s) * total + int64_t(h) * kCsa2Latent
                          : c_win + (int64_t(r) * n_win + (s - n_main)) * total + int64_t(h) * kCsa2Latent;
@@ -997,6 +1082,21 @@ void csa2_rmsnorm_bf16(const void* x, int64_t x_stride, const void* w, void* y, 
   rmsnorm_kernel<<<unsigned(rows), kCsa2Threads, 0, stream>>>(
       static_cast<const uint16_t*>(x), x_stride, static_cast<const uint16_t*>(w),
       static_cast<uint16_t*>(y), y_stride, dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+void csa2_norms_rope(void* q, int64_t q_stride, const void* q_w, int q_dim, void* kv, int64_t kv_stride,
+                     const void* kv_w, int kv_dim, float eps, int64_t rope_off, int rope_dim, const int64_t* pos,
+                     const float* inv_freq, int rows, cudaStream_t stream) {
+  if (rows <= 0) return;
+  if (q_dim <= 0 || q_dim > 8192 || kv_dim <= 0 || kv_dim > 8192)
+    throw std::invalid_argument("csa2_norms_rope: dims must be in [1, 8192]");
+  if (rope_dim <= 0 || rope_dim % 2 != 0) throw std::invalid_argument("csa2_norms_rope: rope_dim must be even");
+  const int half = rope_dim / 2;
+  if (rope_off < 0 || rope_off + int64_t(rope_dim) > kv_dim) throw std::invalid_argument("csa2_norms_rope: rope past the kv row");
+  norms_rope_kernel<<<unsigned(rows), kCsa2Threads, 0, stream>>>(
+      static_cast<uint16_t*>(q), q_stride, static_cast<const uint16_t*>(q_w), q_dim, static_cast<uint16_t*>(kv),
+      kv_stride, static_cast<const uint16_t*>(kv_w), kv_dim, eps, rope_off, half, pos, inv_freq);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

@@ -125,6 +125,375 @@ commits 2.97 tokens per request per 116 ms step (154 tok/s sustained)
 against fixed depth 4's 3.7 per 182 ms (122 tok/s); the campaign's C8
 phase, eight 256-token requests on six slots, averages over its tail.
 
+## The decode pass at C1 (2026-10-19)
+
+A node trace of the served C1 pass (46–47 ms wall, about three rows per
+pass with the drafter's rows): the expert gate/up kernel 12.2 ms at the
+DRAM read ceiling, the down kernel 7.7 ms at about 78 % of it after its
+rows (K = 576 on four nodes) went to one pass per lane, the dense GEMVs
+11.9 ms, the 95 collectives 7.3 ms (76 µs each: copy 4.7 + handshake
+17–22 + skew 19–22 + fold 9), the attention 2.9 ms, and 1,013 kernels
+under 15 µs 5 ms (the norms, the mHC coefficient pairs, the attention
+finish, the router). The per-row cost of 5.2 ms is the verify row's
+expert bytes — six expert slices of 4.4 MB on 40 layers, 1.06 GB per
+rank — at 89 % of the read ceiling; the draft chain's own rows cost about
+0.1 ms each. The lm head's 12-bit companion (`engine.bf16_weights: bf12`
+in the template) is packed for this family now, bitwise the bf16 head.
+
+Excluded for the collective's jitter, each with the bus timeline on every
+rank: CPU idle states (level; the bus engine spins), GPU clock locks at
+2500 and 3000 MHz (level; the step is DRAM-bound), the L2 prefetcher off
+(the skew unchanged; the prefetcher pays 50 µs per generation); every
+rank arrives last about a quarter of the time, so no node is slow. The
+collective's remaining 40 µs per round is protocol latency, a bus
+project; the small kernels are a fusion project with exactness
+contracts. Against TensorFold's 14.5 ms round at one row on a 3.5-bpw
+format, this pass reads about 1.6× the bytes (4.25-bit experts and 8-bit
+dense, lossless) and carries about 12 ms of latency-bound work.
+
+## The collective transport (2026-10-19)
+
+The decode step's folds and the pick's stream collectives travel over
+`engine.collective_transport` (`write`, the default; `send` is the form
+until 2026-10-19). The write transport lays every row out as 512-byte
+self-describing chunks, RDMA-writes it into each peer's write ring across
+both PCIe functions, and folds it with a grid whose warps poll their own
+chunks with every peer's copy in flight at once; each block reports
+through a pinned record the engine aggregates. Bitwise the send machine's
+fold (the bus test's graph, row and stream scenarios under both).
+
+Measured on four nodes with the bus timeline on every rank (`timed_load`,
+ms per pass at equal accepted rows, decode tokens per second; the
+boundary prefetch window at its template setting):
+
+| Shape | send | write |
+|---|---|---|
+| C1 code (3.59 rows) | 47.99 / 74.8 | 47.2 / 76.1 |
+| C1 prose (1.90 rows) | 40.59 / 46.9 | 40.3 / 47.2 |
+| C1 JSON (4.11 rows) | 52.17 / 78.8 | 51.0 / 80.6 |
+| C6 code (20.7 rows, 512 tokens) | 170.96 / 121.2 | 165.32 / 125.3 |
+
+Per collective at C1 (rank 0, medians of window averages, µs): send
+64.2 = copy 5.1 + handshake 21.5 + skew 21.6 + fold 9.2; write 38.4 =
+3.6 + 16.9 + 16.4 + 0.5. At C6 (165 KiB rows): 267 → 198. The C1 pass
+gains less than its collectives because the boundary prefetch window
+drains under the fold and turns the wait into DRAM time (the window off:
+the collective 42 µs, the pass +1.9 ms); what remains of the collective
+is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
+the peers stage 10–15 µs apart. The one-lane form (no striping) costs
+1.1 ms at C6 and nothing at C1.
+
+## The six-slot template at C6 and C8 (2026-10-20)
+
+The template serves six slots: the family's decode batch is bounded at 32 rows and six slots at depth 4 are 30.
+The serving table's C8 cell is therefore six live requests and two queued — the eight run as a six-wide batch
+until the first completes, then the two that waited run alone — and the engine's rows per step average 4.0 at C8,
+as at C4. The cell's repeat spread is wide for the same reason (the tail's composition and the adaptive depth's
+choices): the 2026-10-19 campaign's three json repeats read 123, 132 and 157 ms/pass, the 2026-10-20 campaign's
+122, 144 and 153, so a three-repeat median moves by one draw. The two binaries A/B'd on the same template
+(256-token completions; six repeats at C8, three at C6; medians):
+
+| binary | C6 json | C6 code | C6 math | C8 json | C8 code | C8 math |
+|---|---|---|---|---|---|---|
+| 2026-10-19 (`0d69d565`) | 171.4 ms/pass, 144.5 tok/s | 125.2, 114.5 | 131.2, 119.5 | 152.5, 108.1 | 127.4, 89.5 | 123.5, 103.2 |
+| 2026-10-20 (`388111ef`) | 162.2, 154.6 | 117.0, 125.8 | 125.2, 132.9 | 138.4, 124.2 | 119.0, 95.7 | 104.7, 123.9 |
+
+C6 is the template's steady state and its peak, 126–155 tok/s; the day's binary is faster at every class at both
+concurrencies (C8 json −9 %, code −7 %, math −15 % per pass). The campaign's C8 cells that read lower than the
+2026-10-19 row's were one draw of that spread, not a slower pass.
+
+## The folds' spread, decomposed (2026-10-20)
+
+With every rank dumping its collectives' stamps (`DGPP_BUS_TIMELINE_DUMP`)
+and the four files aligned by generation, the pairwise symmetric sums give
+each path (10–14 µs) and the differences each rank's lateness per
+collective with the clocks' offsets cancelled. The arrival spread (latest
+minus earliest staging) is 22 µs at the median, 38 µs at p90 on the
+attention folds and 106 on the MoE folds, and it is the ranks' compute
+imbalance between collectives (correlation 0.98–1.00): no rank is late
+systematically, the lateness has no persistence and no position
+dependence, the engine's poll loop is under 2 µs, prefetch off changes
+nothing, programmatic launches off makes it worse, and locked clocks take
+a quarter off the tail. Two populations remain: the Engram collectives
+(layers 1 and 14), whose host gather of rows from the 189 GiB mapped
+tables page-faults on one rank at 12 % of them (p90 363 µs, p99 1.2 ms of
+imbalance; ~0.4 ms a pass summed; with the first Engram layer's consumer
+waiting on its own table's rows instead of the whole staging's join, p90
+57 µs, p99 0.54 ms, 3 % above 200 µs, ~0.14 ms a pass summed), and a
+15 µs-median jitter on every
+other collective (p90 54 µs; ~2 ms a pass summed) that is the GPUs'
+timing noise on identical work and converts into waiting at each of the
+80 collectives — structural, removable only by fewer collectives.
+
+## The folds' path (2026-10-20)
+
+The two collectives a layer (the attention fold and the MoE fold, 35 KB
+a rank at C1) cost 31–39 µs each: copy 4 + handshake 15–21 + skew 11–15
++ fold 0.5. The timeline now also keeps each window's shortest handshake
+and, per peer, the shortest staging → landed: 1.6–2.0 µs and 0–4 µs, so
+no single term is a floor. The path's own latency comes out of the
+symmetric sums instead — a peer's landing time as each rank sees the
+other is the clock offset plus the path from each side, and the offsets
+cancel: rank pairs sum to 26–32 µs, a path of 13–16 µs each way. That is
+the no-GDR structure of the fabric: the row crosses PCIe four times
+(the GPU's copy into pinned host staging, the NIC's read of it, the
+peer NIC's write into host memory, the peer GPU's polled reads) around
+a ~4 µs wire time, with the engine's notice and post under 2 µs. The
+remaining 11–15 µs of skew is the ranks' arrival spread on identical
+work (no rank is last more often than another). The transport is at its
+structural floor; the lever left on the folds is the spread.
+
+## The pass's tail (2026-10-20)
+
+After the 40 main layers a C1 pass spends 5.5 ms (13 %): the verify head
+(1.0 ms), the sampling chain, the DSpark input projection (fp8
+[5120 x 20480], 0.36 ms), the draft block's three layers, the draft head
+(1.0 ms) and the pick chain (four sequential collectives with the Markov
+bias between them). Three kernels there sat under their limits and were
+fixed bitwise: the draft block's attention (the scalar partial kernel,
+131–170 µs a draft layer) now takes the decode rows' flash listed form;
+the Markov bias (16.5 MB a launch at 134 GB/s cold) loads its rows
+warp-coalesced through shared memory (77 µs cold, 17 hot); the
+hyper-state window's store and gather copy 16-byte units (29 + 12 µs →
+a few). On four nodes the C1 pass went 43.15 → 42.81 ms (code), 36.89 →
+36.49 (prose), 49.36 → 47.64 (JSON). The pick chain's four collectives
+and the sample verdict kernel (one block a request, 37 µs) are the
+tail's next items.
+
+## The lm head's bytes and the window's full form (2026-10-20)
+
+The head is read twice a pass (the draft block's base logits and the
+verify's), 331 MB a rank as bf16, and the trace showed it running as the
+bf16 tensor-core GEMV at 1.43 ms a launch although `bf16_weights: bf12`
+had packed its 12-bit companion: the tensor-core dispatch took every
+width from the bf16 bytes. The companion now feeds the decode forms
+through a bf12 form of the same kernel — each lane loads its own 24
+units of its row's packed super-block into registers and decodes its
+fragments into the words the bf16 form loads — so the chain is the bf16
+launch's bit for bit at every width (the scalar 12-bit kernel is 1.5 %
+faster still, but above eight rows it would give a row a chain that
+depends on the rows sharing its launch). On the head's slice, cold:
+1,425 → 1,096–1,136 µs (226 GB/s on 248 MB); in the pass 1,432 → 1,023 µs
+a launch, with the head's prefetch window streaming the packed bytes, and
+the C1 pass 44.50 → 43.15 ms (code), 37.73 → 36.89 (prose) (JSON's three
+repeats 46.7–49.5 either way).
+
+The prefetcher's full form became 16 blocks with 8 loads in flight (the
+same 232 GB/s cold as 48 × 4 at the light form's SM footprint); the
+boundary windows at the full rate still lose about 1 % at C1: the
+projections become L2-fed (B 107 → 92 µs a layer) but the gap kernels
+that touch DRAM — the mHC stream update (×1.7), the fold's write kernel
+(×1.3–1.4), the router dots (×1.2–1.5) — stretch under the window's
+traffic. Light stays; the full rate is a lever for after the gap
+kernels stop touching DRAM.
+
+At the six-slot batch's row counts the tensor-core companion form stays ahead of the bf16 form it replaces
+(head_bench, n 32320 × k 5120, the median of 15 launches): m 12 1,120 µs vs 1,444; m 16 1,156 vs 1,442; m 24 1,274 vs
+1,808; m 32 1,355 vs 1,460 (the form's rate falls from 228 to 183 GB/s past 16 rows, the bf16 form's own 2-tile shape
+dips at 24). Above 32 rows the dispatch declines the companion and the bf16 form runs as before.
+
+## The decode chain as two resources (2026-10-20)
+
+The C1 pass is one dependent chain that can either stream weights or
+run its latency-bound kernels; with an L2 of ~16 MB a layer's window,
+the attention weights (45 MB a layer per rank) cannot all hide under
+the chain's ~160 µs of gaps, so the pass is judged per layer by a
+two-term instrument over the node trace: the segments (mHC site,
+projections, selection and attention, output projections, the two
+folds, the MoE), each GEMV's achieved GB/s (cold or L2-fed) and each
+window's overlap with each segment. On it, three exact levers landed:
+`engine.decode_pdl` (programmatic launch edges across the decode graph,
+0.3–0.4 ms a pass), a wo_b-only prefetch window opened behind the q/kv
+projections at the light rate on the layers without an index source
+(wo_b 162 → 378 GB/s; at the layer's start it displaced wq_b from L2, at
+the full rate its 48 blocks held the attention kernels off the SMs), and
+the paired tensor-core GEMV launch (wq_a with wkv, the two wo_a groups:
+one ramp and drain, bitwise). Four nodes, `timed_load` C1, ms per pass /
+decode tok/s at equal rows:
+
+| Class | before | after |
+|---|---|---|
+| code | 46.03 / 75.0 | 44.61 / 77.2 |
+| prose | 39.05 / 48.7 | 37.86 / 50.3 |
+| JSON | 49.68 / 83.5 | 48.35 / 86.5 |
+
+With the decode tail and the paired projection's norms fused (one
+launch per row each, bitwise the separate kernels; 1,753 → 1,524
+kernels a pass): code 44.50 / 77.4, prose 37.73 / 50.4, JSON 48.03 /
+87.0. A window-only layer now: mHC site 20, projections 107, selection
+and attention 34, output projections 88, attention fold 39, FFN site 37,
+MoE 520, MoE fold 31 — 892 µs against a structural floor near 800 (the
+MoE at the ceiling, the gaps, and the attention bytes the L2 cannot
+hold). What the instrument declined: the attention-side window's budget
+on wo_a instead of wq_b (wq_b cold +33 µs, wo_a's lines evicted before
+use) and a double-buffered chunk GEMV core (slower at every shape).
+
+## Sampled requests: the draft rule and the verify rule (2026-10-19)
+
+`engine.mtp_draft auto` resolves to greedy for this family (the DSpark
+block's argmax), and the templates set `engine.mtp_verify = block`.
+Four nodes, C1 at temperature 1 (256 tokens × 3 per class; ms per pass /
+tokens per pass / decode tok/s):
+
+| Draft / verify | code | prose | JSON |
+|---|---|---|---|
+| draw / token (the earlier `auto`) | 52.69 / 3.19 / 60.1 | 53.77 / 2.11 / 39.2 | 53.35 / 4.18 / 78.4 |
+| draw / block | 52.46 / 3.04 / 57.9 | 54.07 / 2.02 / 37.4 | 53.28 / 4.25 / 79.8 |
+| argmax / token | 46.08 / 2.87 / 62.2 | 39.57 / 1.77 / 45.4 | 51.41 / 4.25 / 84.1 |
+| argmax / block (shipped) | 47.68 / 3.31 / 69.5 | 39.72 / 1.99 / 49.9 | 51.11 / 4.18 / 84.8 |
+
+A sampled-draft slot verifies the whole block every pass (the scheduled
+verify depth is for greedy slots), so the draw's passes cost 53 ms on
+every class; the argmax drafts take the schedule, and the block rule
+(Sun et al. 2024, exact for the target distribution) adds 10–12 % on
+code and prose over the token rule; the template as shipped, re-measured,
+66.3 / 49.7 / 81.7 tok/s (sampled runs vary a few percent). Greedy
+requests are untouched.
+
+The screened draft head (`engine.draft_head = screen`, the 2-bit rotated
+copy at 16 / 32 / 64 blocks of 128) was measured at temperature 0 and
+declined: the pass is no cheaper (46.4 ms against 46.0 at 32 blocks; the
+scan and the block scoring cost what the 1.42 ms full head did) and
+acceptance falls (code 3.45 → 3.23 tokens per pass, prose 1.90 → 1.60,
+JSON 4.18 → 3.98), decode tok/s 6–8 % lower. Acceptance per draft
+position at temperature 0 (the retire lines): code 86 / 79 / 88 / 86 %,
+JSON 94 / 89 / 82 / 78 %, prose 63 / 46 / 24 / 67 %.
+
+## Split-K on the narrow attention projections (2026-10-19)
+
+The decode walk's wkv, wq_a and wo_a GEMVs take the layer's GEMM
+workspace so their k range splits across blocks (in isolation at four
+rows 86 → 157, 161 → 168 and 136 → 180 GB/s; wq_b, the indexer's wq_b
+and wo_b stay unsplit, they fill the grid and lose to the reduce).
+Four nodes, `timed_load` C1, ms per pass / rows per pass / decode
+tok/s:
+
+| Class | unsplit | split |
+|---|---|---|
+| code | 47.18 / 3.59 / 76.1 | 45.97 / 3.45 / 75.0 |
+| prose | 40.27 / 1.90 / 47.3 | 39.11 / 1.90 / 48.7 |
+| JSON | 50.77 / 4.11 / 81.0 | 49.58 / 4.18 / 84.3 |
+
+The pass is 1.2 ms cheaper at equal rows; the split chain is
+tolerance-equal to the unsplit one, so the fixed prompts' greedy
+transcripts shift (code lost accepted draft rows, JSON gained) — the
+numeric path on near-ties, not a bias. Where the C1 code pass stands
+(the node trace, four rows, 46.5 ms against a 35.6 ms floor from the
+checkpoint's bytes): a DRAM-class kernel runs 93 % of the time; the
+MoE at the ceiling (516 µs a layer); the attention GEMVs 244 → ~210 µs
+against ~125 after the windows' L2 hits; some 300 µs a layer of latency
+work (two folds, the mHC sites, the router, selection and attention,
+~350 small launches) covered by the windows at about 100 GB/s; 3.4 ms
+of DRAM-idle time. The levers left at C1 are each 1–3 %: the GEMV
+cores' small-shape rate (~1.6 ms), the lm head's 75 % of the ceiling
+(0.7 ms), the collectives' fixed handshake and skew (~33 µs each), the
+small launches.
+
+## The pipelined halves (2026-10-19, tried and discarded)
+
+A captured batch of two or more requests walked as two request-aligned
+row halves on two streams a half-layer apart, the folds chained in
+record order on every rank, in a free-running form and with a token
+that alternated the halves' MoE phases, the MoE grids capped at 24
+blocks and uncapped. Measured on four nodes (`timed_load`, ms per pass /
+decode tok/s; a single request walks as one either way):
+
+| Shape | as one | halves, free-running | halves, alternating |
+|---|---|---|---|
+| C2 code (7.03 rows) | 72.16 / 97.4 | 81.37 / 86.3 | 86.28 / 81.4 |
+| C2 JSON (8.38 rows) | 75.86 / 110.5 | 86.79 / 96.5 | 92.68 / 90.4 |
+| C6 code (20.7 rows, 512 tokens) | 166.00 / 124.8 | 176.49 / 117.4 | 182.83 / 113.3 |
+
+The node traces of rank 0: free-running, the halves' MoE phases ran over
+each other for 20 ms of an 88 ms C2 pass (the collective order sequences
+only the folds) and covered 5 ms of the other half's latency work;
+alternating, each half's attention chain — every attention matrix read
+once per half, its latency kernels 1.25–1.4× slower beside the other
+half's streaming (the overlap probe: memory-latency inflation, which
+stream priorities do not change) — outlasts the half's MoE, so the pass
+is the sum of two stretched chains. Capping the MoE grids at 24 blocks
+to leave SMs costs the MoE chain 30 % of its rate (`moe_slot_bench
+--cap`; 6 % at 48), and strided double-buffered kernels did not recover
+it; the collectives double, each with the ranks' two-stream skew. The
+form cannot pay on this hardware at any concurrency; at C1 a row split
+has the same arithmetic with worse ratios. Removed.
+
+## The decode latency round (2026-10-19)
+
+The C1 pass's non-DRAM time, from the node trace of `0d69d565` (three
+rows, about 850–920 µs a layer): the two mHC sites at three launches each
+(dots 8.5, finish 9.9, norm 7.3 µs), the scalar window attention at eight
+splits (27–29 µs), the fp4 down projection at 73 % of the read ceiling
+(840 tiles over the resident blocks ran as whole rounds), and the two
+collectives a layer (35 + 41 µs) whose handshake and skew ran in the
+open. The small kernels also stretch two- to four-fold under the L2
+prefetcher (an RMSNorm at 1.4 or 8.2 µs), and the per-collective skew of
+~20 µs is the sum of that variance over the kernels between collectives,
+so fewer launches attack it as well.
+
+| Lever | What it does | Trace, per three-row layer | Bitwise |
+|---|---|---|---|
+| Fused mHC decode site | DeepSeek-V4's form: the finish fused into the dots launch by tickets, the one-rounding norm in it, the comb on a side stream joined at the stream update. Decoder rows keep it in a mixed walk. | a site 26 → 12 µs on the critical path (dots 11.8, comb 8.2 beside) | rounding-level (the fused norm's sum order), the decode audit's class |
+| Down kernel tile stealing | `moe_slot_down_fp4_kernel` takes (slot, row tile) units from a counter pair the last block resets; the grid is the device's occupancy. | 180 → 169 µs | yes |
+| `engine.decode_window` flash | The 128-key window on `dsa_attn_listed`, split eight ways like the scalar form, on a side stream beside the main source's kernel, joined before the finish. | scalar 28.8 µs in line; the unsplit flash form 36.4 (one block, eight tiles); split, beside the main kernel | the window's fp32 sum order (the decode audit's class) |
+| Decode fold split (discarded) | Each boundary's producer as two column halves, the first half's all-reduce on a side stream under the second half; the bus walked up to four generations in flight. | MoE site: first fold 70.6 µs hidden under the 82 µs second half, second fold 27.5; attention site: wo_b's half GEMV 16 µs cannot hide a 28 µs collective | yes |
+
+Measured (four nodes, C1 `timed_load` code / prose / JSON, three repeats,
+ms per pass / decode tokens per pass / tok/s):
+
+| Build | code | prose | JSON |
+|---|---|---|---|
+| `0d69d565` as campaigned (`9350b38a`) | 46.80 / 3.11 / 66.5 | 40.06 / 1.81 / 45.2 | 51.95 / 4.11 / 79.2 |
+| this round, as shipped (the output window dropped where it has no cover) | 47.93 / 3.59 / 74.9 | 40.71 / 1.90 / 46.7 | 51.75 / 4.11 / 79.5 |
+| the same, the output window at the light rate under the attention (the form before) | 48.55 / 3.59 / 74.0 | 39.54 / 1.90 / 48.1 | 53.34 / 4.11 / 77.1 |
+| the same, the output window at the full rate under the attention | 48.55 / 3.59 / 74.0 | 41.50 / 1.90 / 45.9 | 53.09 / 4.11 / 77.5 |
+| the same, the output window at the full rate at the layer's start | 51.49 / 3.59 / 69.8 | 44.14 / 1.90 / 43.1 | 55.51 / 4.11 / 74.1 |
+| the same with the window scalar (unsplit flash build) | 49.97 / 3.23 / 64.3 | 41.88 / 1.88 / 44.8 | 54.81 / 4.11 / 75.0 |
+| the same with the fold split, MoE site | 49.05 / 3.59 / 73.2 | 40.54 / 1.90 / 46.9 | 53.65 / 4.11 / 76.7 |
+| the same with the fold split, both sites (unsplit flash build) | 48.08 / 3.23 / 67.1 | 42.54 / 1.89 / 44.4 | 54.18 / 4.11 / 75.9 |
+
+C6 code (one repeat, 512 tokens): 174.8 / 20.7 / 118.5 → 172.5 / 20.7 / 120.1. The
+round's passes carry more accepted draft rows (code 3.11 → 3.59, prose
+1.81 → 1.90 a pass) with the window and norm forms' rounding class. The
+quality set on the shipped binary (`64bb41cd`, the campaign's phase alone):
+HumanEval 156/164 (6 truncated), GSM8K 292/300 (3 truncated), extraction
+100/100 — against the campaign binary's 157/164, 295/300, 100/100 the same
+day and the family's FP8 baseline of 94.5 / 97.7 / 100 %: the rounding
+class moved, the quality class did not; the three GSM8K misses are
+truncations at the item budget, not wrong answers.
+
+**The dependency the attention lever carried.** The first shipped form of
+the window-beside-main lever lost 1.4 ms a pass at JSON against the
+campaign binary while every kernel it touched got faster. The per-kernel
+trace diff placed it: the 32-block output-projection GEMVs (139 a pass)
+ran 28.8 → 49.8 µs each, and 1,507 of their 1,628 slow launches were the
+first GEMV after the attention finish, overlapping a prefetch kernel. The
+CSA2 layer opens an output window (wo_a and wo_b, ~1.5 MB at the light
+rate) under the attention so those GEMVs find their weights in L2; the
+window-beside-main form cut a window-only layer's attention phase to
+12–20 µs, the prefetch no longer finished under it, and the GEMV queued
+behind its own weights. Four placements measured (JSON ms/pass, 4.11
+rows): under the attention at the light rate 53.34; at the full rate
+53.09 (the GEMVs recover, the attention's own cache reads slow from 16 to
+29 µs); at the layer's start at the full rate 55.51 (it slows the
+DRAM-bound projections instead); no output window where no cover remains
+51.75, the GEMVs reading wo from DRAM at p90 34 µs against the campaign
+binary's 36. The window budget was not the cause (18 MiB best; 12, 8 and
+6 MiB each 0.5–0.9 ms worse), and `engine.l2_prefetch_window_mib` now
+governs this family's windows (the 18 MiB constant is gone; the template
+pins 18). The lesson is the method: a lever that shortens a phase must
+re-size or remove what that phase was hiding, in the same experiment.
+
+Why the fold split lost, from the bus timeline on four ranks (rank 0
+medians per collective, µs): off — 93 collectives a window, copy 4.8 +
+handshake 22.4 + skew 24.0 + fold 9.0 = 64.2; the MoE-site split — 136 a
+window, copy 8.4 + handshake 23.2 + skew 20.6 + fold 5.8 = 59.5. The
+added collectives pay their handshake and skew in full, only the fold
+shrinks with the half payload, and every collective's staging copy slows
+under the second half's DRAM traffic. A split pays only once a
+collective's fixed cost is small: the lever is the handshake (the
+two-sided send, the CPU-posted doorbell), not more collectives.
+
 ## The prefill selection at long context (2026-10-18)
 
 Prefill cost per token is flat in everything but one piece: on every
@@ -184,12 +553,131 @@ across both while the decode class stays on the first.
 |---|---|---|
 | One lane, streaming projections (the fused scan) | 0.523 / 1.619 / 5.152 / 19.591 | 1,620 |
 | Two lanes, streaming projections | 0.514 / 1.572 / 4.715 / 17.916 | 1,770 |
-| Two lanes, tile projections (shipped) | 0.480 / 1.415 / 4.045 / 15.328 | 2,080 |
+| Two lanes, tile projections | 0.480 / 1.415 / 4.045 / 15.328 | 2,080 |
+| Two lanes, tile projections, the folds overlapped | 0.464 / 1.324 / 3.699 / 14.234 | 2,240 |
+| … and the attention kernels at the byte floor | 0.418 / 1.097 / 2.801 / 10.623 | 3,000 |
+| … and the Engram rows staged a chunk ahead, the folds begun behind events | 0.421 / 1.097 / 2.771 / 10.174 | 3,130 |
+| … and the Engram folds by row block (shipped) | 0.413 / 1.066 / 2.717 / 10.033 | 3,170 |
 
-Decode is untouched by both. The ledger's remaining prefill shares on the
-shipped form: the listed attention over the selected entries about 19 %
-(about 12 TFLOP/s, the next kernel), the bulk folds about 14 %, the MXFP4
-experts about 17 % at 58 TFLOP/s, the window attention about 9 %.
+Decode is untouched by all of these. The ledger's remaining prefill
+shares on the tile form were the listed attention over the selected
+entries about 19 %, the bulk folds about 14 %, the MXFP4 experts about
+17 % at 58 TFLOP/s, the window attention about 9 % — the next two
+sections take the folds and the attention.
+
+The folds then went under compute (`engine.prefill_fold_overlap`, default
+`true`): a walk of 512 rows or more runs each layer as two row blocks,
+the boundary a row of the request's block grid nearest the middle, so
+block A's attention fold lands under block B's attention, B's under A's
+stream update, mHC site and router, A's MoE fold under B's expert
+accumulation and B's MoE fold under the next layer's block A — the
+DeepSeek-V4 walk's form. The Engram layers and the DSpark target layers
+land the pending fold first (their gate and stream mean read every row),
+and under the bounded prefill the encoder layers overlap while the
+decoder's prologue lands the pending fold before it publishes. The walk
+is bitwise the one-block walk (the attention takes the second block as it
+takes any chunk; the MoE's phased form runs the same kernels per row),
+gated in `dsv41_tp_test` on the exact and the bounded walk, a group cut
+inside a span, and a loopback world of 2 through the bus's asynchronous
+bulk folds. The table's last row is the campaign leg; a matched probe of
+one prompt set five times, the key on against off on the same binary,
+read −4.3 / −5.0 / −6.4 % per token at 512 / 2K / 8K and decode level
+(code 48.0 against 47.6 ms per pass, prose 41.7 against 41.6).
+
+## The attention kernels (2026-10-18)
+
+The listed attention over the selected entries (`attn_flash_kernel` in
+`dsa.cu`, shared with GLM-5.3's DSA) was the walk's largest kernel after
+the dense projections moved: 5,406 launches at 646 µs, 3.5 s of a 32K
+prefill, at about 3 TFLOP/s and 50 GB/s. Nsight Compute on an isolated
+bench at this geometry (16 heads, latent 512, fp4_block entries, 512 per
+query in 4 splits, 128 rows) showed why: 196 registers and 87 KB of
+shared memory held one block per SM, each scheduler had two warps and
+issued once per 4.8 cycles, and 22 of 32 lanes were active. Three
+changes, each bitwise (the bench's partial-output checksums identical at
+four shapes): the listed addresses resolved once per 512-token round into
+shared memory instead of three dependent loads per thread per row (750 →
+630 µs); the e2m1 decode as a nibble table instead of a switch that
+diverged a warp eight ways per element, 64 elements per thread per tile
+(→ 300 µs); two blocks per SM with the Q~ fragments in registers, the
+exchange sized by the tile and the fetch in four passes (→ 206 µs,
+183 GB/s of the 234 GB/s read ceiling). Two blocks hold for this family's
+listed kernel, which fits the two-block register budget without
+spilling; the 512 + 64 geometry other families run keeps one block
+(compiled to two it spilled, and that build faulted DeepSeek-V4's mixed
+walk in the shared prefill test while every spill-free build ran clean).
+The remaining lever on it is the fp32 split partials (four per row), a
+numerics change left alone.
+
+The window source then moved from the scalar partial kernel (287 µs per
+128-row tile, 12 % of the walk) onto the same listed kernel
+(`engine.prefill_window`, default `flash`): the window scratch is a
+one-block cache and the slot lists are per-row selections, the kernel's
+inputs. Its scores sum in the mma's fragment order, so the model test's
+decode audit walks the scalar form — the decode window's kernel — and a
+separate gate holds the flash form within a flip's move of it; the
+forward-parity gates pass on the flash form. In the profiled 32K walk
+the listed kernel runs at 193 µs per launch and the window at 68.
+
+The 32K prefill's ledger after this (the kernels of its 10.9 s, the bus
+bulk kernel overlapped on its own stream): the MXFP4 experts 2.7 s (the
+gate/up chain 1.6, the down chain 1.1), the fp8 dense tile GEMM 1.1 s,
+the listed attention 0.93 s, the mHC stream updates 0.48, the expert
+accumulation 0.45, the router 0.40, the window attention 0.36, the mHC
+coefficients 0.34, the selection 0.26; about 2 s of the wall is gaps
+between kernels (the overlap's host drains and launch latency). The next
+levers in order: the experts (W4A8 against today's bf16 activations), the
+dense GEMM on native fp8 activations, and the gaps.
+
+## The walk's gaps (2026-10-18)
+
+With the attention kernels at the floor, the 32K walk's main stream was
+busy 8.7 s of its 10.9 s: 1.4 s were stalls of 110–160 ms per 4,096-token
+chunk at the first Engram layer — the mmap'ed tables' gather, forked at
+the walk's start and joined at layer 1, storage-bound with 16 threads and
+page hints already — and 0.7 s were folds longer than the work under
+them. The Engram rows are now staged a chunk ahead (`engine.ngram_prestage`,
+Qwen's form: the next chunk hashed on the device behind this chunk's
+last three tokens, gathered on the side stream, claimed by the next
+chunk when its identity matches; the scheduler's batch walk names a lone
+prompt's chunks so the staging can claim under it), and the overlap's
+folds begin behind the producers' events with the other block's work
+already enqueued. Cold prefill 0.421 / 1.097 / 2.771 / 10.174 s (−4 % at
+32K; the shorter prompts are one or two chunks and stage nothing ahead).
+The profiled walk's gaps fell to 1.4 s: one first-chunk gather of 90 ms,
+the two Engram folds per chunk at 31 ms each (210 MB over the wire), the
+MoE fold of block A exposed under block B's accumulation alone (about
+0.45 s), the attention fold of block B under block A's site and router
+(about 0.29 s). The Engram folds then went by row block too (A's under
+B's projection, B's under A's gate and attention; bitwise): 0.413 /
+1.066 / 2.717 / 10.033 s. What remains exposed is wire time under too
+little work: a block's fold of hidden x 2 bytes per row moves at about
+7 GB/s per rank on the paced bulk path, and block B's accumulation is
+shorter than block A's fold.
+
+## Measured (2026-10-20, four nodes): the campaign of record
+
+The full row set of [benchmarks](../benchmarks.md) on source `283a52f7`, binary `f4e9e9cdb16acf86`, in one
+`serve_campaign.py run` with the five DSpark mode boots (10:04–11:03 UTC; every rank at zero swap before and after,
+zero cached tokens in the 12 cold probes, matching operation streams, the plain boot's transcripts identical to the
+default's in 5/5 classes, 9/9 API checks, isolation identical). These are the rows the benchmark doc tables.
+
+| | 2026-10-19 (`0d69d565`) | 2026-10-20 (`283a52f7`) |
+|---|---|---|
+| C1 decode tok/s (prose / code / JSON / math / chat) | 44.8 / 66.5 / 78.1 / 73.7 / 50.8 | 53.5 / 80.0 / 89.4 / 87.5 / 55.0 |
+| Decode tok/s by concurrency, C1 / C2 / C4 / C8 | 44.8–78.1 / 63.9–111.5 / 85.9–119.2 / 76.4–122.8 | 53.5–89.4 / 75.5–121.9 / 94.7–130.3 / 83.8–139.0 |
+| Wall tok/s, C1 / C2 / C4 / C8 | 43.6–73.9 / 62.2–105.8 / 83.8–114.3 / 74.6–117.5 | 52.0–84.6 / 73.4–115.8 / 92.2–125.2 / 81.7–132.7 |
+| Cold prefill s, 2K / 8K / 32K | 1.079 / 2.713 / 10.030 | 1.006 / 2.638 / 10.024 |
+| Context decode ms per pass (tok/s), short / 32K / 64K / 128K / 256K / 512K | 49.38 (67.1) / 51.05 (63.2) / 52.04 (57.0) / 55.15 (57.8) / 59.02 (48.5) / 66.36 (46.3) | 43.12 (73.0) / 44.82 (72.9) / 45.64 (69.5) / 48.49 (64.9) / 51.99 (53.3) / 60.35 (51.5) |
+| Context prefill s, short / 32K / 64K / 128K / 256K / 512K | 0.296 / 9.699 / 20.011 / 43.780 / 103.943 / 303.423 | 0.263 / 9.684 / 19.999 / 43.577 / 103.139 / 301.219 |
+| Decode modes, C1 tok/s: plain / DSpark 1 / 2 / 3 / 5 / adaptive ≤4 | — / — / — / — / — / 44.8–78.1 | 41.7–41.9 / 50.2–59.5 / 50.1–76.5 / 47.8–82.6 / 39.6–96.7 / 53.5–89.4 |
+| HumanEval / GSM8K / extraction | 157/164 / 295/300 / 100/100 | 157/164 / 294/300 / 100/100 |
+
+The day's decode levers (the folds' path and spread, the pass's tail, the head's 12-bit companion, the window's
+form) carry every cell: C1 +12–20 %, C4 +9–12 %, the context matrix −9..13 % a pass, the cold prefill level to
+−7 %. The DSpark modes row is new: the fixed depths bracket the adaptive schedule (depth 5 wins the code and JSON
+classes at 96.7 tok/s, loses prose at 39.6; the schedule takes 53.5–89.4 without a per-class choice). The C8 cell
+(six live, two queued) read 139.0 at the top of its spread this time; the A/B above is the comparison that holds.
 
 ## Measured (2026-10-18, four nodes)
 

@@ -166,7 +166,7 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             "DGPP_ROCE_DEVICES", "DGPP_ROCE_GID_INDICES", "HF_HUB_CACHE", "DGPP_RESIDENT_CACHE_DIR",
             "DGPP_LOG_LEVEL", "DGPP_MLOCK",
             // The bus timeline switch and the dense-lowering A/B switches: every rank the same.
-            "DGPP_BUS_TIMELINE", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS", "DGPP_DSV41_EAGER_FOLD"};
+            "DGPP_BUS_TIMELINE", "DGPP_BUS_TIMELINE_DUMP", "DGPP_DSV41_DENSE_GEMV", "DGPP_DENSE_GEMV_ROWS", "DGPP_DSV41_EAGER_FOLD"};
         for (const Member& setting : node.members()) {
           bool known = false;
           for (const char* key : kNodeKeys) known = known || setting.key == key;
@@ -252,8 +252,9 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         }
         else if (p.key == "mtp_expert_format") {
           e.mtp_expert_format = text(x, ek, what);
-          if (e.mtp_expert_format != "fp8" && e.mtp_expert_format != "bf16_fused")
-            fail(what, "'" + ek + "' must be \"fp8\" or \"bf16_fused\"");
+          if (e.mtp_expert_format != "fp8" && e.mtp_expert_format != "bf16_fused" &&
+              e.mtp_expert_format != "bf16")
+            fail(what, "'" + ek + "' must be \"fp8\", \"bf16_fused\" or \"bf16\" (qwen3_5 MoE draft only)");
         }
         else if (p.key == "bf16_weights") {
           e.bf16_weights = text(x, ek, what);
@@ -302,6 +303,22 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.prefill_dense = text(x, ek, what);
           if (e.prefill_dense != "tile" && e.prefill_dense != "streaming")
             fail(what, "'" + ek + "' must be \"tile\" or \"streaming\"");
+        } else if (p.key == "prefill_fold_overlap") {
+          e.prefill_fold_overlap = boolean(x, ek, what);
+        } else if (p.key == "decode_pdl") {
+          e.decode_pdl = boolean(x, ek, what);
+        } else if (p.key == "prefill_window") {
+          e.prefill_window = text(x, ek, what);
+          if (e.prefill_window != "flash" && e.prefill_window != "scalar")
+            fail(what, "'" + ek + "' must be \"flash\" or \"scalar\"");
+        } else if (p.key == "decode_window") {
+          e.decode_window = text(x, ek, what);
+          if (e.decode_window != "flash" && e.decode_window != "scalar")
+            fail(what, "'" + ek + "' must be \"flash\" or \"scalar\"");
+        } else if (p.key == "collective_transport") {
+          e.collective_transport = text(x, ek, what);
+          if (e.collective_transport != "write" && e.collective_transport != "send")
+            fail(what, "'" + ek + "' must be \"write\" or \"send\"");
         } else if (p.key == "rope_scaling") {
           if (!x.is_object()) fail(what, "'" + ek + "' must be an object");
           dgpp::RopeScaling rs;
@@ -377,6 +394,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.l2_prefetch_form = text(x, ek, what);
           if (e.l2_prefetch_form != "load" && e.l2_prefetch_form != "lines" && e.l2_prefetch_form != "touch")
             fail(what, "'" + ek + "' must be load, lines or touch");
+        }
+        else if (p.key == "l2_prefetch_full_form") {
+          e.l2_prefetch_full_form = text(x, ek, what);
+          if (e.l2_prefetch_full_form != "16x8" && e.l2_prefetch_full_form != "48x4")
+            fail(what, "'" + ek + "' must be 16x8 or 48x4");
         }
         else if (p.key == "l2_prefetch_window_mib") e.l2_prefetch_window_mib = static_cast<int>(integer(x, ek, what, 1, 64));
         else if (p.key == "l2_prefetch_boundary_window_mib")

@@ -18,11 +18,13 @@
     "mtp_schedule_row_ms": 5.2,
     "mtp_schedule_base_ms": 31.1,
     "mtp_schedule_lambda": 0.045,
+    "mtp_verify": "block",
     "prefix_cache_gib": 14,
     "admission": "full",
     "admission_window": 256,
     "sampling_candidates": 128,
-    "stats_interval_s": 10
+    "stats_interval_s": 10,
+    "l2_prefetch_window_mib": 18
   },
   "paths": {
     "resident_cache": ""

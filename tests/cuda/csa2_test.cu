@@ -1133,4 +1133,80 @@ DGPP_TEST(csa2_fused_prefill_scores_match_the_oracle) {
   }
 }
 
+namespace {
+template <typename T>
+std::vector<T> fused_dl(const DevBuf& d, size_t n) {
+  std::vector<T> v(n);
+  d.download(v.data(), n * sizeof(T));
+  return v;
+}
+}  // namespace
+
+DGPP_TEST(csa2_norms_rope_is_bitwise_the_three_kernels) {
+  // The fused norms + kv rope launch against rmsnorm x2 and rope_apply on the same rows (2026-10-20).
+  const int rows = 5, q_dim = 1280, kv_dim = dgpp::kCsa2Latent, rope_dim = dgpp::kCsa2Rope, half = rope_dim / 2, off = kv_dim - rope_dim;
+  auto q = random_bf16_bits(0x51, int64_t(rows) * q_dim, -3, 3), kv = random_bf16_bits(0x52, int64_t(rows) * kv_dim, -3, 3);
+  auto qw = random_bf16_bits(0x53, q_dim, -1, 1), kw = random_bf16_bits(0x54, kv_dim, -1, 1);
+  std::vector<int64_t> pos = {0, 7, 1000, -1, 65535};
+  std::vector<float> inv_h(static_cast<size_t>(half), 0.0f);
+  for (int i = 0; i < half; ++i) inv_h[size_t(i)] = 1.0f / std::pow(10000.0f, float(2 * i) / float(2 * half));
+  DevBuf dqa = upload(q), dqb = upload(q), dka = upload(kv), dkb = upload(kv), dqw = upload(qw), dkw = upload(kw);
+  DevBuf dpos = upload(pos), dinv(inv_h.size() * 4);
+  dinv.upload(inv_h.data(), inv_h.size() * 4);
+  const float eps = 1e-6f;
+  dgpp::csa2_rmsnorm_bf16(dqa.p, q_dim, dqw.p, dqa.p, q_dim, rows, q_dim, eps, nullptr);
+  dgpp::csa2_rmsnorm_bf16(dka.p, kv_dim, dkw.p, dka.p, kv_dim, rows, kv_dim, eps, nullptr);
+  dgpp::csa2_rope_apply(static_cast<uint16_t*>(dka.p) + off, kv_dim, kv_dim, 1, rope_dim, static_cast<const int64_t*>(dpos.p),
+                        static_cast<const float*>(dinv.p), false, rows, nullptr);
+  dgpp::csa2_norms_rope(dqb.p, q_dim, dqw.p, q_dim, dkb.p, kv_dim, dkw.p, kv_dim, eps, off, rope_dim,
+                        static_cast<const int64_t*>(dpos.p), static_cast<const float*>(dinv.p), rows, nullptr);
+  sync();
+  const auto qa = fused_dl<uint16_t>(dqa, q.size()), qb = fused_dl<uint16_t>(dqb, q.size());
+  const auto ka = fused_dl<uint16_t>(dka, kv.size()), kb = fused_dl<uint16_t>(dkb, kv.size());
+  require(qa == qb, "the fused q norm is bitwise rmsnorm");
+  require(ka == kb, "the fused kv norm + rope is bitwise rmsnorm + rope_apply");
+}
+
+DGPP_TEST(dsa_decode_tail_is_bitwise_the_five_kernels) {
+  // The fused decode tail (q rope, ring slot, window slots, entry positions, the ring append) against the five
+  // launches it replaces (2026-10-20), fp8-block ring rows of 512 + 16 bytes.
+  const int rows = 5, lh = 16, rope_dim = dgpp::kCsa2Rope, half = rope_dim / 2, latent = dgpp::kCsa2Latent, off = latent - rope_dim;
+  const int ring_slots = 64, window = 16, ratio = 2, n_req = 2;
+  auto q = random_bf16_bits(0x61, int64_t(rows) * lh * latent, -3, 3), kv = random_bf16_bits(0x62, int64_t(rows) * latent, -3, 3);
+  std::vector<int64_t> pos = {5, 6, 0, 1, -1};
+  std::vector<int32_t> req = {0, 0, 1, 1, 0}, table = {0, 1};
+  std::vector<float> inv_h(static_cast<size_t>(half), 0.0f);
+  for (int i = 0; i < half; ++i) inv_h[size_t(i)] = 1.0f / std::pow(10000.0f, float(2 * i) / float(2 * half));
+  const size_t row_bytes = 528, ring_bytes = size_t(n_req) * ring_slots * row_bytes;
+  DevBuf dqa = upload(q), dqb = upload(q), dkv = upload(kv), dpos = upload(pos), dreq = upload(req), dtab = upload(table), dinv(inv_h.size() * 4);
+  dinv.upload(inv_h.data(), inv_h.size() * 4);
+  DevBuf dsa_(size_t(rows) * 8), dsb(size_t(rows) * 8), dla(size_t(rows) * window * 4), dlb(size_t(rows) * window * 4);
+  DevBuf dca(size_t(rows) * 4), dcb(size_t(rows) * 4), dea(size_t(rows) * 8), deb(size_t(rows) * 8), dra(ring_bytes), drb(ring_bytes);
+  DGPP_CUDA_OK(cudaMemset(dra.p, 0x5a, ring_bytes));
+  DGPP_CUDA_OK(cudaMemset(drb.p, 0x5a, ring_bytes));
+  // the five launches
+  dgpp::csa2_rope_apply(static_cast<uint16_t*>(dqa.p) + off, int64_t(lh) * latent, latent, lh, rope_dim,
+                        static_cast<const int64_t*>(dpos.p), static_cast<const float*>(dinv.p), false, rows, nullptr);
+  dgpp::csa2_ring_slot_positions(static_cast<const int64_t*>(dpos.p), static_cast<int64_t*>(dsa_.p), rows, ring_slots, nullptr);
+  dgpp::dsa_latent_append(dkv.p, static_cast<const int32_t*>(dreq.p), static_cast<const int64_t*>(dsa_.p), rows,
+                          static_cast<const int32_t*>(dtab.p), 1, ring_slots, dra.p, latent, nullptr, LatentFormat::kFp8Block);
+  dgpp::csa2_window_slots_decode(static_cast<const int64_t*>(dpos.p), rows, window, ring_slots, static_cast<int32_t*>(dla.p),
+                                 static_cast<int32_t*>(dca.p), nullptr);
+  dgpp::csa2_entry_positions(static_cast<const int64_t*>(dpos.p), static_cast<int64_t*>(dea.p), rows, ratio, nullptr);
+  // the fused tail
+  dgpp::dsa_decode_tail_fp8block(static_cast<uint16_t*>(dqb.p) + off, int64_t(lh) * latent, latent, lh, rope_dim,
+                                 static_cast<const int64_t*>(dpos.p), static_cast<const float*>(dinv.p),
+                                 static_cast<int64_t*>(dsb.p), ring_slots, window, static_cast<int32_t*>(dlb.p),
+                                 static_cast<int32_t*>(dcb.p), static_cast<int64_t*>(deb.p), ratio, dkv.p,
+                                 static_cast<const int32_t*>(dreq.p), static_cast<const int32_t*>(dtab.p), drb.p, latent, rows,
+                                 nullptr);
+  sync();
+  require(fused_dl<uint16_t>(dqa, q.size()) == fused_dl<uint16_t>(dqb, q.size()), "the tail's q rope is bitwise rope_apply");
+  require(fused_dl<int64_t>(dsa_, size_t(rows)) == fused_dl<int64_t>(dsb, size_t(rows)), "the tail's ring slots match");
+  require(fused_dl<int32_t>(dla, size_t(rows) * window) == fused_dl<int32_t>(dlb, size_t(rows) * window), "the tail's window lists match");
+  require(fused_dl<int32_t>(dca, size_t(rows)) == fused_dl<int32_t>(dcb, size_t(rows)), "the tail's window counts match");
+  require(fused_dl<int64_t>(dea, size_t(rows)) == fused_dl<int64_t>(deb, size_t(rows)), "the tail's entry positions match");
+  require(fused_dl<uint8_t>(dra, ring_bytes) == fused_dl<uint8_t>(drb, ring_bytes), "the tail's ring append is bitwise dsa_latent_append");
+}
+
 int main() { return dgpp::test::run_all(); }
