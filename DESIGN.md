@@ -213,6 +213,10 @@ Validation preserves the raw header hash used by resident-image cache keys.
 Resident-image entries are checked for aligned offsets beyond the header/table
 and for byte ranges wholly inside the file. Invalid entries are treated as
 missing layers and rebuilt from the checkpoint.
+Resident-image payload folds are verified before upload by default;
+`DGPP_RESIDENT_CACHE_VERIFY=0` opts out of the payload pass. A read failure,
+size mismatch or failed fold causes that layer to be rebuilt and recached.
+This validation runs during loading and does not change resident inference.
 
 Resident serving loads the rank's weights at startup and keeps them for
 the process lifetime. GLM-5.3-Flash-FP8 requires TP=4 on 128 GB Sparks:

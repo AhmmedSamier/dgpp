@@ -1,6 +1,7 @@
 #include "loaders/resident_image.hpp"
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
@@ -202,6 +203,11 @@ void ResidentImage::write_blob(const void* src, size_t bytes,
                bytes - direct, offset + direct, path_);
 }
 
+bool ResidentImage::verification_enabled() {
+  const char* value = std::getenv("DGPP_RESIDENT_CACHE_VERIFY");
+  return !value || std::strcmp(value, "0") != 0;
+}
+
 void ResidentImage::read_layer(int layer, void* dst, size_t bytes,
                                   bool verify) const {
   if (!has_layer(layer))
@@ -218,6 +224,19 @@ void ResidentImage::read_layer(int layer, void* dst, size_t bytes,
     throw std::runtime_error("resident image " + path_ + ": layer " +
                              std::to_string(layer) +
                              " failed verification (corrupt blob)");
+}
+
+bool ResidentImage::try_read_layer(int layer, void* dst, size_t bytes) {
+  if (!has_layer(layer)) return false;
+  try {
+    read_layer(layer, dst, bytes);
+    return true;
+  } catch (const std::runtime_error& e) {
+    DGPP_LOG_WARN("resident image {}: layer {} rejected ({}) — rebuilding from the checkpoint",
+                  path_, layer, e.what());
+    entries_[static_cast<size_t>(layer)] = Entry{};
+    return false;
+  }
 }
 
 void ResidentImage::write_layer(int layer, const void* src, size_t bytes) {

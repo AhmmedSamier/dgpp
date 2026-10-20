@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,6 +21,20 @@ constexpr size_t kEntryBytes = 32;
 void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
 }
+
+struct VerifyEnvironment {
+  std::optional<std::string> saved;
+  VerifyEnvironment() {
+    if (const char* value = std::getenv("DGPP_RESIDENT_CACHE_VERIFY")) saved = value;
+    ::unsetenv("DGPP_RESIDENT_CACHE_VERIFY");
+  }
+  ~VerifyEnvironment() {
+    if (saved)
+      ::setenv("DGPP_RESIDENT_CACHE_VERIFY", saved->c_str(), 1);
+    else
+      ::unsetenv("DGPP_RESIDENT_CACHE_VERIFY");
+  }
+};
 
 struct Fixture {
   fs::path dir;
@@ -107,4 +122,57 @@ DGPP_TEST(resident_image_accepts_tail_at_eof_and_rejects_truncation) {
   fs::resize_file(fixture.path, fs::file_size(fixture.path) - 1);
   dgpp::ResidentImage truncated(fixture.dir.string(), kKey, 2);
   require(!truncated.has_layer(1) && truncated.has_layer(0), "truncated blob is absent");
+}
+
+DGPP_TEST(resident_image_payload_verification_is_opt_out) {
+  VerifyEnvironment environment;
+  Fixture fixture;
+  fixture.patch(4096, 0);  // Corrupt payload while preserving metadata and fold.
+  std::vector<uint8_t> output(fixture.payload.size());
+  for (const char* value : std::array<const char*, 5>{nullptr, "", "1", "false", "00"}) {
+    if (value)
+      ::setenv("DGPP_RESIDENT_CACHE_VERIFY", value, 1);
+    else
+      ::unsetenv("DGPP_RESIDENT_CACHE_VERIFY");
+    dgpp::ResidentImage image(fixture.dir.string(), kKey, 2);
+    require(!image.try_read_layer(0, output.data(), output.size()),
+            "corrupt payload refused by default");
+    require(!image.has_layer(0) && image.has_layer(1), "only corrupt layer invalidated");
+  }
+  ::setenv("DGPP_RESIDENT_CACHE_VERIFY", "0", 1);
+  dgpp::ResidentImage image(fixture.dir.string(), kKey, 2);
+  require(image.try_read_layer(0, output.data(), output.size()),
+          "explicit opt-out skips payload fold");
+  require(output != fixture.payload, "opt-out fixture has changed bytes");
+}
+
+DGPP_TEST(resident_image_opt_out_preserves_metadata_and_size_checks) {
+  VerifyEnvironment environment;
+  ::setenv("DGPP_RESIDENT_CACHE_VERIFY", "0", 1);
+  Fixture fixture;
+  fixture.entry(0, 0, fixture.payload.size());
+  dgpp::ResidentImage image(fixture.dir.string(), kKey, 2);
+  require(!image.has_layer(0), "opt-out still rejects invalid offsets");
+  std::vector<uint8_t> output(fixture.payload.size(), 0x7c);
+  require(!image.try_read_layer(1, output.data(), output.size() - 1),
+          "size mismatch is a cache miss");
+  require(output == std::vector<uint8_t>(output.size(), 0x7c),
+          "size mismatch does not write destination");
+  require(!image.has_layer(1), "stale layer invalidated");
+  image.write_layer(1, fixture.payload.data(), fixture.payload.size());
+  require(image.try_read_layer(1, output.data(), output.size()), "rebuilt layer readable");
+  require(output == fixture.payload, "rebuilt layer bytes match");
+}
+
+DGPP_TEST(resident_image_read_failure_rebuilds_without_reopening) {
+  VerifyEnvironment environment;
+  Fixture fixture;
+  dgpp::ResidentImage image(fixture.dir.string(), kKey, 2);
+  fs::resize_file(fixture.path, 4096);  // Truncated after the table was read.
+  std::vector<uint8_t> output(fixture.payload.size());
+  require(!image.try_read_layer(0, output.data(), output.size()), "short read is a cache miss");
+  image.write_layer(0, fixture.payload.data(), fixture.payload.size());
+  require(image.try_read_layer(0, output.data(), output.size()),
+          "replacement blob passes verification");
+  require(output == fixture.payload, "replacement blob bytes match");
 }

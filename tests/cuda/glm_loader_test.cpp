@@ -40,6 +40,7 @@
 #include "models/glm/config.hpp"
 #include "models/glm/loader.hpp"
 #include "models/glm/resident_image.hpp"
+#include "resident_image_fixture.hpp"
 
 namespace {
 
@@ -951,6 +952,41 @@ DGPP_TEST(glm_loader_resident_image_restore_is_bitwise_and_reads_no_source) {
     { std::ofstream out(cfg_path); out << text; }
   }
   dgpp::GlmLayerStream::set_resident_image_dir(saved);
+}
+
+DGPP_TEST(glm_loader_rebuilds_rejected_resident_images) {
+  const Fixture fx = write_fixture();
+  imagefx::Cache<dgpp::GlmLayerStream> cache(fx.dir / "rejected-cache");
+  for (const size_t field : {0, 8, 16}) {
+    std::vector<uint8_t> expected;
+    {
+      dgpp::GlmLayerStream stream(fx.cfg, fx.dir.string(), 0, 1, dgpp::GlmResidency::Resident);
+      (void)stream.load_layer(0);
+      (void)stream.load_layer(1);
+      const auto [base, bytes] = stream.resident_layer_span(0);
+      expected.resize(bytes);
+      DGPP_CUDA_OK(cudaMemcpy(expected.data(), base, bytes, cudaMemcpyDeviceToHost));
+    }
+    cache.corrupt(field);
+    {
+      dgpp::GlmLayerStream stream(fx.cfg, fx.dir.string(), 0, 1, dgpp::GlmResidency::Resident);
+      const auto& layer = stream.load_layer(0);
+      (void)stream.load_layer(1);
+      const auto [base, bytes] = stream.resident_layer_span(0);
+      std::vector<uint8_t> got(bytes);
+      DGPP_CUDA_OK(cudaMemcpy(got.data(), base, bytes, cudaMemcpyDeviceToHost));
+      require(got == expected && layer.layer == 0, "rebuilt GLM layer matches checkpoint");
+      require(stream.image_layers_captured() == 1 && stream.image_layers_restored() == 1,
+              "rebuild rejected GLM layer and restore its neighbor");
+      require(stream.source_bytes_read() > 0, "rebuild reads source weights");
+    }
+    {
+      dgpp::GlmLayerStream stream(fx.cfg, fx.dir.string(), 0, 1, dgpp::GlmResidency::Resident);
+      (void)stream.load_layer(0);
+      require(stream.image_layers_restored() == 1 && stream.source_bytes_read() == 0,
+              "repaired GLM layer restores on next startup");
+    }
+  }
 }
 
 DGPP_TEST(glm_resident_image_direct_and_buffered_paths_agree_on_odd_sizes) {

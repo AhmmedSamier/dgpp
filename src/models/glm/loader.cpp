@@ -819,7 +819,7 @@ void GlmLayerStream::open_resident_image() {
                 image_->direct_io() ? "direct" : "buffered");
 }
 
-void GlmLayerStream::restore_layer_from_image(int layer, GlmLayerBump& bump,
+bool GlmLayerStream::restore_layer_from_image(int layer, GlmLayerBump& bump,
                                               GlmLayerResident& out) {
   // Layout pass: the build with copy=false against a REAL bump hands out
   // the exact grant sequence (hence the exact view pointers) without
@@ -840,16 +840,13 @@ void GlmLayerStream::restore_layer_from_image(int layer, GlmLayerBump& bump,
   if (bytes != layer_bytes(cfg_, layer, rank_, world_))
     throw std::runtime_error("glm loader: layout pass drifted from the byte "
                              "formula on layer " + std::to_string(layer));
-  static const bool verify = [] {
-    const char* v = std::getenv("DGPP_RESIDENT_CACHE_VERIFY");
-    return v && *v && std::string(v) != "0";
-  }();
-  image_->read_layer(layer, staging_, bytes, verify);
+  if (!image_->try_read_layer(layer, staging_, bytes)) return false;
   sync_load_boundary(reader_, stream_);
   bump.upload(stream_);  // stage == staging_: the blob is the mirror's layout
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   out.bytes = bytes;
   ++image_restored_;
+  return true;
 }
 
 void GlmLayerStream::capture_layer_to_image(int layer, const GlmLayerBump& bump,
@@ -978,9 +975,11 @@ const GlmLayerResident& GlmLayerStream::load_layer(int layer) {
     bump->side_mode = side_grants_;
     const CountedLayer counted = count_layer(cfg_, layer, rank_, world_);
     bump->init(counted.bytes - (side_grants_ ? counted.side_bytes : 0));
-    if (image_ && image_->has_layer(layer)) {
-      restore_layer_from_image(layer, *bump, slot);
-    } else {
+    const bool restored =
+        image_ && image_->has_layer(layer) && restore_layer_from_image(layer, *bump, slot);
+    if (!restored) {
+      bump->reset();
+      slot = GlmLayerResident{};
       sync_load_boundary(reader_, stream_);
       build_layer_into(layer, *bump, slot);
       if (image_) capture_layer_to_image(layer, *bump, slot.bytes);

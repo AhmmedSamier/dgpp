@@ -45,6 +45,9 @@ dtype-alias compatibility. Global tensor overlap/coverage validation remains
 outside this reader change.
 Resident-image metadata validation rejects offsets inside the header/table,
 unaligned offsets, overflowing ranges and truncated blobs before restoration.
+Payload verification is enabled by default with an explicit environment opt-out.
+Rejected layers rebuild from their checkpoint, with native metadata/policy tests
+and GPU recovery coverage for both resident loader implementations.
 
 ## Serving support
 
