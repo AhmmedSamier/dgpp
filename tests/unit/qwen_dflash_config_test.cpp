@@ -129,3 +129,20 @@ DGPP_TEST(dflash_config_cross_checks_the_target) {
   w.sliding_window = 16;  // a window not covering the block
   require(!refusal_against(w, t).empty(), "block past the window must be refused");
 }
+
+DGPP_TEST(dflash_config_validates_dimensions_and_preserves_layer_types) {
+  for (const auto* field : {"num_attention_heads", "num_key_value_heads", "hidden_size", "intermediate_size"}) {
+    const std::string key = std::string("\"") + field + "\": ";
+    const std::string json = kFixture;
+    const auto start = json.find(key) + key.size();
+    const auto end = json.find(',', start);
+    require(!refusal(patched(key + json.substr(start, end - start), key + "0")).empty(), "zero dimension refused");
+  }
+  const auto c = parse(patched("\"num_hidden_layers\": 6,",
+      "\"num_hidden_layers\": 6, \"layer_types\": [\"sliding_attention\",\"sliding_attention\","
+      "\"sliding_attention\",\"sliding_attention\",\"sliding_attention\",\"full_attention\"],"));
+  require(c.attention_window(0) == 4096 && c.attention_window(5) == INT64_MAX,
+          "the release's last layer attends the full context");
+  require(!refusal(patched("[1, 7, 14, 20, 26, 32, 39, 45]", "[7, 1, 14, 20, 26, 32, 39, 45]")).empty(),
+          "never silently reorder the checkpoint's fc features");
+}

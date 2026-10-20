@@ -1,8 +1,8 @@
 #pragma once
 // The DFlash v1 drafter for Qwen3.5-122B-A10B (docs/dflash_v1_122b_plan.md):
 // a block mask-predict draft model from a SEPARATE checkpoint
-// (z-lab/Qwen3.5-122B-A10B-DFlash) — six plain sliding-window Qwen3 layers
-// over a KV context built from fused target features (eight tap layers'
+// (z-lab/Qwen3.5-122B-A10B-DFlash) — six Qwen3 layers (five sliding, one
+// full attention) over KV context built from fused target features (eight tap layers'
 // residual streams concatenated through fc), no convolutions, no selector:
 // the block is [anchor + 15 masks] and each mask row proposes its top-1
 // off the target's shared head. The embeddings and lm head are the
@@ -10,8 +10,7 @@
 // the model's KV pool so block tables, prefix sharing and rollback ride
 // the existing protocol.
 //
-// v1 scope: config, binding, loader (this header). The block forward and
-// the proposal/verify wiring are stage 2.
+// The model runs the block through the eager or recorded proposal path.
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -39,6 +38,10 @@ struct DFlashConfig {
   float rms_norm_eps = 1e-6f;
   double rope_theta = 1e7;
   int64_t sliding_window = 4096;  // INT64_MAX when the backbone is not sliding
+  std::vector<int64_t> layer_windows;  // checkpoint layer_types: full layers use INT64_MAX
+  int64_t attention_window(int layer) const {
+    return layer_windows.empty() ? sliding_window : layer_windows.at(layer);
+  }
   int64_t max_position_embeddings = 262144;
 
   static DFlashConfig from_json_file(const std::string& path);

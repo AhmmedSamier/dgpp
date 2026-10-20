@@ -1400,8 +1400,7 @@ add_test(NAME qwen35_mixed_test
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_teacher.q35dump)
 set_tests_properties(qwen35_mixed_test PROPERTIES DEPENDS qwen35_mixed_generate_teacher)
 # The MoE release (122B layout at toy widths: ModelOpt NVFP4 routed experts,
-# BF16 rest): the same smoke/rows/group gates over the MoE fixture. Dump
-# parity waits on the reference dump's MoE path (tools/qwen35_reference_dump.py).
+# BF16 rest): smoke/rows/group and independent reference/teacher parity.
 set(QWEN35_MOE_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_fixture)
 add_test(NAME qwen35_moe_fixture COMMAND qwen35_forward_test --write-fixture-moe ${QWEN35_MOE_FIXTURE})
 add_test(NAME qwen35_moe_smoke COMMAND qwen35_forward_test --smoke ${QWEN35_MOE_FIXTURE})
@@ -1410,6 +1409,29 @@ add_test(NAME qwen35_moe_rows_invariance COMMAND qwen35_forward_test --rows-inva
 set_tests_properties(qwen35_moe_rows_invariance PROPERTIES DEPENDS qwen35_moe_fixture)
 add_test(NAME qwen35_moe_group_invariance COMMAND qwen35_forward_test --group-invariance ${QWEN35_MOE_FIXTURE})
 set_tests_properties(qwen35_moe_group_invariance PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_generate
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MOE_FIXTURE} --tokens 16 --no-mtp
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_ref.q35dump)
+set_tests_properties(qwen35_moe_generate PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_e2e
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MOE_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_ref.q35dump --relaxed
+          --engine-states ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_states.bin)
+set_tests_properties(qwen35_moe_e2e PROPERTIES DEPENDS qwen35_moe_generate)
+add_test(NAME qwen35_moe_generate_teacher
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MOE_FIXTURE} --tokens 16 --no-mtp
+          --teacher ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_states.bin
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_teacher.q35dump)
+set_tests_properties(qwen35_moe_generate_teacher PROPERTIES DEPENDS qwen35_moe_e2e)
+add_test(NAME qwen35_moe_test
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MOE_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_teacher.q35dump)
+set_tests_properties(qwen35_moe_test PROPERTIES DEPENDS qwen35_moe_generate_teacher)
+set_tests_properties(qwen35_moe_fixture qwen35_moe_smoke qwen35_moe_rows_invariance
+    qwen35_moe_group_invariance qwen35_moe_generate qwen35_moe_e2e
+    qwen35_moe_generate_teacher qwen35_moe_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
 # Exercise the FP4 prefill dispatch at its 1024-row boundary.
 # The short mixed fixture above stays on the decode/short-prefill kernel.
 add_test(NAME qwen35_mixed_prefill_generate

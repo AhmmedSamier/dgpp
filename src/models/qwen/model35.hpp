@@ -364,6 +364,8 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
     if (dflash1_) return std::min(df1cfg_.drafts(), dflash_depth_ == 0 ? 7 : dflash_depth_);
     return dflash2_ ? dfcfg_.drafts() : 0;
   }
+  // Physical rows written by a redraft, independent of the verify cap.
+  int block_draft_rows() const { return dflash1_ ? df1cfg_.query_rows() : dfcfg_.query_rows(); }
   bool dflash1_enabled() const { return dflash1_; }
   // False without a draft (pool exhausted / context bound): the caller
   // runs the step without speculation.
@@ -419,7 +421,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // walk, no proposals (the default). Before the first capture.
   void dflash2_arm_proposals(const SampleSpec* specs, DraftProposal* proposals,
                              DraftProposal* proposals_host, int stride) {
-    if (specs != nullptr && (proposals == nullptr || stride < dfcfg_.drafts()))
+    if (specs != nullptr && (proposals == nullptr || stride < dflash2_drafts()))
       throw std::invalid_argument("dflash2_arm_proposals: proposals / stride");
     df_specs_ = specs;
     df_props_ = proposals;
@@ -712,7 +714,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   int df_props_stride_ = 0;
   int df_batch_ = 1;  // the stacked draft batch width (slots per forward)
   // The DFlash v1 drafter (null unless a v1 directory was given):
-  // DFlashConfig + weights, eight tap map, single-slot eager scratch
+  // DFlashConfig + weights, tap map, one block of reusable scratch
   // (query_rows = 16 rows; C1 scope — batching and capture stay open).
   bool dflash1_ = false;
   DFlashConfig df1cfg_;
@@ -742,6 +744,8 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // top-1s each mask row off the shared head.
   bool dflash1_draft(int req, int64_t bonus, std::vector<int32_t>* drafts);
   void df1_block_layers(int req, cudaStream_t stream, bool capture);
+  void df1_block_select(bool capture);
+  void df1_capture_draft(int req, const PickVerdict* verdict, int64_t* feed);
   void df1_store_features(int T, const int32_t* d_req, const int64_t* d_pos);
   // The captured verify's replay state (one static 32-row graph): the
   // pool tables pointer the capture baked in (a mismatch means the pool

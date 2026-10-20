@@ -102,12 +102,15 @@ DFlashConfig DFlashConfig::parse(const minijson::Value& root) {
     if (!t.is_number()) reject("dflash_config.target_layer_ids", "non-numeric element");
     c.target_layer_ids.push_back(static_cast<int>(t.as_int()));
   }
-  std::sort(c.target_layer_ids.begin(), c.target_layer_ids.end());
+  if (!std::is_sorted(c.target_layer_ids.begin(), c.target_layer_ids.end()))
+    reject("dflash_config.target_layer_ids", "must be in checkpoint feature order (ascending)");
   c.num_hidden_layers = int_at(root, "num_hidden_layers", 6, true);
   c.hidden_size = int_at(root, "hidden_size", 3072, true);
   c.vocab_size = int_at(root, "vocab_size", 248320, true);
   c.num_attention_heads = int_at(root, "num_attention_heads", 32, true);
   c.num_key_value_heads = int_at(root, "num_key_value_heads", 8, true);
+  if (c.hidden_size <= 0 || c.vocab_size <= 0 || c.num_attention_heads <= 0 || c.num_key_value_heads <= 0)
+    reject("dimensions", "hidden_size, vocab_size and head counts must be positive");
   c.head_dim = int_at(root, "head_dim", c.hidden_size / c.num_attention_heads, true);
   c.intermediate_size = int_at(root, "intermediate_size", 9216, true);
   c.rms_norm_eps = static_cast<float>(double_at(root, "rms_norm_eps", 1e-6));
@@ -121,13 +124,25 @@ DFlashConfig DFlashConfig::parse(const minijson::Value& root) {
     const bool sliding = sw && !sw->is_null() ? sw->as_bool(true) : true;
     c.sliding_window = sliding ? i64_at(root, "sliding_window", 4096, true) : INT64_MAX;
   }
-  if (c.block_size < 2) reject("dflash_config.block_size", "at least 2");
+  if (c.block_size < 2 || c.block_size > 16) reject("dflash_config.block_size", "2..16 supported");
+  if (c.intermediate_size <= 0 || c.max_position_embeddings <= 0 || c.sliding_window <= 0)
+    reject("dimensions", "intermediate_size, max_position_embeddings and sliding_window must be positive");
   if (c.num_hidden_layers < 1 || c.num_hidden_layers > 16)
     reject("num_hidden_layers", "1..16 supported");
   if (c.head_dim != 128) reject("head_dim", "only 128 is supported");
   if (c.num_attention_heads % c.num_key_value_heads ||
       c.num_attention_heads / c.num_key_value_heads > 8)
     reject("num_key_value_heads", "heads/kv_heads must be in [1, 8]");
+  if (const auto* types = root.find("layer_types"); types && !types->is_null()) {
+    if (!types->is_array() || types->items().size() != static_cast<size_t>(c.num_hidden_layers))
+      reject("layer_types", "must name every draft layer");
+    for (const auto& type : types->items()) {
+      if (!type.is_string()) reject("layer_types", "expected attention type strings");
+      if (type.as_string() == "full_attention") c.layer_windows.push_back(INT64_MAX);
+      else if (type.as_string() == "sliding_attention") c.layer_windows.push_back(c.sliding_window);
+      else reject("layer_types", "only full_attention and sliding_attention are supported");
+    }
+  }
   if (const minijson::Value* tw = root.find("tie_word_embeddings"))
     if (tw->as_bool(false))
       reject("tie_word_embeddings", "the draft shares the target's head; ties are not loaded");
@@ -290,6 +305,7 @@ DFlashWeights load_dflash_weights(const DFlashConfig& cfg, const std::string& di
   copy_full("norm.weight", const_cast<uint16_t*>(w.norm), {H});
   if (off * 2 != w.bytes)
     throw std::logic_error("load_dflash_weights: arena accounting mismatch");
+  DGPP_CUDA_OK(cudaStreamSynchronize(stream));  // host shard and column buffers die on return
   return w;
 }
 

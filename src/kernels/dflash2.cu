@@ -191,7 +191,12 @@ __global__ void block_attn_kernel(const uint16_t* __restrict__ q, int64_t q_stri
   // The block's span off its first row's position (device-read: a
   // recorded draft takes the committed position).
   const int64_t p0 = pos[row - row % block_rows];
-  const int64_t ctx_end = p0 - 1, blk_lo = p0, blk_hi = p0 + block_rows - 1;
+  const int64_t ctx_end = p0 - 1, blk_lo = p0;
+  // A block at the context ceiling has padding positions. Only valid
+  // rows own K/V; reading the nominal end could touch an unowned page.
+  int last_valid = block_rows - 1;
+  while (last_valid > 0 && pos[row - row % block_rows + last_valid] < 0) --last_valid;
+  const int64_t blk_hi = p0 + last_valid;
   const int64_t lo = p - window + 1;  // keys below lo are windowed out
   for (int hh = warp; hh < hpq; hh += nwarp) {
     const int head = kvh * hpq + hh;
@@ -264,7 +269,12 @@ __global__ void block_attn_split_kernel(const uint16_t* __restrict__ q, int64_t 
   const int hpq = heads / kv_heads;
   const int64_t p = pos[row];
   const int64_t p0 = pos[row - row % block_rows];
-  const int64_t ctx_end = p0 - 1, blk_lo = p0, blk_hi = p0 + block_rows - 1;
+  const int64_t ctx_end = p0 - 1, blk_lo = p0;
+  // A block at the context ceiling has padding positions. Only valid
+  // rows own K/V; reading the nominal end could touch an unowned page.
+  int last_valid = block_rows - 1;
+  while (last_valid > 0 && pos[row - row % block_rows + last_valid] < 0) --last_valid;
+  const int64_t blk_hi = p0 + last_valid;
   const int64_t lo = p - window + 1;
   const int64_t ctx_lo = lo > 0 ? lo : 0;
   // This split's share of the context keys (empty for a short context).

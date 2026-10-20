@@ -929,6 +929,10 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
             "set engine.mtp_schedule=false to use a fixed verify depth.");
       const int options = std::min(span, fit);
       if (block_) {
+        if constexpr (requires { model_->dflash2_confidence(); }) {
+          if (model_->dflash2_confidence() == nullptr)
+            throw std::invalid_argument("engine.mtp_schedule requires a drafter with confidence scores; DFlash v1 has none");
+        }
         // The block drafter: the selector walk writes every draft's
         // confidence (the model's [slot][drafts] table, read by
         // record_confidence_publish); no draft-head path.
@@ -1733,11 +1737,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
 
   int64_t physical_reserve_tokens(int64_t tokens) const {
     // The chained drafts write depth - 1 rows past the verify's last row;
-    // a block drafter's block starts after the last accepted row and spans
-    // the verify's width again. Past the context ceiling, position kernels
-    // stage padding rows. Clamp before adding to avoid overflowing the sum.
+    // a block starts after the last accepted row and writes all its query
+    // rows, which can exceed the verify cap. Past the context ceiling,
+    // position kernels stage padding. Clamp before adding to avoid overflow.
     const int64_t ceiling = model_->max_context();
-    const int64_t tail = block_ ? depth_ + 1 : std::max(0, depth_ - 1);
+    int64_t tail = block_ ? depth_ + 1 : std::max(0, depth_ - 1);
+    if constexpr (requires { model_->block_draft_rows(); }) {
+      if (block_) tail = std::max<int64_t>(tail, model_->block_draft_rows());
+    }
     return tokens >= ceiling ? ceiling : tokens + std::min(tail, ceiling - tokens);
   }
 

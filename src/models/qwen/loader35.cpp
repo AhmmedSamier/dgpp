@@ -959,7 +959,7 @@ struct Qwen35LoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
 
 const char* Qwen35LoaderFamily::who() { return "qwen35 loader"; }
 
-// 5: MoE MTP draft encoded (engine.mtp_expert_format=bf16 carries bit 8).
+// 7: MoE plus K/V scales; bit 8 distinguishes BF16-to-FP8 draft encoding.
 // 4: MoE variant adds routed/shared slices (Nvfp4Moe, ModelOpt naming).
 // 3: the NVFP4 global slot holds the weight-side divisor itself (2026-10-06;
 // the 2-era images hold its reciprocal, and the kernels divide by the slot).
