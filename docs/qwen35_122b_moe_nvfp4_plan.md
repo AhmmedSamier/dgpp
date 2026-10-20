@@ -1,6 +1,9 @@
 # Qwen3.5-122B-A10B-NVFP4 on dgpp — architecture study and implementation plan (2026-10-07)
 
-Status: port in progress on `qwen35-122b-moe-nvfp4` (from PR #95 `e28d8a2` + `origin/master` `07a32fb` = `70419f9`). Text path only; vision ignored like the dense 27B family.
+Status: integrated with the current Qwen35 family, including its FP8 KV,
+vision configuration, shared prefill and recorded decode interfaces. The
+model card documents serving options; full-checkpoint quality and template
+performance validation remain separate from the synthetic regression gates.
 
 References: `nvidia/Qwen3.5-122B-A10B-NVFP4` (cached `98915d83`, 83.5G `total_size`, 9 shards, 149309 tensors), transformers 5.17 `modular_qwen3_5_moe.py` (`Qwen3_5Moe*` over `Qwen3Next*` over `Qwen2Moe*`), `docs/adding_a_model.md`, dense sibling card `docs/model_cards/Qwen3.8-27B-NVFP4.md`.
 
@@ -19,7 +22,7 @@ Differences from dense 27B (hidden 5120, 64 layers, dense SwiGLU 17408):
 | MTP | 1 Full layer, MoE BF16 experts (256×3 BF16) + shared BF16 | 1 Full layer, dense BF16 |
 | quant | ModelOpt NVFP4, **routed experts only** (`weight` U8 + `weight_scale` F8_E4M3 group16 + `weight_scale_2` F32 + `input_scale` F32); rest BF16 | compressed-tensors mixed (dense MLP NVFP4 + attn/head FP8-channel) |
 
-Checkpoint bytes: BF16 18.2G (attn/GDN/shared/router/norms/embed/head/MTP-BF16 incl 4.6G MTP experts), F8 7.2G (scales), U8 58.0G (packed fp4). Vision 333 tensors ignored. KV FP8 scheme declared but engine KV stays BF16 (dense precedent: count `k_scale`/`v_scale`, never resident).
+Checkpoint bytes: BF16 18.2G (attn/GDN/shared/router/norms/embed/head/MTP-BF16 incl 4.6G MTP experts), F8 7.2G (scales), U8 58.0G (packed fp4). The original text census excluded 333 vision tensors. The current family loads a configured vision tower separately. The release declares an FP8 KV scheme but lacks K/V scale tensors; the deployment templates select BF16 KV.
 
 Worlds: weights 83G → TP=1 needs ~90G+KV (~6.4G @262k: 12 Full ×2×2×256×2B×262k) ≈ 100G, marginal on 128G Spark; public targets TP=2/TP=4 (41/21G weights per rank). TP geometry: GDN heads 16/64, Full 32/2, MoE inter 1024 and shared 1024 must divide W (1024%4=0 ok); kv 2 < W handled by existing `kv_head_begin=rank/(W/kv)` rule. Router/shared-gate replicated; experts/shared sliced.
 
@@ -27,20 +30,19 @@ Worlds: weights 83G → TP=1 needs ~90G+KV (~6.4G @262k: 12 Full ×2×2×256×2B
 
 Per main layer L (0..47): `input_layernorm`/`post_attention_layernorm` BF16 `[H]`; GDN (36 layers): `A_log`/`dt_bias` `[Vh]`, `conv1d` `[2K+V,1,4]`, `in_proj_a/b` `[Vh,H]`, `in_proj_qkv` `[2K+V,H]`, `in_proj_z` `[LV,H]`, `norm` `[128]`, `out_proj` `[H,LV]` all BF16; Full (12 layers): `q_proj` `[2QH,H]` (attn_output_gate), `k/v_proj` `[KVH,H]`, `o_proj` `[H,QH]`, `q/k_norm` `[256]` all BF16; MoE: `mlp.gate` `[256,H]` BF16, `mlp.shared_expert_gate` `[1,H]` BF16, `shared_expert.{gate,up}_proj` `[1024,H]` + `down_proj` `[H,1024]` BF16, `experts.e.{gate,up}_proj` U8 `[1024,1536]` + F8 `[1024,192]` + 2×F32, `down_proj` U8 `[3072,512]` + F8 `[3072,64]` + 2×F32 (e=0..255). Globals: `embed` `[248320,H]`, `lm_head` `[V,H]`, `language_model.norm` `[H]` BF16. MTP `mtp.layers.0.*`: same Full + MoE shapes but experts BF16 `[1024,3072]`/`[3072,1024]` (785 tensors incl `mtp.fc`/`norm`/`pre_*`). `QwenMoeLayer` contract matches: softmax top-k, renorm, swiglu experts, sigmoid shared tail, ascending-fp32 chain.
 
-Naming gap vs dense-NVFP4: ModelOpt (`.weight/.weight_scale/.weight_scale_2/.input_scale`) not compressed-tensors (`.weight_packed/.weight_scale/.weight_global_scale/.input_global_scale`). `loader.cpp:621` (`load_fp4_*_mo`) already speaks ModelOpt; `loader35.cpp` only speaks compressed-tensors. Config gap: `quant_method=modelopt` + `quant_algo=NVFP4`, `config_groups.group_0.{weights{4b,group16},targets:[Linear]}` with no `format` field; `hf_quant_config.json` mirrors (`NVFP4`/`FP8` kv, `exclude_modules`). `config35.cpp` demands `compressed-tensors` + `format`, `intermediate_size`, `model_type=qwen3_5_text` — all three reject 122B today.
+ModelOpt uses `.weight/.weight_scale/.weight_scale_2/.input_scale`, unlike
+the dense compressed-tensors release. The loader now handles both naming
+schemes. ModelOpt `config_groups` with `targets: ["Linear"]` and glob
+`ignore` entries identify the routed experts; unsupported formats are
+rejected during configuration parsing.
 
 ## 2. Placement decisions
 
 * Family: extend `Qwen3_5` (`Qwen35TextConfig` + `is_moe`, `moe_*`, `modelopt_nvfp4` quant kind), not a new `ModelArchitecture` — arch prefix already routes here; serve wiring `Qwen35Family` unchanged. Reuse GDN/Full kernels + `QwenMoeLayer` (routed NVFP4 + BF16 shared, `routed_config(H,1024,256,8,true)`).
 * Binding: `expect_moe35` per layer (Router/Shared/Routed classes, ModelOpt quad names); MTP expects BF16 MoE. `is_replicated_35` gains Router→true (match `loader.cpp`), Shared/Routed→false.
 * Loader: `load_fp4_*_modelopt` beside `load_fp4_*` (payload `.weight`, scales `.weight_scale`, global `.weight_scale_2`, consume `.input_scale`); TP slices `I/W`, `S/W`; globals F32 divisor (kernels divide once, dense § loader35 `load_fp4_global` precedent).
-* Model: `Qwen35DenseMlpResident` → union with `QwenMoeResident`-like (router/shared/experts_fp4 + globals); `dense_mlp` → `moe_enqueue` (`enqueue_decode`/`enqueue_prefill`, same chunk-invariance/graph rules as `QwenMoeLayer`). MTP: load BF16 MoE but serve `mtp:false` + DFlash first (BF16 routed has no kernel; fused-FP8 encode would be lossy — keyed decision, not default).
-* Keys: exact BF16-act NVFP4 by default; no new `engine.*` lever in v1 (dense levers `prefill_fp8_per_tensor`/`dense_weights:fp8` refused under NVFP4, same rule).
-
-## 3. Port record
-
-* 2026-10-07: survey (this doc), branch `qwen35-122b-moe-nvfp4` from PR95+master.
-* Next: config+binding unit gates on real snapshot → loader smoke (layer 0 + MTP skipped) → fixture/reference-dump → forward parity vs transformers → templates/card → `ci` suite + transcript battery + fabric md5 + campaign.
+* Model: `Qwen35DenseMlpResident` → union with `QwenMoeResident`-like (router/shared/experts_fp4 + globals); `dense_mlp` → `moe_enqueue` (`enqueue_decode`/`enqueue_prefill`, same chunk-invariance/graph rules as `QwenMoeLayer`). MTP: encode the per-expert BF16 draft to block FP8 only with `mtp_expert_format: bf16`; target verification retains the checkpoint weights.
+* Target routed experts use BF16 activations with NVFP4 weights. The dense-family conversion options remain restricted to their supported checkpoint formats.
 
 ## 4. MTP draft (2026-10-07)
 
@@ -54,8 +56,7 @@ MoE+mtp without the key, dense+`bf16` (dense draft is dense BF16,
 serves as shipped). Loader format bit 8 carries the key. Model:
 `mtp_run_rows` rides `moe_mlp` on the draft resident (route-table slot
 `num_hidden_layers`), `graph_prepare` harvests it; ctor + plan refuse
-the wrong combinations by key name. Live: `mtp:true` boot, prompts
-identical to plain (391/Paris/1-10), templates ship MTP depth 2.
+the wrong combinations by key name. Templates select MTP depth 2. Shared-prefill tests exercise MTP on and off, including graph token parity.
 
 ## 5. Forward parity (2026-10-08)
 
@@ -73,8 +74,7 @@ shared tail, accumulation — matches; layer 0 and Full layers go exact):
   correct, outputs totally different; observed as whole-row 0.2-0.7
   errors with no matching expert pair). Top-8-of-8 removes the
   selection boundary entirely (full softmax + renorm still divide for
-  real, every expert runs every row); top-k selection itself rides the
-  shared MoE kernels plus live-checkpoint routed answers.
+  real, every expert runs every row); top-k selection itself is covered by the shared MoE kernel tests.
 * Softmax weight-noise amplification (dw/w ~ ||gate||·dx): wide routers
   turn the inherited ~5-ulp bf16 floor into percent-level weight noise;
   rms 1.0 at H=256 (logits spread ~5) threads it.
