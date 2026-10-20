@@ -44,6 +44,19 @@ use the existing session numerical tier and certify changed argmax near ties;
 same-shape isolation and graph token comparisons remain exact. Qwen4Exp retains
 its two-rank `qwen_engine_test` coverage. Run GPU checks serially with production
 stopped, then restore and verify the original deployment.
+`qwen35_moe_*` adds the ModelOpt MoE fixture, row/group invariance and
+independent reference/teacher comparisons. `qwen35_tp_test` covers MoE
+worlds 1/2/4, native MTP graphs at worlds 2/4, and DFlash v1 graph
+proposals at worlds 1/2, with multiple
+request slots, page-boundary reserves and a small reduction buffer.
+`shared_prefill_qwen35_moe` in `shared_prefill_test` exercises the current
+shared-prefill protocol and native MTP. Run the focused set with:
+
+```bash
+python3 scripts/site_env.py run-rank --rank 0 -- ctest --test-dir build-ci --output-on-failure -j 1 -R '^(unit_tests|dflash2_kernels_test|qwen35_moe_.*|qwen35_tp_test)$'
+python3 scripts/site_env.py run-rank --rank 0 -- env DGPP_TEST_FILTER=shared_prefill_qwen35 ctest --test-dir build-ci --output-on-failure -j 1 -R '^shared_prefill_test$'
+```
+
 `qwen_image_prefill_test` also destroys the caller's prompt, image and boundary
 buffers after starting a shared `PrefillTask`. Its yielded execution must retain
 the target and MTP results, snapshot chain and KV cleanup behavior. Run it with
