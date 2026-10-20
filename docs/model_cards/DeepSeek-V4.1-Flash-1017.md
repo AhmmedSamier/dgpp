@@ -655,6 +655,30 @@ little work: a block's fold of hidden x 2 bytes per row moves at about
 7 GB/s per rank on the paced bulk path, and block B's accumulation is
 shorter than block A's fold.
 
+## Measured (2026-10-20, four nodes): the campaign of record
+
+The full row set of [benchmarks](../benchmarks.md) on source `283a52f7`, binary `f4e9e9cdb16acf86`, in one
+`serve_campaign.py run` with the five DSpark mode boots (10:04–11:03 UTC; every rank at zero swap before and after,
+zero cached tokens in the 12 cold probes, matching operation streams, the plain boot's transcripts identical to the
+default's in 5/5 classes, 9/9 API checks, isolation identical). These are the rows the benchmark doc tables.
+
+| | 2026-10-19 (`0d69d565`) | 2026-10-20 (`283a52f7`) |
+|---|---|---|
+| C1 decode tok/s (prose / code / JSON / math / chat) | 44.8 / 66.5 / 78.1 / 73.7 / 50.8 | 53.5 / 80.0 / 89.4 / 87.5 / 55.0 |
+| Decode tok/s by concurrency, C1 / C2 / C4 / C8 | 44.8–78.1 / 63.9–111.5 / 85.9–119.2 / 76.4–122.8 | 53.5–89.4 / 75.5–121.9 / 94.7–130.3 / 83.8–139.0 |
+| Wall tok/s, C1 / C2 / C4 / C8 | 43.6–73.9 / 62.2–105.8 / 83.8–114.3 / 74.6–117.5 | 52.0–84.6 / 73.4–115.8 / 92.2–125.2 / 81.7–132.7 |
+| Cold prefill s, 2K / 8K / 32K | 1.079 / 2.713 / 10.030 | 1.006 / 2.638 / 10.024 |
+| Context decode ms per pass (tok/s), short / 32K / 64K / 128K / 256K / 512K | 49.38 (67.1) / 51.05 (63.2) / 52.04 (57.0) / 55.15 (57.8) / 59.02 (48.5) / 66.36 (46.3) | 43.12 (73.0) / 44.82 (72.9) / 45.64 (69.5) / 48.49 (64.9) / 51.99 (53.3) / 60.35 (51.5) |
+| Context prefill s, short / 32K / 64K / 128K / 256K / 512K | 0.296 / 9.699 / 20.011 / 43.780 / 103.943 / 303.423 | 0.263 / 9.684 / 19.999 / 43.577 / 103.139 / 301.219 |
+| Decode modes, C1 tok/s: plain / DSpark 1 / 2 / 3 / 5 / adaptive ≤4 | — / — / — / — / — / 44.8–78.1 | 41.7–41.9 / 50.2–59.5 / 50.1–76.5 / 47.8–82.6 / 39.6–96.7 / 53.5–89.4 |
+| HumanEval / GSM8K / extraction | 157/164 / 295/300 / 100/100 | 157/164 / 294/300 / 100/100 |
+
+The day's decode levers (the folds' path and spread, the pass's tail, the head's 12-bit companion, the window's
+form) carry every cell: C1 +12–20 %, C4 +9–12 %, the context matrix −9..13 % a pass, the cold prefill level to
+−7 %. The DSpark modes row is new: the fixed depths bracket the adaptive schedule (depth 5 wins the code and JSON
+classes at 96.7 tok/s, loses prose at 39.6; the schedule takes 53.5–89.4 without a per-class choice). The C8 cell
+(six live, two queued) read 139.0 at the top of its spread this time; the A/B above is the comparison that holds.
+
 ## Measured (2026-10-18, four nodes)
 
 Both budgets ran the full row set of [benchmarks](../benchmarks.md) on the
