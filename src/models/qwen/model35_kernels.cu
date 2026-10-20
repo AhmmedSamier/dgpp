@@ -58,6 +58,7 @@ void qwen35_mtp_concat_bf16(const uint16_t* e, const uint16_t* h, uint16_t* out,
 
 __global__ void df1_collect_top1_kernel(const int32_t* __restrict__ ids, int stride,
                                         int32_t* __restrict__ tok, int n) {
+  dgpp_pdl_wait();
   const int j = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (j >= n) return;
   tok[j] = ids[(static_cast<int64_t>(j) + 1) * stride];
