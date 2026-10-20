@@ -5,6 +5,31 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The decode pass's tail: the draft block's attention on the flash form,
+  the Markov bias and the hyper-state copies at the DRAM rate**
+  (2026-10-20). The C1 node trace puts 5.5 ms of a 42 ms DeepSeek-V4.1 pass
+  after the 40 main layers (the verify head, the draft block's three
+  layers, the draft head and the pick chain). Three of its kernels sat
+  far under their limits: (1) the draft block's rows attended on the
+  scalar partial kernel, one block per row, 131–170 µs a draft layer where
+  the decode rows' flash listed form takes ~20 — the block's rows now take
+  the decode form under `engine.decode_window` (split like the scalar
+  form; the lists are the builder's); (2) the Markov bias read its 16.5 MB
+  head slice at 134 GB/s cold (123 µs) — one thread a vocab row reading
+  512-byte rows in 16-byte vectors, so a warp's load touched 32 lines for
+  16 bytes each, whatever the depth in flight (the whole row in flight
+  measured the same) — and now loads each batch of rows warp-coalesced
+  (one row a warp instruction) into registers, stages it in shared memory
+  and lets each lane walk its own row with the same fmaf chain: 77 µs cold
+  (214 GB/s), 17 hot, bitwise (test `dsv41_dspark_test`: the host chain,
+  both forms, the padding group, the block maxima); (3) the hyper-state
+  window's store and gather copied one 2-byte element a thread an
+  iteration (29 + 12 µs a pass for 25,600-wide rows) and now copy 16-byte
+  units with eight in flight (test `qwen_mtp_test`). In the C1 pass: the
+  draft layers' attention kernel 174 → 17 µs, the copies 28 + 10 → 5 + 5;
+  on four nodes 43.15 → 42.81 ms (code), 36.89 → 36.49 (prose), 49.36 →
+  47.64 (JSON).
+
 - **The lm head read through its 12-bit companion under the tensor-core
   chain, and the prefetch window's full form** (2026-10-20). The node
   trace of a DeepSeek-V4.1 C1 pass showed the lm head as `mma_gemv_kernel`

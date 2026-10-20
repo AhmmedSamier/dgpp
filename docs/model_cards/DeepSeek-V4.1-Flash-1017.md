@@ -183,6 +183,23 @@ is the ranks' arrival skew — the fabric delivers a row in 5.5 µs in situ,
 the peers stage 10–15 µs apart. The one-lane form (no striping) costs
 1.1 ms at C6 and nothing at C1.
 
+## The pass's tail (2026-10-20)
+
+After the 40 main layers a C1 pass spends 5.5 ms (13 %): the verify head
+(1.0 ms), the sampling chain, the DSpark input projection (fp8
+[5120 x 20480], 0.36 ms), the draft block's three layers, the draft head
+(1.0 ms) and the pick chain (four sequential collectives with the Markov
+bias between them). Three kernels there sat under their limits and were
+fixed bitwise: the draft block's attention (the scalar partial kernel,
+131–170 µs a draft layer) now takes the decode rows' flash listed form;
+the Markov bias (16.5 MB a launch at 134 GB/s cold) loads its rows
+warp-coalesced through shared memory (77 µs cold, 17 hot); the
+hyper-state window's store and gather copy 16-byte units (29 + 12 µs →
+a few). On four nodes the C1 pass went 43.15 → 42.81 ms (code), 36.89 →
+36.49 (prose), 49.36 → 47.64 (JSON). The pick chain's four collectives
+and the sample verdict kernel (one block a request, 37 µs) are the
+tail's next items.
+
 ## The lm head's bytes and the window's full form (2026-10-20)
 
 The head is read twice a pass (the draft block's base logits and the

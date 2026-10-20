@@ -373,8 +373,9 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   // where the flash kernel's one block per row and head group takes ~7 —
   // and it runs on the side stream beside the main source's kernel when
   // the layer has one (the two read disjoint caches and write disjoint
-  // partials; the finish joins them). The draft block keeps the scalar
-  // kernel.
+  // partials; the finish joins them). The draft block's rows take the same
+  // form (2026-10-20; they kept the scalar kernel before: 131-170 us a
+  // draft layer).
   const bool flash_try = lh >= 16 && lh % 16 == 0 && (split_window ? decode_window_flash_ : flash_window);
   const bool beside = split_window && side_stream_ != nullptr && w_.ratio > 0;
   cudaStream_t wstream = stream;
@@ -620,8 +621,13 @@ void Csa2Layer::enqueue_draft_block(const void* hidden_in, Csa2StatePool& pool, 
   dsa_latent_append(kv_, req_ids, slots_, rows, pool.ring_table(), 1, cfg_.ring_slots, pool.ring(layer_), kCsa2Latent,
                     stream, Csa2StatePool::kRingFormat);
   csa2_dspark_window_slots(pos, rows, block, cfg_.window, cfg_.ring_slots, dlist_, dcounts_, stream);
-  attend_rows(pool, req_ids, pool.ring(layer_), cfg_.ring_slots, pool.ring_table(), req_ids, pos, 0, rows, 1, stream,
-              dlist_, cfg_.window + block, dcounts_);  // the builder's stride
+  // The block's rows attend like the decode rows (2026-10-20): the listed
+  // flash kernel split like the scalar form under engine.decode_window —
+  // the scalar kernel took 131-170 us a draft layer at C1 (five rows, one
+  // block per row) against the decode rows' ~20; the lists are the
+  // builder's (its stride window + block).
+  attend_rows(pool, req_ids, pool.ring(layer_), cfg_.ring_slots, pool.ring_table(), req_ids, pos, 0, rows,
+              decode_n_split_, stream, dlist_, cfg_.window + block, dcounts_, /*split_window=*/true);
   project_out(rows, out, stream);
 }
 
