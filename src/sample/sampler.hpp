@@ -165,6 +165,14 @@ inline void validate_params(const Params& p) {
 // Penalties (warper stage 1)
 // ---------------------------------------------------------------------------
 
+// Negative-zero additive penalties retain the original signed-zero arithmetic.
+// Decide from the effective request parameters, after defaults and overrides.
+inline bool needs_context_penalties(const Params& p) {
+  return p.repetition_penalty != 1.0f || p.frequency_penalty != 0.0f ||
+         p.presence_penalty != 0.0f || std::signbit(p.frequency_penalty) ||
+         std::signbit(p.presence_penalty);
+}
+
 // Token counts over the request context (prompt + generated so far).
 // Same on every rank — the scheduler's rank-consistency guarantee.
 inline std::unordered_map<int32_t, int32_t> count_context(
@@ -199,17 +207,13 @@ inline void apply_penalties(float* logits, int n, int slice_begin,
 }
 
 // ---------------------------------------------------------------------------
-// Count only when the selected host path needs penalties. The optional
-// shortcut assumes non-NaN logits, round-to-nearest and gradual underflow;
-// it does not preserve floating-point exception flags. Negative-zero
-// settings keep the original arithmetic, including its signed-zero results.
+// Neutral preparation is an identity for non-NaN logits under round-to-nearest
+// with gradual underflow. Exception flags/traps are not part of the sampling
+// contract. Guard before counting: neutral requests need neither the context
+// map nor a vocabulary scan. The reference samplers retain the full arithmetic.
 inline void apply_context_penalties(float* logits, int n, int slice_begin, const Params& p,
                                     const std::vector<int32_t>& context_ids) {
-#if defined(DGPP_HOST_NEUTRAL_PENALTY_SKIP) && DGPP_HOST_NEUTRAL_PENALTY_SKIP
-  if (p.repetition_penalty == 1.0f && p.frequency_penalty == 0.0f && p.presence_penalty == 0.0f &&
-      !std::signbit(p.frequency_penalty) && !std::signbit(p.presence_penalty))
-    return;
-#endif
+  if (!needs_context_penalties(p)) return;
   apply_penalties(logits, n, slice_begin, p, count_context(context_ids));
 }
 

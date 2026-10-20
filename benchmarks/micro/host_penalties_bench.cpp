@@ -28,11 +28,7 @@ void measure(int context, const char* regime, const char* operation, int rounds,
 int main() {
   using namespace dgpp::sample;
   constexpr int vocab = 248320;
-#if defined(DGPP_HOST_NEUTRAL_PENALTY_SKIP) && DGPP_HOST_NEUTRAL_PENALTY_SKIP
-  std::puts("# DGPP_HOST_NEUTRAL_PENALTY_SKIP=ON");
-#else
-  std::puts("# DGPP_HOST_NEUTRAL_PENALTY_SKIP=OFF");
-#endif
+  std::puts("# automatic neutral-penalty skip; reference always counts and applies penalties");
   std::puts("# synthetic logits/context; vocab=248320; temperature=0.8; top_k=40; top_p=0.95");
   std::puts("context,regime,operation,rounds,median_us");
   std::vector<float> logits(vocab);
@@ -53,6 +49,11 @@ int main() {
         p.presence_penalty = 0.1f;
       }
       const char* regime = active ? "active" : "neutral";
+      measure(length, regime, "copy_count_penalty_reference", 31, [&] {
+        auto adjusted = logits;
+        apply_penalties(adjusted.data(), vocab, 0, p, count_context(context));
+        asm volatile("" : : "g"(adjusted.data()), "g"(adjusted.size()) : "memory");
+      });
       measure(length, regime, "copy_count_penalty", 31, [&] {
         auto adjusted = logits;
         apply_context_penalties(adjusted.data(), vocab, 0, p, context);

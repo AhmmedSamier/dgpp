@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "common/test.hpp"
+#include "engine/eager_engine.hpp"
 
 namespace {
 
@@ -437,6 +438,8 @@ DGPP_TEST(context_penalties_preserve_active_and_signed_zero_arithmetic) {
         p.frequency_penalty = 0.25f;
         p.presence_penalty = 0.5f;
       }
+      require(dgpp::sample::needs_context_penalties(p) == (regime != 0),
+              "only positive-zero neutral parameters omit penalty preparation");
       const std::vector<float> input{
           123.0f, -0.0f, -0.0f, 4.0f, -2.0f, 0.0f, -std::numeric_limits<float>::infinity(), 456.0f};
       auto want = input, got = input;
@@ -448,26 +451,79 @@ DGPP_TEST(context_penalties_preserve_active_and_signed_zero_arithmetic) {
   }
 }
 
-DGPP_TEST(context_penalties_neutral_build_mode) {
-  // A signaling NaN makes removing the arithmetic observable. It is outside
-  // the enabled shortcut's numerical contract; the default keeps that chain.
+DGPP_TEST(context_penalties_neutral_omits_arithmetic) {
+  // A signaling NaN is a diagnostic sentinel, not a valid inference logit:
+  // the old neutral fma quiets it, making a missed shortcut observable.
   std::fenv_t saved;
-  require(std::feholdexcept(&saved) == 0, "cannot save floating-point environment");
+  require(std::feholdexcept(&saved) == 0, "save the floating-point environment");
   struct RestoreEnvironment {
     const std::fenv_t* saved;
     ~RestoreEnvironment() { std::fesetenv(saved); }
   } restore{&saved};
-  const std::vector<float> input{std::bit_cast<float>(0x7f800001u)};
-  auto got = input;
+  const float sentinel = std::bit_cast<float>(0x7f800001u);
+  float logit = sentinel;
+  dgpp::sample::apply_context_penalties(&logit, 1, 0, Params{}, {0, 0});
+  require(same_bits(logit, sentinel), "neutral preparation must leave logits untouched");
+}
+
+DGPP_TEST(context_penalties_neutral_preserves_subnormals_zeros_and_infinities) {
+  const float tiny = std::numeric_limits<float>::denorm_min();
+  const float inf = std::numeric_limits<float>::infinity();
+  std::vector<float> got{0.0f,
+                         -0.0f,
+                         tiny,
+                         -tiny,
+                         std::numeric_limits<float>::min(),
+                         std::numeric_limits<float>::max(),
+                         inf,
+                         -inf};
+  auto want = got;
+  const std::vector<int32_t> context{0, 1, 1, 2, 3, 4, 5, 6, 7};
   Params p;
-  dgpp::sample::apply_context_penalties(got.data(), 1, 0, p, {0});
-#if defined(DGPP_HOST_NEUTRAL_PENALTY_SKIP) && DGPP_HOST_NEUTRAL_PENALTY_SKIP
-  require(same_bits(got[0], input[0]), "enabled neutral shortcut still changes logits");
-#else
-  auto want = input;
-  apply_penalties(want.data(), 1, 0, p, count_context({0}));
-  require(same_bits(got[0], want[0]), "default build changed the original arithmetic");
-#endif
+  apply_penalties(want.data(), static_cast<int>(want.size()), 0, p, count_context(context));
+  dgpp::sample::apply_context_penalties(got.data(), static_cast<int>(got.size()), 0, p, context);
+  for (size_t i = 0; i < got.size(); ++i)
+    require(same_bits(got[i], want[i]), "neutral arithmetic preserves every supported float class");
+}
+
+DGPP_TEST(host_greedy_penalties_follow_effective_parameters_without_consuming_rng) {
+  const auto sample = dgpp::make_w1_sample(4);
+  dgpp::DecodeOutputs out;
+  out.lm_vocab_begin = 0;
+  out.lm_vocab_count = 4;
+  out.logits = {5.0f, 4.0f, 3.0f, -0.0f};
+  const std::vector<int32_t> context{0, 0, 0, 3};
+  const uint32_t words = 0xe;  // exclude the unpenalized winner
+  dgpp::text::TokenMask mask;
+  mask.vocab = 4;
+  mask.allowed = 3;
+  mask.words = {words};
+  const float bias[] = {0.0f, 0.0f, 2.0f, 0.0f};
+  for (int regime = 0; regime < 6; ++regime) {
+    auto p = dgpp::sample::greedy_params();
+    p.logprobs = 3;
+    if (regime == 1) p.repetition_penalty = 2.0f;
+    if (regime == 2) p.frequency_penalty = 0.5f;
+    if (regime == 3) p.presence_penalty = 2.0f;
+    if (regime == 4) p.frequency_penalty = -0.0f;
+    if (regime == 5) p.presence_penalty = -0.0f;
+    for (bool constrained : {false, true}) {
+      auto adjusted = out.logits;
+      apply_penalties(adjusted.data(), 4, 0, p, count_context(context));
+      dgpp::sample::apply_bias(adjusted.data(), 4, 0, constrained ? bias : nullptr);
+      dgpp::sample::apply_mask(adjusted.data(), 4, 0, constrained ? &words : nullptr, 4);
+      const auto want = dgpp::sample::greedy_from_prefix(
+          sort_slice(adjusted.data(), 4, 0),
+          sharded_scaled_logsumexp(adjusted.data(), {{0, 4}}, 1.0f), 3);
+      Rng rng{42, 7};
+      const auto got =
+          sample(out, p, rng, context, constrained ? &mask : nullptr, constrained ? bias : nullptr);
+      require(results_identical(got, want) && rng.counter == 7,
+              "greedy tokens and reports match original arithmetic without a draw");
+      require(got.token == (constrained ? 2 : (regime >= 1 && regime <= 3 ? 1 : 0)),
+              "active penalties change the winner; neutral values retain it");
+    }
+  }
 }
 
 DGPP_TEST(neutral_host_sampling_preserves_bias_mask_reports_and_rng) {
