@@ -853,6 +853,7 @@ add_executable(unit_tests
   tests/unit/utf8_test.cpp
   tests/unit/arena_test.cpp
   tests/unit/safetensors_test.cpp
+  tests/unit/resident_image_test.cpp
   tests/unit/fp8_test.cpp
   tests/unit/fp4_test.cpp
   tests/unit/latent_format_test.cpp

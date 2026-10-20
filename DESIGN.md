@@ -210,6 +210,9 @@ offsets before constructing mapped views. Dimensions and offsets must be
 nonnegative integers; the checked shape product and dtype width must match
 the tensor's byte interval. Scalars and empty tensors remain supported.
 Validation preserves the raw header hash used by resident-image cache keys.
+Resident-image entries are checked for aligned offsets beyond the header/table
+and for byte ranges wholly inside the file. Invalid entries are treated as
+missing layers and rebuilt from the checkpoint.
 
 Resident serving loads the rank's weights at startup and keeps them for
 the process lifetime. GLM-5.3-Flash-FP8 requires TP=4 on 128 GB Sparks:

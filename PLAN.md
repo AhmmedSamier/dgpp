@@ -43,6 +43,8 @@ header length, integer dimensions/offsets, range order and shape/dtype byte size
 Native unit tests cover rejected metadata and scalar, empty, padded-header and
 dtype-alias compatibility. Global tensor overlap/coverage validation remains
 outside this reader change.
+Resident-image metadata validation rejects offsets inside the header/table,
+unaligned offsets, overflowing ranges and truncated blobs before restoration.
 
 ## Serving support
 

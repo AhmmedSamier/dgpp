@@ -1,13 +1,13 @@
 #include "loaders/resident_image.hpp"
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "common/log.hpp"
 
@@ -120,13 +120,15 @@ ResidentImage::ResidentImage(const std::string& dir, uint64_t key,
   if (fresh) {
     write_fresh(key);
   } else {
-    pread_all(fd_, entries_.data(), sizeof(Entry) * entries_.size(),
-              sizeof(Header), path_);
-    // An entry whose blob would run past the file is a torn write that
-    // somehow got published — treat it as absent rather than trust it.
+    pread_all(fd_, entries_.data(), sizeof(Entry) * entries_.size(), sizeof(Header), path_);
+    // A published blob must be aligned, outside the table and wholly in
+    // the file. Subtract only after checking the offset to avoid wrapping
+    // corrupted offset/length pairs. Invalid entries are rebuilt.
+    const uint64_t file_bytes = static_cast<uint64_t>(st.st_size);
     for (Entry& e : entries_)
       if (e.bytes != 0 &&
-          e.offset + e.bytes > static_cast<uint64_t>(st.st_size))
+          (e.offset < table_bytes || e.offset % kBlobAlign != 0 || e.offset > file_bytes ||
+           e.bytes > file_bytes - e.offset || e.bytes > std::numeric_limits<size_t>::max()))
         e = Entry{};
   }
 }
