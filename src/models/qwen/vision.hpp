@@ -26,6 +26,7 @@
 #include "models/qwen/vision_config.hpp"
 
 namespace dgpp {
+struct TensorInfo;
 class QwenVisionEncoder {
  public:
   QwenVisionEncoder(const QwenVisionConfig& config, const std::string& checkpoint,
@@ -63,4 +64,8 @@ std::vector<uint16_t> qwen_vision_widen_mxfp8(const std::string& name, const uin
 std::vector<uint16_t> qwen_vision_dequant_nvfp4(const std::string& name, const uint8_t* weight,
                                                size_t wbytes, const uint8_t* scale, size_t sbytes,
                                                float global, int64_t rows, int64_t cols);
+// Validate checkpoint layout before interpreting quantized bytes. The global
+// scale is required only for NVFP4; MXFP8 carries its scales in the grid.
+std::vector<uint16_t> qwen_vision_widen_linear(const TensorInfo& weight, const TensorInfo& scale,
+                                             const TensorInfo* global, int64_t rows, int64_t cols);
 }  // namespace dgpp

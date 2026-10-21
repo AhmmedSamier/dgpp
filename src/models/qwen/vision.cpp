@@ -93,7 +93,7 @@ std::vector<uint16_t> qwen_vision_widen_mxfp8(const std::string& name, const uin
       const unsigned sb = scale[static_cast<size_t>(i) * static_cast<size_t>(cols / 32) +
                                 static_cast<size_t>(k / 32)];
       if (wb == 0x7F || wb == 0xFF) bad("payload has a NaN code");
-      if (sb > 240) bad("scale byte exceeds 240");
+      if (sb == 255) bad("scale has a NaN code");
       const float v = fp8_e4m3_bits_to_float(static_cast<uint8_t>(wb)) *
                       exp2f(static_cast<float>(static_cast<int>(sb) - 127));
       out[static_cast<size_t>(i) * static_cast<size_t>(cols) + static_cast<size_t>(k)] =
@@ -132,6 +132,31 @@ std::vector<uint16_t> qwen_vision_dequant_nvfp4(const std::string& name, const u
     }
   }
   return out;
+}
+
+std::vector<uint16_t> qwen_vision_widen_linear(const TensorInfo& w, const TensorInfo& s,
+                                             const TensorInfo* g, int64_t rows, int64_t cols) {
+  const auto check = [](const TensorInfo& t, DType dtype, const std::vector<int64_t>& shape) {
+    if (t.dtype != dtype || t.shape != shape)
+      throw std::runtime_error("Qwen vision: incompatible dtype or shape on " + t.name);
+  };
+  if (w.dtype == DType::F8_E4M3) {
+    check(w, DType::F8_E4M3, {rows, cols});
+    check(s, DType::U8, {rows, cols / 32});
+    return qwen_vision_widen_mxfp8(w.name, static_cast<const uint8_t*>(w.data), w.nbytes(),
+                                  static_cast<const uint8_t*>(s.data), s.nbytes(), rows, cols);
+  }
+  if (w.dtype != DType::U8)
+    throw std::runtime_error("Qwen vision: unsupported quantized weight " + w.name);
+  check(w, DType::U8, {rows, cols / 2});
+  check(s, DType::F8_E4M3, {rows, cols / 16});
+  if (!g || g->dtype != DType::F32 || !g->data || g->nbytes() != sizeof(float) ||
+      !(g->shape.empty() || g->shape == std::vector<int64_t>{1}))
+    throw std::runtime_error("Qwen vision: incompatible global scale on " + w.name);
+  float global;
+  std::memcpy(&global, g->data, sizeof(global));
+  return qwen_vision_dequant_nvfp4(w.name, static_cast<const uint8_t*>(w.data), w.nbytes(),
+                                   static_cast<const uint8_t*>(s.data), s.nbytes(), global, rows, cols);
 }
 
 QwenVisionEncoder::Grid QwenVisionEncoder::grid_of(const ImageInput& image) {
@@ -212,42 +237,9 @@ struct QwenVisionEncoder::Impl {
       if (w.dtype == DType::BF16) {
         load(name + ".weight", {out, in});
       } else {
-        const size_t wbytes =
-            w.data_end > w.data_begin ? static_cast<size_t>(w.data_end - w.data_begin) : 0;
-        std::vector<uint16_t> wide;
-        if (w.dtype == DType::F8_E4M3) {
-          const auto& s = fetch(name + ".weight_scale");
-          if (s.dtype != DType::U8)
-            throw std::runtime_error("Qwen vision: incompatible scale model.visual." + name +
-                                     ".weight_scale");
-          const size_t sbytes =
-              s.data_end > s.data_begin ? static_cast<size_t>(s.data_end - s.data_begin) : 0;
-          wide = qwen_vision_widen_mxfp8("model.visual." + name + ".weight",
-                                         static_cast<const uint8_t*>(w.data), wbytes,
-                                         static_cast<const uint8_t*>(s.data), sbytes, out, in);
-        } else if (w.dtype == DType::U8) {
-          const auto& s = fetch(name + ".weight_scale");
-          const auto& g = fetch(name + ".weight_scale_2");
-          if (s.dtype != DType::F8_E4M3 || g.dtype != DType::F32)
-            throw std::runtime_error("Qwen vision: incompatible scales model.visual." + name);
-          const size_t sbytes =
-              s.data_end > s.data_begin ? static_cast<size_t>(s.data_end - s.data_begin) : 0;
-          if (g.data_end - g.data_begin != 4)
-            throw std::runtime_error("Qwen vision: incompatible global model.visual." + name +
-                                     ".weight_scale_2");
-          float global = 0.0f;
-          std::memcpy(&global, g.data, 4);
-          wide = qwen_vision_dequant_nvfp4("model.visual." + name + ".weight",
-                                          static_cast<const uint8_t*>(w.data), wbytes,
-                                          static_cast<const uint8_t*>(s.data), sbytes, global,
-                                          out, in);
-        } else {
-          throw std::runtime_error("Qwen vision: incompatible tensor model.visual." + name +
-                                   ".weight");
-        }
-        if (wide.size() != static_cast<size_t>(out) * static_cast<size_t>(in))
-          throw std::runtime_error("Qwen vision: shape mismatch on model.visual." + name +
-                                   ".weight");
+        const auto& scale = fetch(name + ".weight_scale");
+        const TensorInfo* global = w.dtype == DType::U8 ? &fetch(name + ".weight_scale_2") : nullptr;
+        const auto wide = qwen_vision_widen_linear(w, scale, global, out, in);
         store(name + ".weight", wide.data(), wide.size() * 2);
       }
       load(name + ".bias", {out});

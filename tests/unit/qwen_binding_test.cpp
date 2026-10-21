@@ -119,7 +119,7 @@ DGPP_TEST(qwen_binding_binds_the_qad_export_when_present) {
 
 DGPP_TEST(qwen_binding_binds_the_fp4local_export_when_present) {
   const auto snap = fp4local_snapshot();
-  if (snap.empty()) return;
+  if (snap.empty()) dgpp::test::skip("required FP4-Local checkpoint unavailable");
   const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
   require(cfg.experts_nvfp4 && cfg.dense_mxfp8_shipped && cfg.mtp_experts_nvfp4 &&
               cfg.ngram_table_nvfp4 && cfg.norms_f32 && cfg.experts_nvfp4_csf,
@@ -287,4 +287,33 @@ DGPP_TEST(qwen_binding_table_has_the_radixark_fused_shape) {
               "down_proj shape {E, H, I}");
     }
   }
+}
+
+DGPP_TEST(qwen_binding_requires_csf_sidecars_for_each_compressed_matrix) {
+  const auto cfg = qwenfx::tiny_fp4local_config();
+  require(cfg.experts_nvfp4_csf && !cfg.mtp_experts_nvfp4_csf, "backbone-only CSF fixture");
+  std::unordered_map<std::string, dgpp::QwenTensorDesc> present;
+  std::string fixed, exceptions;
+  for (const auto& e : dgpp::qwen_expected_text_tensors(cfg)) {
+    present.emplace(e.name, dgpp::QwenTensorDesc{e.dtype, e.shape});
+    if (e.role == dgpp::QwenTensorRole::Fp4Payload && e.layer != cfg.mtp_layer()) {
+      fixed = e.name + "_scale.nvfp4_csf_fixed";
+      exceptions = e.name + "_scale.nvfp4_csf_exceptions";
+      present.emplace(fixed, dgpp::QwenTensorDesc{dgpp::DType::U8, {e.shape[0] / 16, 16 * (1 + e.shape[1] / 16)}});
+      present.emplace(exceptions, dgpp::QwenTensorDesc{dgpp::DType::U32, {0}});
+    }
+  }
+  require(dgpp::qwen_validate_text_binding(cfg, present).ok(), "complete sidecars bind");
+  const auto saved = present.at(fixed);
+  present.erase(fixed);
+  require(dgpp::qwen_validate_text_binding(cfg, present).missing == 1, "missing sidecar refused");
+  present[fixed] = saved;
+  present[fixed].shape[0]++;
+  require(dgpp::qwen_validate_text_binding(cfg, present).shape_mismatch == 1, "wrong fixed geometry refused");
+  present[fixed] = saved;
+  present[exceptions].dtype = dgpp::DType::U8;
+  require(dgpp::qwen_validate_text_binding(cfg, present).dtype_mismatch == 1, "wrong exception dtype refused");
+  present[exceptions].dtype = dgpp::DType::U32;
+  present["mtp.layers.0.unexpected.weight_scale.nvfp4_csf_fixed"] = saved;
+  require(!dgpp::qwen_validate_text_binding(cfg, present).ok(), "sidecars outside the selected matrix refused");
 }

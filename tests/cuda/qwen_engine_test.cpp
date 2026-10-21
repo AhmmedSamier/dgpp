@@ -730,9 +730,9 @@ DGPP_TEST(qwen_wide_compaction_fp8_preserves_projection_bits) {
 }
 
 static void check_mixed_prefill_engine(bool scheduled, bool adaptive = false) {
-  const auto cfg = qwenfx::tiny_config();
+  const auto cfg = qwenfx::test_config();
   const std::string dir = "qwen_engine_fixture/mixed_plain";
-  qwenfx::write_fixture(cfg, dir);
+  qwenfx::write_fixture_for(cfg, dir);
   for (const bool compact : {false, true}) {
     auto buses = start_world(1, kPort + 31 + compact);
     require(buses.size() == 1, "mixed plain: world-of-one bus");
@@ -822,9 +822,9 @@ DGPP_TEST(qwen_cached_tail_preserves_native_rows_in_mixed_prefill) {
     bool fp8 = dgpp::QwenLayerStream::dense_weights_fp8();
     ~RestoreDense() { dgpp::QwenLayerStream::set_dense_weights_fp8(fp8); }
   } restore;
-  const auto cfg = qwenfx::tiny_config();
+  const auto cfg = qwenfx::test_config();
   const std::string dir = "qwen_engine_fixture/cached_tail";
-  qwenfx::write_fixture(cfg, dir);
+  qwenfx::write_fixture_for(cfg, dir);
   const auto prompt = smoke_tokens(cfg, 22, 741);
   const std::vector<int64_t> prefix(prompt.begin(), prompt.begin() + 16);
   const auto cold = smoke_tokens(cfg, 248, 742);

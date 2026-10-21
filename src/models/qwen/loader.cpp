@@ -1022,12 +1022,13 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
       const TensorInfo& tp = source(ep.name);
       const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
       const uint8_t* ss;
+      const TensorInfo* scale_source = nullptr;
       if (csf) {
         ss = csf_plane.data();
       } else {
         const TensorInfo& ts = source(es->name);
         ss = static_cast<const uint8_t*>(ts.data);
-        consumed(ts);
+        scale_source = &ts;
       }
       uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
       uint8_t* hs = bump.host(const_cast<uint8_t*>(q.scales));
@@ -1040,6 +1041,9 @@ struct QwenLoaderFamily::Builder : WeightBuilder<QwenExpectedTensor> {
           std::memcpy(hs + row * sc, ss + row * sc_full + col_start / kFp4Group, sc);
         }
       }
+      // Keep the prefetched scale pages mapped until the column copy is
+      // complete. Discarding earlier refaults them and leaves them cached.
+      if (scale_source) consumed(*scale_source);
       consumed(tp);
     }
     note_read(ep, static_cast<size_t>(N) * pc);

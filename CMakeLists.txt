@@ -571,6 +571,17 @@ add_test(NAME qwen_qad_forward_test
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_ref.qwndump)
 set_tests_properties(qwen_qad_forward_test PROPERTIES DEPENDS qwen_qad_generate)
 
+# The CSF export is lossless: compare its nested-shard fixture against the
+# independent Python reference generated from the identical plain QAD bytes.
+set(QWEN_FP4LOCAL_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen_fp4local_fixture)
+add_test(NAME qwen_fp4local_fixture COMMAND qwen_forward_test --write-fixture ${QWEN_FP4LOCAL_FIXTURE} --fp4local)
+add_test(NAME qwen_fp4local_smoke COMMAND qwen_forward_test --smoke ${QWEN_FP4LOCAL_FIXTURE})
+set_tests_properties(qwen_fp4local_smoke PROPERTIES DEPENDS qwen_fp4local_fixture)
+add_test(NAME qwen_fp4local_forward_test
+  COMMAND qwen_forward_test --checkpoint-dir ${QWEN_FP4LOCAL_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_ref.qwndump)
+set_tests_properties(qwen_fp4local_forward_test PROPERTIES DEPENDS "qwen_fp4local_fixture;qwen_qad_generate")
+
 # The Qwen session surface (Q6 stage A): incremental decode vs the re-forward.
 add_executable(qwen_decode_test tests/cuda/qwen_decode_test.cpp)
 target_include_directories(qwen_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -578,6 +589,11 @@ target_link_libraries(qwen_decode_test PRIVATE dgpp_models_qwen_layers dgpp_mode
 dgpp_set_common(qwen_decode_test)
 add_test(NAME qwen_decode_test COMMAND qwen_decode_test --fixture ${QWEN_FORWARD_FIXTURE})
 set_tests_properties(qwen_decode_test PROPERTIES DEPENDS qwen_forward_fixture)
+add_test(NAME qwen_fp4local_decode_test COMMAND qwen_decode_test --fixture ${QWEN_FP4LOCAL_FIXTURE})
+add_test(NAME qwen_fp4local_decode_rows_invariance COMMAND qwen_decode_test --fixture ${QWEN_FP4LOCAL_FIXTURE} --rows-invariance)
+set_tests_properties(qwen_fp4local_decode_test qwen_fp4local_decode_rows_invariance
+  PROPERTIES DEPENDS qwen_fp4local_fixture RUN_SERIAL TRUE)
+
 # Qwen3.8-Flash-Next's decode step is one chain across row counts under the
 # shipped FP8-dense recipe (2026-10-05: the fp8 head and the dense sites on
 # the streaming form from one row, the QSA projections through the dense
@@ -1928,6 +1944,13 @@ foreach(_dense_fp8 IN ITEMS 0 1)
   set_tests_properties(qwen_engine_nvfp4_dense_${_dense_fp8}
     PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
 endforeach()
+foreach(_filter IN ITEMS wide mixed_prefill)
+  add_test(NAME qwen_engine_fp4local_${_filter}
+    COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_QWEN_FP4LOCAL=1 DGPP_TEST_DENSE_FP8=1
+            DGPP_TEST_FILTER=${_filter} $<TARGET_FILE:qwen_engine_test>)
+  set_tests_properties(qwen_engine_fp4local_${_filter}
+    PROPERTIES RESOURCE_LOCK qwen_engine_world LABELS "gpu;rdma" RUN_SERIAL TRUE)
+endforeach()
 set_tests_properties(qwen_engine_test qwen_engine_row_independent qwen_engine_bf12 PROPERTIES RESOURCE_LOCK qwen_engine_world)
 set_tests_properties(qwen_engine_row_independent qwen_engine_bf12 PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 add_test(NAME qwen_engine_fp8_wide
@@ -2430,6 +2453,7 @@ if(DGPP_ENABLE_IBV)
 endif()
 set_tests_properties(qwen_engine_row_independent qwen_engine_bf12
   qwen_engine_nvfp4_dense_0 qwen_engine_nvfp4_dense_1
+  qwen_engine_fp4local_wide qwen_engine_fp4local_mixed_prefill
   qwen_engine_fp8_wide qwen_engine_fp8_mtp3_rows32
   qwen_engine_mtp3_rows32_row_independent qwen_engine_fp8_mtp3_rows64
   qwen_engine_mtp3_rows64_row_independent

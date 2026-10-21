@@ -380,20 +380,39 @@ QwenBindReport qwen_validate_text_binding(
     if (e.quantized()) ++rep.quantized_matrices;
     if (e.role == QwenTensorRole::NgramShard) ++rep.ngram_shards;
   }
+  // Sidecars belong to a specific routed matrix, not to an allowlisted
+  // suffix. Validate both before allocating the resident model; only the
+  // exception count is data-dependent.
+  for (const auto& e : expected) {
+    if (e.role != QwenTensorRole::Fp4Payload || e.cls != QwenWeightClass::RoutedExpert) continue;
+    if (!(e.layer == cfg.mtp_layer() ? cfg.mtp_experts_nvfp4_csf : cfg.experts_nvfp4_csf)) continue;
+    const int64_t rows = e.shape[0], cols = e.shape[1] / 8;  // K/16 scales
+    for (const bool fixed : {true, false}) {
+      const std::string name = e.name + "_scale.nvfp4_csf_" + (fixed ? "fixed" : "exceptions");
+      const auto it = present.find(name);
+      if (it == present.end()) {
+        ++rep.missing;
+        push_error(std::format("missing tensor '{}'", name));
+        continue;
+      }
+      consumed.emplace(name, 1);
+      const auto& d = it->second;
+      if (d.dtype != (fixed ? DType::U8 : DType::U32)) {
+        ++rep.dtype_mismatch;
+        push_error(std::format("'{}' has the wrong CSF sidecar dtype", name));
+      } else if (fixed ? d.shape != std::vector<int64_t>{rows / 16, 16 * (1 + cols / 2)}
+                       : d.shape.size() != 1 || d.shape[0] < 0 || d.shape[0] > rows * cols) {
+        ++rep.shape_mismatch;
+        push_error(std::format("'{}' has an invalid CSF sidecar shape {}", name, shape_str(d.shape)));
+      } else {
+        ++rep.csf_sidecars;
+      }
+    }
+  }
   for (const auto& [name, desc] : present) {
     if (consumed.count(name)) continue;
     if (name.rfind("model.visual.", 0) == 0) {
       ++rep.vision;
-      continue;
-    }
-    // ModelOpt NVFP4 CSF scale sidecars (config experts_nvfp4_csf): the
-    // fixed table and the exception list per expert projection, expanded
-    // to plain scales once at load. Counted, not tabled (the exception
-    // count is data-dependent). Anywhere else they are unexpected.
-    if ((cfg.experts_nvfp4_csf || cfg.mtp_experts_nvfp4_csf) &&
-        (name.ends_with(".weight_scale.nvfp4_csf_fixed") ||
-         name.ends_with(".weight_scale.nvfp4_csf_exceptions"))) {
-      ++rep.csf_sidecars;
       continue;
     }
     // A truncated config (the check apps' --layers N): the layers past it

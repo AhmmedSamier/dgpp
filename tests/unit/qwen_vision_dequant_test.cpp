@@ -10,6 +10,7 @@
 
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
+#include "loaders/safetensors.hpp"
 #include "models/qwen/vision.hpp"
 
 namespace {
@@ -120,7 +121,9 @@ DGPP_TEST(qwen_vision_widen_refuses_malformed) {
   require(refusal_mx(nan_w, s, 16, 32).find("NaN") != std::string::npos, "NaN payload refused");
   std::vector<uint8_t> hot_s = s;
   hot_s[0] = 241;
-  require(refusal_mx(w, hot_s, 16, 32).find("240") != std::string::npos, "hot scale refused");
+  require(refusal_mx(w, hot_s, 16, 32).empty(), "valid high E8M0 exponent accepted");
+  hot_s[0] = 255;
+  require(refusal_mx(w, hot_s, 16, 32).find("NaN") != std::string::npos, "NaN scale refused");
   std::vector<uint8_t> short_w = w;
   short_w.pop_back();
   require(refusal_mx(short_w, s, 16, 32).find("byte counts") != std::string::npos,
@@ -136,4 +139,53 @@ DGPP_TEST(qwen_vision_widen_refuses_malformed) {
           "non-positive global refused");
   require(refusal_nv(nw, ns, 1.0f, 16, 15).find("geometry") != std::string::npos,
           "columns multiple of 16");
+}
+
+DGPP_TEST(qwen_vision_quantized_linear_validates_shapes_before_widening) {
+  using dgpp::DType;
+  using dgpp::TensorInfo;
+  const auto tensor = [](const char* name, DType dtype, std::vector<int64_t> shape, const void* data, size_t bytes) {
+    TensorInfo t;
+    t.name = name;
+    t.dtype = dtype;
+    t.shape = std::move(shape);
+    t.data = data;
+    t.data_end = bytes;
+    return t;
+  };
+  std::vector<uint8_t> codes(32 * 64, 0x38), scales(32 * 2, 127);
+  auto w = tensor("model.visual.x.weight", DType::F8_E4M3, {32, 64}, codes.data(), codes.size());
+  auto s = tensor("model.visual.x.weight_scale", DType::U8, {32, 2}, scales.data(), scales.size());
+  const auto refuses = [&](const TensorInfo& weight, const TensorInfo& scale, const TensorInfo* global,
+                           const char* name) {
+    try {
+      (void)dgpp::qwen_vision_widen_linear(weight, scale, global, 32, 64);
+    } catch (const std::runtime_error& e) {
+      require(std::string(e.what()).find(name) != std::string::npos, "refusal names the tensor");
+      return;
+    }
+    throw std::runtime_error("malformed quantized vision tensor accepted");
+  };
+  require(dgpp::qwen_vision_widen_linear(w, s, nullptr, 32, 64).size() == 32 * 64, "MXFP8 accepted");
+  auto wrong = w;
+  wrong.shape = {64, 32};
+  refuses(wrong, s, nullptr, w.name.c_str());
+  wrong = s;
+  wrong.shape = {2, 32};
+  refuses(w, wrong, nullptr, s.name.c_str());
+  w = tensor("model.visual.x.weight", DType::U8, {32, 32}, codes.data(), 32 * 32);
+  scales.assign(32 * 4, 0x38);
+  s = tensor("model.visual.x.weight_scale", DType::F8_E4M3, {32, 4}, scales.data(), scales.size());
+  float global = 0.5f;
+  auto g = tensor("model.visual.x.weight_scale_2", DType::F32, {}, &global, sizeof(global));
+  require(dgpp::qwen_vision_widen_linear(w, s, &g, 32, 64).size() == 32 * 64, "NVFP4 accepted");
+  wrong = w;
+  wrong.shape = {16, 64};
+  refuses(wrong, s, &g, w.name.c_str());
+  wrong = s;
+  wrong.shape = {4, 32};
+  refuses(w, wrong, &g, s.name.c_str());
+  refuses(w, s, nullptr, w.name.c_str());
+  g.shape = {1, 1};
+  refuses(w, s, &g, w.name.c_str());
 }
