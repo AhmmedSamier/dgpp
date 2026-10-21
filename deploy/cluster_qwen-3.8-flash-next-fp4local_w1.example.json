@@ -33,7 +33,8 @@
     "stats_interval_s": 1,
     "dense_weights": "fp8",
     "fp8_head": "mma",
-    "prefill_attention": "fp8"
+    "prefill_attention": "fp8",
+    "prefill_dense": "tile"
   },
   "paths": {
     "resident_cache": ""

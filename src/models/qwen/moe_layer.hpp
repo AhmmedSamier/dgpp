@@ -61,6 +61,7 @@ class QwenMoeLayer {
   // The shared expert's fp8 projections: the streaming tensor-core GEMM
   // from this row count (scale_gemm.hpp; 0: the GEMV chunks to 128 rows).
   void set_mma_from_rows(int rows) { mma_from_rows_ = rows; }
+  void set_prefill_dense_tile(bool enabled) { prefill_dense_tile_ = enabled; }
   QwenMoeLayer(const QwenMoeLayer&) = delete;
   QwenMoeLayer& operator=(const QwenMoeLayer&) = delete;
 
@@ -112,8 +113,9 @@ class QwenMoeLayer {
   bool shared_block128() const;
   // The chain's tail after the routed experts left d_acc_: the BF16 shared
   // expert, its sigmoid weight, the last fma and the one rounding.
-  void shared_tail(const uint16_t* hidden, uint16_t* out, int tokens, cudaStream_t stream);
+  void shared_tail(const uint16_t* hidden, uint16_t* out, int tokens, cudaStream_t stream, bool prefill = false);
 
+  bool prefill_dense_tile_ = true;
   QwenMoeWeights w_;
   GlmMoeConfig cfg_;
   IGemm& gemm_;

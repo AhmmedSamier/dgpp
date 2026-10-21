@@ -19,6 +19,7 @@
 #include "common/dtypes.hpp"
 #include "kernels/fp8_dequant.hpp"
 #include "kernels/fp8w_gemm.hpp"
+#include "kernels/scale_gemm.hpp"
 #include "kernels/mma_gemv.hpp"
 #include "kernels/glm_moe_launch.hpp"
 
@@ -180,9 +181,9 @@ void run(const Shape& sh, std::mt19937& rng, dgpp::Fp8wScale form) {
 // bridge's weights, and bitwise against the streaming decode form
 // (mma_gemv.hpp) on the same grid — the prefill route swaps one for the
 // other above 256 rows.
-void run32(int m, int n, int k, std::mt19937& rng) {
-  const int rs = 5, cs = 5;
-  const int scale_rows = (n + 31) / 32, scale_cols = (k + 31) / 32;
+void run32(int m, int n, int k, std::mt19937& rng, int rs = 5) {
+  const int cs = 5;
+  const int scale_rows = (n + (1 << rs) - 1) >> rs, scale_cols = (k + 31) / 32;
   std::normal_distribution<float> normal(0.f, 1.f);
   const size_t stride = static_cast<size_t>(k) + 8;
   std::vector<uint16_t> act(static_cast<size_t>(m) * stride, 0);
@@ -241,6 +242,50 @@ void run32(int m, int n, int k, std::mt19937& rng) {
               "32-grid: the bf16 output is not the f32 output rounded once");
     }
   require(worst < 1.5e-6 * std::sqrt(static_cast<double>(k)), "32-grid: the product disagrees with the double reference");
+  if (rs == 0) {
+    // The byte-scale entry point must preserve the tile's arithmetic,
+    // including chunk cuts through both 128-row boundaries and graph replay.
+    std::vector<uint8_t> bytes(ws.size());
+    for (size_t i = 0; i < ws.size(); ++i) bytes[i] = static_cast<uint8_t>(std::ilogb(ws[i]) + 127);
+    Dev<uint8_t> d_bytes(bytes.size());
+    d_bytes.upload(bytes);
+    Dev<float> tiled(d_f32.n);
+    Dev<uint16_t> tiled16(d_b16.n);
+    tiled.upload(std::vector<float>(tiled.n, -12345.f));
+    tiled16.upload(std::vector<uint16_t>(tiled16.n, 0xBEEF));
+    cudaStream_t stream;
+    DGPP_CUDA_OK(cudaStreamCreate(&stream));
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    for (int r0 = 0; r0 < m; r0 += 31) {
+      const int rows = std::min(31, m - r0);
+      dgpp::launch_scale_gemm_grid_e8m0_f32(d_act.p + r0 * stride, stride, d_w.p, d_bytes.p,
+          tiled.p + r0 * out_stride, rows, n, k, stream, out_stride, rs, cs, nullptr, 0, true);
+    }
+    dgpp::launch_scale_gemm_grid_e8m0_bf16(d_act.p, stride, d_w.p, d_bytes.p, tiled16.p,
+        m, n, k, stream, out_stride, rs, cs, nullptr, 0, true);
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    for (int replay = 0; replay < 2; ++replay) {
+      DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+      DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+      const auto got = tiled.download();
+      const auto got16 = tiled16.download();
+      for (int r = 0; r < m; ++r) {
+        for (int c = 0; c < n; ++c)
+          require(got[r * out_stride + c] == f32[r * out_stride + c] &&
+                  got16[r * out_stride + c] == b16[r * out_stride + c],
+                  "MXFP8 byte grid/chunk/graph differs from the float grid");
+        for (size_t c = n; c < out_stride; ++c)
+          require(got[r * out_stride + c] == -12345.f && got16[r * out_stride + c] == 0xBEEF,
+                  "MXFP8 graph wrote output padding");
+      }
+    }
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
+  }
   // The streaming form on the same grid, group by group as the scale GEMM's
   // decode route runs it (128 rows a launch).
   for (int r0 = 0; r0 < m; r0 += 128) {
@@ -267,6 +312,20 @@ void run32(int m, int n, int k, std::mt19937& rng) {
   require(worst_vs < 1.5e-6 * std::sqrt(static_cast<double>(k)), "32-grid: the tile form drifts from the streaming form");
 }
 
+void high_byte_scales() {
+  // Valid E8M0 exponents above 134 overflow scale * 2^120 in the placed
+  // float-grid shortcut. Byte scales must decode before that multiplication.
+  Dev<uint16_t> act(64), out(2);
+  Dev<uint8_t> weights(2 * 64), scales(2 * 2);
+  act.upload(std::vector<uint16_t>(64, dgpp::float_to_bf16_bits(1.f)));
+  weights.upload(std::vector<uint8_t>(128, 0x38));  // e4m3 1
+  scales.upload({135, 135, 241, 241});
+  dgpp::launch_fp8w_gemm_e8m0_bf16(act.p, 64, weights.p, scales.p, out.p, 1, 2, 64, nullptr);
+  const auto got = out.download();
+  require(got[0] == dgpp::float_to_bf16_bits(std::ldexp(64.f, 8)) &&
+          got[1] == dgpp::float_to_bf16_bits(std::ldexp(64.f, 114)), "valid high E8M0 scale overflowed");
+}
+
 }  // namespace
 
 int main() {
@@ -275,6 +334,7 @@ int main() {
     std::printf("no CUDA device: skipped\n");
     return 0;
   }
+  high_byte_scales();
   std::mt19937 rng(87);
   // Ragged m (a 128-tile plus a tail), ragged n (two scale rows, the second
   // partial), k with a half scale group (192 = 3 x 64, two scale columns),
@@ -293,6 +353,8 @@ int main() {
   run32(70, 256, 256, rng);
   run32(70, 128, 256, rng);
   run32(70, 1280, 6144, rng);
+  for (int m : {1, 7, 31, 127, 128, 129, 257}) run32(m, 133, 640, rng, 0);
+  run32(257, 320, 2560, rng, 0);
   std::printf("fp8w_gemm_test: OK\n");
   return 0;
 }

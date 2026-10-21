@@ -77,6 +77,8 @@ class QwenVisionEncoder;  // models/qwen/vision.hpp; built only when the
 
 class QwenModel : public SessionModel<QwenModel> {
  public:
+  static void set_default_prefill_dense_tile(bool enabled);
+
   using Base = SessionModel<QwenModel>;
   using Outputs = Base::Outputs;
   using SessionSnapshotMeta = Base::SessionSnapshotMeta;
@@ -349,6 +351,9 @@ class QwenModel : public SessionModel<QwenModel> {
   QwenTextConfig cfg_;
   QwenLayerStream loader_;
   CublasLtGemm gemm_;
+  void configure_gemm_rows(int tokens, bool decode);
+  bool prefill_dense_tile_enabled_ = true;
+  bool prefill_dense_tile_ = false;
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;
   QwenGemmWorkspace gw_;

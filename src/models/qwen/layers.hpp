@@ -64,6 +64,8 @@ struct QwenGemmWorkspace {
   // channel form) and the block grid's blockwise one; the a8 scratch above
   // serves both.
   const bool* native_prefill = nullptr;
+  // Live per-walk policy: MXFP8 prefill uses the shared weight tile at every chunk size.
+  const bool* prefill_dense_tile = nullptr;
   // The a8 scratch's TMA maps by k (the channel form staged by boxes), set
   // by the model at boot for every dense k it serves.
   struct A8Map {

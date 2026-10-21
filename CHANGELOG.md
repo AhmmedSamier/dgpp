@@ -6,30 +6,19 @@ project procedures and design guidance live in `docs/`.
 ## Unreleased
 
 - **FP4-Local Qwen3.8-Flash-Next export** (`nvidia/Qwen3.8-Flash-Next-FP4-Local`).
-  The routed experts' per-group scales arrive as ModelOpt CSF
-  fixed-plus-exceptions sidecars; the loader expands them to plain E4M3 scales
-  once (`weight_scale_encoding: "csf"`, one form per export, the draft keeping
-  its own) and plans the fixed stream's analytic size. A quantized vision tower
-  widens to BF16 at load (MXFP8 exact, NVFP4 with one RNE), scale sidecars
-  tolerated, and resident streams discover shards from the index's weight_map,
-  so the export's `tensors/` layout loads. The one-Spark template sets
-  `dense_weights: "fp8"` with the tensor-core head (`fp8_head: "mma"`), as the
-  sibling NVFP4/QAD templates do. It also takes the fp8 K/V pool
-  (`kv_dtype: "fp8"`, `prefill_attention: "fp8"`): the 262144-token pool
-  halves from 6.70 to 3.50 GiB, and interleaved against the bf16 cache on one
-  Spark the prefill at 4–8K depth runs 1459–1469 t/s against 1141–1260 while
-  decode is unchanged; the resident image's key and layout do not change, so
-  no re-expansion is needed. The one-Spark pool is sized to four full
-  262144-token contexts (`kv_capacity: 1048576` = 14.02 GiB): the plan totals
-  97.14 GiB and the boot leaves 1.92 GiB device free, the most this node
-  holds. `engine.rope_scaling` lifts the positional ceiling to 1048576 tokens
-  (YaRN factor 4 over the checkpoint's 262144). The K/V pool is untouched
-  (14.02 GiB), but the QSA indexer's per-request workspace is sized by the
-  ceiling (`max_pools = min(pool, ceiling) / indexer_compress_ratio`), so the
-  layer objects grow from 4.50 to 10.50 GiB and the plan totals 103.14 GiB
-  (+6.00 GiB, about 91 % of the node's memory); four 262144-token requests
-  still fit while a 1M request would take the pool whole. See
-  [docs/fp4local_plan.md](docs/fp4local_plan.md).
+  Load CSF-wrapped NVFP4 expert scales losslessly, discover nested shards
+  through their index, and validate quantized vision matrices before widening
+  them to BF16. The model uses the shared Qwen engine, including the FP4
+  single-pass down projection, tile stealing, attention-combine staging,
+  PDL graphs, MTP copies, and sampling fast paths. MXFP8 attention and shared
+  experts now reach the shared FP8 weight-tile prefill kernel through
+  `engine.prefill_dense`, with byte scales kept resident. The one-Spark
+  template uses FP8 dense weights and KV, MTP3, a screened draft head,
+  a mapped n-gram table, four request slots, and a 1M-token pool and YaRN
+  positional ceiling. Fix premature source-scale page release for plain
+  NVFP4 column slices. Regression fixtures cover nested CSF checkpoints,
+  TP slicing, independent forward references, graph replay and mixed prefill.
+  See [docs/fp4local_plan.md](docs/fp4local_plan.md).
 
 - **The day's DeepSeek-V4.1 levers ported where they apply; the campaign's
   C8 cell on a six-slot template read** (2026-10-20). Inventory of the
