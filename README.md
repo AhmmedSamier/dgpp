@@ -35,10 +35,12 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | GLM-5.3 | [HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128](https://huggingface.co/HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128) | 4 | [Four nodes](deploy/cluster_glm-5.3_nf4i8_w4.example.json) (272K FP8 K/V pool) |
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128](https://huggingface.co/HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128) | 4 | [Four nodes](deploy/cluster_glm-5.3_mixed346_w4.example.json) (272K FP8 K/V pool) |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
+| DeepSeek-V4.1-Flash-1017 | [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json) (the V4.1-Flash engine path on the re-trained weights; the indexer budget is a deployment key, `engine.index_topk`, shipped at the checkpoint's 512 with 2048 measured; [card](docs/model_cards/DeepSeek-V4.1-Flash-1017.md)) |
 | MiMo-V2.6-Flash | [XiaomiMiMo/MiMo-V2.6-Flash-RL](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL) | 2, 4 | [Two nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) |
 | DeepSeek-V4-Flash | [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | 2, 4 | [Two nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w4.example.json) |
 | Qwen3.8-27B | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 1, 2, 4 | [One node](deploy/cluster_qwen3.8-27b_fp8_w1.example.json) , [two nodes](deploy/cluster_qwen3.8-27b_fp8_w2.example.json) and [four nodes](deploy/cluster_qwen3.8-27b_fp8_w4.example.json) (the DFlash2 block drafter on every world) |
 | Qwen3.8-27B NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 1, 2, 4 | [One node](deploy/cluster_qwen3.8-27b_nvfp4_w1.example.json) , [two nodes](deploy/cluster_qwen3.8-27b_nvfp4_w2.example.json) and [four nodes](deploy/cluster_qwen3.8-27b_nvfp4_w4.example.json) (the mixed release: NVFP4 MLPs, channel-FP8 attention and head; [card](docs/model_cards/Qwen3.8-27B-NVFP4.md)) |
+| Qwen3.5-122B-A10B NVFP4 | [nvidia/Qwen3.5-122B-A10B-NVFP4](https://huggingface.co/nvidia/Qwen3.5-122B-A10B-NVFP4) | 1, 2, 4 | [One node](deploy/cluster_qwen3.5-122b-a10b_nvfp4_w1.example.json) , [two nodes](deploy/cluster_qwen3.5-122b-a10b_nvfp4_w2.example.json) and [four nodes](deploy/cluster_qwen3.5-122b-a10b_nvfp4_w4.example.json) (ModelOpt NVFP4 routed experts, BF16 rest, MTP draft via `engine.mtp_expert_format: bf16`; [card](docs/model_cards/Qwen3.5-122B-A10B-NVFP4.md)) |
 
 The Qwen NVFP4 templates select streaming MMA for the FP8 vocabulary head
 with `engine.fp8_head: "mma"`, following matched one- and two-Spark
@@ -325,6 +327,10 @@ Use `./scripts/setup.sh --help` for all options.
 
 ### Send a request
 
+The HTTP server validates request lengths before dispatch; see
+[request limits and HTTP errors](docs/operations.md#large-document-and-agent-requests)
+for accepted length fields and error responses.
+
 Ask the running model a question. This short example requests low reasoning
 effort because reasoning tokens also count toward `max_tokens`:
 
@@ -382,6 +388,10 @@ selected, `up` stages `build-release/dgpp-serve` to the peers. Use
 `--bin build-ci/dgpp-serve` explicitly when deploying a testing build.
 
 ## Configuration
+
+Sampling penalties can default from deployment settings and be overridden
+per request. Host sampling automatically skips neutral penalty preparation;
+see [sampling defaults](docs/operations.md#sampling-penalty-defaults).
 
 Use the [configuration reference](docs/configuration.md) for site settings,
 deployment options, defaults and their effects on memory, response time and

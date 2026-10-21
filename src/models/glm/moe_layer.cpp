@@ -199,6 +199,8 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
     DGPP_CUDA_OK(cudaMalloc(&d_hidden_rot_, static_cast<size_t>(decode_slots_) * H * 2));
     DGPP_CUDA_OK(cudaMalloc(&d_slot_down_, rows * H * sizeof(float)));
     DGPP_CUDA_OK(cudaMalloc(&d_slot_order_, rows * sizeof(int32_t)));
+    DGPP_CUDA_OK(cudaMalloc(&d_tile_counter_, 2 * sizeof(int)));
+    DGPP_CUDA_OK(cudaMemset(d_tile_counter_, 0, 2 * sizeof(int)));
     if (cfg_.shared_mma_aside) {
       const size_t sh = static_cast<size_t>(decode_slots_) * I * 2;
       DGPP_CUDA_OK(cudaMalloc(&d_sh_gate_, sh));
@@ -277,6 +279,7 @@ GlmMoeLayer::~GlmMoeLayer() {
   cudaFree(d_act_qs_);
   cudaFree(d_slot_down_);
   cudaFree(d_slot_order_);
+  cudaFree(d_tile_counter_);
   cudaFree(d_sh_gate_);
   cudaFree(d_sh_up_);
   cudaFree(d_sh_act_);
@@ -1466,7 +1469,7 @@ void GlmMoeLayer::enqueue_decode_impl(const uint16_t* hidden, uint16_t* out_bf16
         shared_view_base, fp4_group, sh_rs, sh_cs);
     launch_moe_slot_down_fp4(d_slot_act_, I_r, d_ids_, order, table, H, I_r, N_s,
                              I_s, sh_down_p, sh_down_s, d_slot_down_, H, slots, K,
-                             stream, shared_view_base, fp4_group, sh_rs, sh_cs);
+                             stream, shared_view_base, fp4_group, sh_rs, sh_cs, d_tile_counter_);
   } else {
     launch_moe_slot_gate_up_swiglu(
         hidden, H, d_ids_, order, table, I_r, H, I_s, K_s, sh_gate_p, sh_gate_s,

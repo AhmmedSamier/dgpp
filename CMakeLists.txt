@@ -447,7 +447,8 @@ add_library(dgpp_models_qwen_loader STATIC
   src/models/qwen/vision.cpp
   src/models/qwen/loader.cpp
   src/models/qwen/loader35.cpp
-  src/models/qwen/dflash2.cpp)
+  src/models/qwen/dflash2.cpp
+  src/models/qwen/dflash.cpp)
 target_include_directories(dgpp_models_qwen_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders dgpp_kernels CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_qwen_loader)
@@ -498,6 +499,9 @@ add_test(NAME qwen_qsa_prefill
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda/qwen_qsa_prefill_test.py
           $<TARGET_FILE:qwen_forward_test>)
 set_tests_properties(qwen_qsa_prefill PROPERTIES RUN_SERIAL TRUE TIMEOUT 360)
+# The decode graph's programmatic edges need every kernel to wait first (engine/graph_pdl.hpp).
+add_test(NAME pdl_wait_audit COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/pdl_wait_audit.py ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(pdl_wait_audit PROPERTIES LABELS "host")
 # QSA always sees BF16 activations, across both expert formats and dense modes.
 foreach(_dense_fp8 IN ITEMS 0 1)
   add_test(NAME qwen_qsa_prefill_nvfp4_dense_${_dense_fp8}
@@ -662,6 +666,9 @@ dgpp_set_common(glm_dsa_bind_check)
 add_executable(dsv41_bind_check apps/dsv41_bind_check.cpp)
 target_link_libraries(dsv41_bind_check PRIVATE dgpp_models_dsv41 dgpp_loaders)
 dgpp_set_common(dsv41_bind_check)
+add_executable(qwen35_bind_check apps/qwen35_bind_check.cpp)
+target_link_libraries(qwen35_bind_check PRIVATE dgpp_models_qwen_loader dgpp_loaders)
+dgpp_set_common(qwen35_bind_check)
 add_executable(dsv4_forward_check apps/dsv4_forward_check.cpp)
 target_include_directories(dsv4_forward_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(dsv4_forward_check PRIVATE dgpp_models_dsv4_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
@@ -725,7 +732,7 @@ if(DGPP_ENABLE_IBV)
     src/net/nic_visibility.cu)
   target_link_libraries(dgpp_bus
     PUBLIC dgpp_net CUDA::cudart ${IBVERBS_LIBRARY})
-  target_include_directories(dgpp_bus PUBLIC ${IBVERBS_INCLUDE_DIR})
+  target_include_directories(dgpp_bus SYSTEM PUBLIC ${IBVERBS_INCLUDE_DIR})
   dgpp_set_common(dgpp_bus)
 
   add_executable(bus_check apps/bus_check.cpp)
@@ -846,6 +853,7 @@ add_executable(unit_tests
   tests/unit/utf8_test.cpp
   tests/unit/arena_test.cpp
   tests/unit/safetensors_test.cpp
+  tests/unit/resident_image_test.cpp
   tests/unit/fp8_test.cpp
   tests/unit/fp4_test.cpp
   tests/unit/latent_format_test.cpp
@@ -871,6 +879,7 @@ add_executable(unit_tests
   tests/unit/qwen35_config_test.cpp
   tests/unit/qwen35_binding_test.cpp
   tests/unit/qwen_dflash2_config_test.cpp
+  tests/unit/qwen_dflash_config_test.cpp
   tests/unit/dflash2_speculator_test.cpp
   tests/unit/qwen_rope_scaling_test.cpp
   tests/unit/glm4_config_test.cpp
@@ -1096,6 +1105,8 @@ add_test(NAME portability_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/portability_test.py)
 add_test(NAME timed_load_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/timed_load_test.py)
+add_test(NAME serve_campaign_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/serve_campaign_test.py)
 add_test(NAME serve_admission_bench_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/serve_admission_bench_test.py)
 add_test(NAME qwen_yarn_release_check_test
@@ -1110,6 +1121,18 @@ add_test(NAME bootstrap_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/bootstrap_test.py)
 add_test(NAME launcher_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/launcher_test.py)
+add_test(NAME cluster_process_swap_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/cluster_process_swap_test.py -v
+    ProcessSwapTest.test_invalid_policy_is_rejected
+    ProcessSwapTest.test_version_probe_rejects_invalid_policy
+    ProcessSwapTest.test_preflight_forwards_swap_policy_to_peer_version_probes
+    ProcessSwapTest.test_preflight_respects_resolved_node_swap_policy)
+add_test(NAME cluster_process_swap_systemd_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/cluster_process_swap_test.py -v
+    ProcessSwapTest.test_scope_has_zero_swap_and_recorded_group_can_stop_it
+    ProcessSwapTest.test_scope_failure_does_not_run_the_command_without_protection
+    ProcessSwapTest.test_version_probe_uses_zero_swap_scope
+    ProcessSwapTest.test_version_probe_does_not_fall_back_when_scope_fails)
 if(TARGET dgpp_serve_app)
   add_test(NAME serve_startup_test
     COMMAND ${CMAKE_COMMAND} -E env "DGPP_SERVE_TEST_BINARY=$<TARGET_FILE:dgpp_serve_app>"
@@ -1391,6 +1414,39 @@ add_test(NAME qwen35_mixed_test
   COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MIXED_FIXTURE}
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_mixed_teacher.q35dump)
 set_tests_properties(qwen35_mixed_test PROPERTIES DEPENDS qwen35_mixed_generate_teacher)
+# The MoE release (122B layout at toy widths: ModelOpt NVFP4 routed experts,
+# BF16 rest): smoke/rows/group and independent reference/teacher parity.
+set(QWEN35_MOE_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_fixture)
+add_test(NAME qwen35_moe_fixture COMMAND qwen35_forward_test --write-fixture-moe ${QWEN35_MOE_FIXTURE})
+add_test(NAME qwen35_moe_smoke COMMAND qwen35_forward_test --smoke ${QWEN35_MOE_FIXTURE})
+set_tests_properties(qwen35_moe_smoke PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_rows_invariance COMMAND qwen35_forward_test --rows-invariance ${QWEN35_MOE_FIXTURE})
+set_tests_properties(qwen35_moe_rows_invariance PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_group_invariance COMMAND qwen35_forward_test --group-invariance ${QWEN35_MOE_FIXTURE})
+set_tests_properties(qwen35_moe_group_invariance PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_generate
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MOE_FIXTURE} --tokens 16 --no-mtp
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_ref.q35dump)
+set_tests_properties(qwen35_moe_generate PROPERTIES DEPENDS qwen35_moe_fixture)
+add_test(NAME qwen35_moe_e2e
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MOE_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_ref.q35dump --relaxed
+          --engine-states ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_states.bin)
+set_tests_properties(qwen35_moe_e2e PROPERTIES DEPENDS qwen35_moe_generate)
+add_test(NAME qwen35_moe_generate_teacher
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/qwen35_reference_dump.py
+          gen-pure --checkpoint-dir ${QWEN35_MOE_FIXTURE} --tokens 16 --no-mtp
+          --teacher ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_states.bin
+          --out ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_teacher.q35dump)
+set_tests_properties(qwen35_moe_generate_teacher PROPERTIES DEPENDS qwen35_moe_e2e)
+add_test(NAME qwen35_moe_test
+  COMMAND qwen35_forward_test --checkpoint-dir ${QWEN35_MOE_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/qwen35_moe_teacher.q35dump)
+set_tests_properties(qwen35_moe_test PROPERTIES DEPENDS qwen35_moe_generate_teacher)
+set_tests_properties(qwen35_moe_fixture qwen35_moe_smoke qwen35_moe_rows_invariance
+    qwen35_moe_group_invariance qwen35_moe_generate qwen35_moe_e2e
+    qwen35_moe_generate_teacher qwen35_moe_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
 # Exercise the FP4 prefill dispatch at its 1024-row boundary.
 # The short mixed fixture above stays on the decode/short-prefill kernel.
 add_test(NAME qwen35_mixed_prefill_generate
@@ -1975,6 +2031,20 @@ dgpp_set_common(bf12_gemv_test)
 add_test(NAME bf12_gemv_test COMMAND bf12_gemv_test)
 set_tests_properties(bf12_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
 
+add_executable(qwen_mtp_test tests/cuda/qwen_mtp_test.cu)
+target_include_directories(qwen_mtp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(qwen_mtp_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(qwen_mtp_test)
+add_test(NAME qwen_mtp_test COMMAND qwen_mtp_test)
+set_tests_properties(qwen_mtp_test PROPERTIES SKIP_RETURN_CODE 2)
+
+add_executable(dsv41_dspark_test tests/cuda/dsv41_dspark_test.cu)
+target_include_directories(dsv41_dspark_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(dsv41_dspark_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(dsv41_dspark_test)
+add_test(NAME dsv41_dspark_test COMMAND dsv41_dspark_test)
+set_tests_properties(dsv41_dspark_test PROPERTIES SKIP_RETURN_CODE 2)
+
 add_executable(mma_gemv_test tests/cuda/mma_gemv_test.cu)
 target_include_directories(mma_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mma_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
@@ -2203,7 +2273,8 @@ if(DGPP_BUILD_BENCHMARKS)
   # Check every source, including auxiliary translation units, before defining
   # the target so no target properties refer to a skipped benchmark.
   function(dgpp_add_benchmark target)
-    cmake_parse_arguments(BENCH "" "" "SOURCES;LIBRARIES;INCLUDE_DIRECTORIES" ${ARGN})
+    cmake_parse_arguments(BENCH "" ""
+      "SOURCES;LIBRARIES;INCLUDE_DIRECTORIES;SYSTEM_INCLUDE_DIRECTORIES" ${ARGN})
     foreach(source IN LISTS BENCH_SOURCES)
       if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
         message(STATUS "Skipping benchmark ${target}: missing ${source}")
@@ -2215,8 +2286,14 @@ if(DGPP_BUILD_BENCHMARKS)
     if(BENCH_INCLUDE_DIRECTORIES)
       target_include_directories(${target} PRIVATE ${BENCH_INCLUDE_DIRECTORIES})
     endif()
+    if(BENCH_SYSTEM_INCLUDE_DIRECTORIES)
+      target_include_directories(${target} SYSTEM PRIVATE ${BENCH_SYSTEM_INCLUDE_DIRECTORIES})
+    endif()
     dgpp_set_common(${target})
   endfunction()
+
+  dgpp_add_benchmark(host_penalties_bench
+    SOURCES benchmarks/micro/host_penalties_bench.cpp)
 
   dgpp_add_benchmark(micro_mem_bw
     SOURCES benchmarks/micro/mem_bw.cu src/common/log.cpp
@@ -2301,7 +2378,7 @@ if(DGPP_BUILD_BENCHMARKS)
     dgpp_add_benchmark(micro_gdr_probe
       SOURCES benchmarks/micro/gdr_probe.cpp src/common/log.cpp
       LIBRARIES CUDA::cudart ${IBVERBS_LIBRARY}
-      INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
+      SYSTEM_INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
 
     # The send-doorbell mapping probe (2026-09-19): mlx5 direct verbs, only
     # where libmlx5 is installed.
@@ -2310,13 +2387,13 @@ if(DGPP_BUILD_BENCHMARKS)
       dgpp_add_benchmark(micro_uar_probe
         SOURCES benchmarks/micro/uar_probe.cpp
         LIBRARIES ${MLX5_LIBRARY} ${IBVERBS_LIBRARY} CUDA::cudart
-        INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
+        SYSTEM_INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
     endif()
 
     dgpp_add_benchmark(micro_ibv_smoke
       SOURCES benchmarks/micro/ibv_smoke.cpp src/net/nic_visibility.cu src/common/log.cpp
       LIBRARIES ${IBVERBS_LIBRARY} CUDA::cudart
-      INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
+      SYSTEM_INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
   endif()
 endif()
 
@@ -2330,13 +2407,15 @@ set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test s
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
-  site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+  site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test cluster_process_swap_test PROPERTIES LABELS "host;python")
+set_tests_properties(cluster_process_swap_systemd_test PROPERTIES LABELS "systemd" TIMEOUT 180)
 if(TARGET dgpp_serve_app)
   set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
 endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
-  dsv4_tokenizer_test dsv4_prompt_test
+  dsv4_tokenizer_test dsv4_prompt_test glm_dsa_tokenizer_test mimo_tokenizer_test
+  glm_dsa_chat_template_test mimo_chat_template_test
   PROPERTIES LABELS "host;checkpoint")
 foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
     glm4_forward_generate mimo_forward_fixture mimo_forward_generate mimo_forward_generate_teacher

@@ -104,7 +104,8 @@ EosVocab eos_and_vocab(const std::string& config_path) {
 
 DGPP_TEST(qwen_reasoning_effort_renders_each_level) {
   const std::string golden = golden_path(g_argc, g_argv);
-  if (!corpus_is_qwen(golden) || corpus_is_mimo(golden)) return;
+  if (!corpus_is_qwen(golden) || corpus_is_mimo(golden))
+    dgpp::test::skip("requires the Qwen corpus, excluding MiMo");
   std::string err;
   const std::string snap = dgpp::hf::model_dir(corpus_model(golden), &err);
   if (snap.empty()) {
@@ -441,8 +442,7 @@ bool json_equal(const dgpp::minijson::Value& a, const dgpp::minijson::Value& b) 
 DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   if (corpus_is_qwen(kGoldenPath)) {
-    DGPP_LOG_INFO("glm_tool_call_render_encode_parse_roundTrip: GLM format only; the Qwen corpus has its own gate");
-    return;
+    dgpp::test::skip("requires a GLM-format corpus; the Qwen corpus has its own gate");
   }
   const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
@@ -578,7 +578,7 @@ bool has_custom_call(const dgpp::minijson::Value& calls) {
 // arguments through the <function=...><parameter=...> text format.
 DGPP_TEST(qwen_tool_call_render_encode_parse_roundTrip) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
-  if (!corpus_is_qwen(kGoldenPath)) return;
+  if (!corpus_is_qwen(kGoldenPath)) dgpp::test::skip("requires a Qwen-format corpus");
   const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
@@ -810,7 +810,7 @@ bool check_golden_key_closure(const dgpp::text::GrammarVocab& vocab,
 
 DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
-  if (!corpus_is_qwen(kGoldenPath)) return;
+  if (!corpus_is_qwen(kGoldenPath)) dgpp::test::skip("requires a Qwen-format corpus");
   const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
   const std::string snap = dgpp::hf::model_dir(model_id, &err);
@@ -1023,8 +1023,7 @@ DGPP_TEST(qwen_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
 DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   if (corpus_is_qwen(kGoldenPath)) {
-    DGPP_LOG_INFO("glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer: GLM format only; the Qwen corpus has its own gate");
-    return;
+    dgpp::test::skip("requires a GLM-format corpus; the Qwen corpus has its own gate");
   }
   const std::string model_id = corpus_model(kGoldenPath);
   std::string err;
@@ -1239,8 +1238,7 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
   // reported.
   const std::string kGoldenPath = golden_path(g_argc, g_argv);
   if (corpus_is_qwen(kGoldenPath)) {
-    DGPP_LOG_INFO("json grammar: the GLM config; the Qwen corpus has its own gate");
-    return;
+    dgpp::test::skip("requires a GLM-format corpus; the Qwen corpus has its own gate");
   }
   const std::string model_id = corpus_model(kGoldenPath);
   std::string err;

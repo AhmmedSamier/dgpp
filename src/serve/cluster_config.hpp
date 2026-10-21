@@ -68,6 +68,16 @@ struct ClusterConfig {
     // distribution is unchanged; only the draft's proposals (acceptance)
     // can move. Other families ignore it.
     std::string mtp_head = "checkpoint";
+    // The DeepSeek-V4.1 indexer's budget (2026-10-18; the deepseek_v41
+    // family alone): how many compressed entries a query attends
+    // (index_topk; the release trained at 512, the select networks serve
+    // up to 2048) out of a candidate pool of candidate_topk_blocks blocks
+    // of candidate_block_size entries (2048 x 8 as shipped). 0 keeps the
+    // checkpoint's value. Widening the budget changes the model's output
+    // (more context visible to every query), not just its speed.
+    int index_topk = 0;
+    int candidate_topk_blocks = 0;
+    int candidate_block_size = 0;
     // The full GLM-5.3 attention projections' resident form (2026-10-09):
     // "checkpoint" as shipped (int8 g64); "int4" re-encoded to int4 g64 at
     // load (RTN) — −2.1 GB per MTP pass per rank, NOT lossless. Other
@@ -201,6 +211,20 @@ struct ClusterConfig {
     // recipe, half the prefill work) or "exact" (every layer over every
     // row, the parity mode).
     std::string prefill = "bounded";
+    std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+    std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
+    std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
+    // The fabric's latency-class collective transport for the decode
+    // step's folds and the pick (2026-10-19): "write" = rows RDMA-written
+    // into the peers' write rings as self-describing chunks, folded by a
+    // grid of warps as they prove; "send" = payload + doorbell SEND pairs
+    // claimed through door cells by one block, hash-gated, acked, credited.
+    std::string collective_transport = "write";
+    bool prefill_fold_overlap = true;
+    // The decode graph's kernel edges programmatic (2026-10-20): a kernel's
+    // blocks scheduled as its predecessor drains, each waiting for the
+    // predecessor's completion before its first read (engine/graph_pdl.hpp).
+    bool decode_pdl = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
     // The opt-in YaRN rope ramp (2026-09-18, the Qwen3.8-Flash-Next 512K
     // recipe): absent is the default and leaves every table and every
     // kernel argument exactly as they were; present builds the Qwen QSA
@@ -255,6 +279,7 @@ struct ClusterConfig {
     // inside the attention layers, and whether adjacent ranges merge.
     bool l2_prefetch = true;
     std::string l2_prefetch_form = "load";
+    std::string l2_prefetch_full_form = "16x8";
     int l2_prefetch_window_mib = 12;
     int l2_prefetch_boundary_window_mib = 20;
     std::string l2_prefetch_boundary_rate = "light";
@@ -314,6 +339,11 @@ struct ClusterConfig {
     int dflash_batch_rows = 0;
     int graph_batch_min_live = 0;  // 0 = min(2, max_concurrency) (the batch family, 2026-09-07)
     int sampling_candidates = 128;
+    // Omitted fields inherit the checkpoint/neutral defaults. Process flags
+    // override these defaults; each request can override them again.
+    std::optional<float> repetition_penalty;
+    std::optional<float> frequency_penalty;
+    std::optional<float> presence_penalty;
     double prefix_cache_gib = 1.5;
     int prefix_min_tokens = 1024;       // no prefix snapshot below this position (0: every cut)
     bool prefix_head_snapshots = true;  // a cold prompt also keeps its first structural cut (the system prompt's end)

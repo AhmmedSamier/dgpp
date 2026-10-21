@@ -1,4 +1,5 @@
 #include <cmath>
+#include "kernels/pdl.cuh"
 #include <stdexcept>
 
 #include <cuda_bf16.h>
@@ -96,6 +97,7 @@ __device__ __forceinline__ void decode_fp8_piece(const uint4 codes, float scale,
 
 template <bool kFp8>
 __global__ void __launch_bounds__(kThreads) attn_prefill_kernel(MimoAttnPrefillArgs a) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t smem[];
   uint16_t* qt = smem;                        // [kQueryVecs][kQStride]
   uint16_t* kt = qt + kQueryVecs * kQStride;  // [kTile][kKStride]

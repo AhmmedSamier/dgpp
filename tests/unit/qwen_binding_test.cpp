@@ -99,7 +99,9 @@ std::unordered_map<std::string, dgpp::QwenTensorDesc> snapshot_tensors(const std
 // weight-only draft triples), and the TP geometry holds at worlds 1, 2, 4.
 DGPP_TEST(qwen_binding_binds_the_qad_export_when_present) {
   const auto snap = qad_snapshot();
-  if (snap.empty()) return;
+  if (snap.empty())
+    dgpp::test::skip(
+        "required checkpoint snapshot unavailable: local-inference-lab/Qwen3.8-Flash-Next-NVFP4");
   const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
   require(cfg.dense_mxfp8_shipped && cfg.ngram_table_nvfp4 && cfg.mtp_experts_nvfp4 && cfg.norms_f32,
           "the QAD export's forms");
@@ -138,7 +140,8 @@ DGPP_TEST(qwen_binding_binds_the_fp4local_export_when_present) {
 
 DGPP_TEST(qwen_binding_table_has_the_release_shape) {
   const auto snap = landed_snapshot();
-  if (snap.empty()) return;
+  if (snap.empty())
+    dgpp::test::skip("required checkpoint snapshot unavailable: Qwen/Qwen3.8-Flash-Next-FP8");
   const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
   const auto table = dgpp::qwen_expected_text_tensors(cfg);
   // 152 089 tensors in the file less the 333 of the vision tower.
@@ -156,7 +159,8 @@ DGPP_TEST(qwen_binding_table_has_the_release_shape) {
 
 DGPP_TEST(qwen_tp_geometry_accepts_the_deployment_worlds) {
   const auto snap = landed_snapshot();
-  if (snap.empty()) return;
+  if (snap.empty())
+    dgpp::test::skip("required checkpoint snapshot unavailable: Qwen/Qwen3.8-Flash-Next-FP8");
   const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
   for (const int w : {1, 2, 4, 8})
     for (int r = 0; r < w; ++r) dgpp::qwen_tp_validate_geometry(cfg, r, w);
@@ -172,7 +176,8 @@ DGPP_TEST(qwen_tp_geometry_accepts_the_deployment_worlds) {
 DGPP_TEST(qwen_binding_validates_the_landed_checkpoint_when_present) {
   namespace fs = std::filesystem;
   const auto snap = landed_snapshot();
-  if (snap.empty()) return;
+  if (snap.empty())
+    dgpp::test::skip("required checkpoint snapshot unavailable: Qwen/Qwen3.8-Flash-Next-FP8");
   const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
   std::unordered_map<std::string, dgpp::QwenTensorDesc> present;
   std::vector<fs::path> shards;
@@ -249,7 +254,8 @@ DGPP_TEST(qwen_binding_table_has_the_autoround_hybrid_shape) {
 
 DGPP_TEST(qwen_binding_table_has_the_radixark_fused_shape) {
   const auto snap = radixark_snapshot();
-  if (snap.empty()) return;
+  if (snap.empty())
+    dgpp::test::skip("required checkpoint snapshot unavailable: RadixArk/Qwen3.8-Flash-Next-NVFP4");
   const dgpp::QwenTextConfig cfg = dgpp::QwenTextConfig::from_json_file((snap / "config.json").string());
   // The RadixArk NVFP4 checkpoint stores the MTP layer's experts as fused BF16
   // tensors, not per-expert FP8 — the loader encodes the slices to FP8 at load.
