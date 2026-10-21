@@ -10,13 +10,15 @@ budget, and `compact_batches` is on (see
 rows below have not been re-measured since, so they describe deployments
 with the fixed prefill budgets listed per row, not a current default
 deployment. The Qwen3.8-Flash-Next QAD row (2026-10-14), the six
-Qwen3.8-27B rows (2026-10-16), and the Swift 1.5 two-node row (2026-10-17)
-are measured with the adaptive defaults. The measurements behind that change are in
+Qwen3.8-27B rows (2026-10-16), the Swift 1.5 two-node row (2026-10-17),
+and the FP4-Local row (2026-10-21) are measured with the adaptive defaults.
+The measurements behind that change are in
 [PR #112](https://github.com/HawkBearPig/dgpp/pull/112). When defaults
 change again, keep each row's recorded configuration with its numbers.
 
 | Measurement set | Date (UTC) | Source revision | Scope |
 |---|---|---|---|
+| Qwen3.8-Flash-Next FP4-Local | 2026-10-21 | `7c3086939006` (binary `c8f6aaf59ce5d08a`); HumanEval scorer `9b7439b5` | The one-node template as shipped, all inference from one `serve_campaign.py run`: C1/C2/C4/C8, twelve cold prefill probes, context through 512K, 164 HumanEval / 300 GSM8K / 100 extraction cases, API and transcript checks. Saved HumanEval answers were re-scored after fixing supplied-context handling; answers and inference are unchanged. Both boots had zero swap and matching operation streams. |
 | DeepSeek-V4.1-Flash-1017 | 2026-10-20 | `283a52f7` (binary `f4e9e9cdb16acf86`) | The 1017 template as shipped on four nodes, every row from one `serve_campaign.py run` (with the five DSpark mode boots: plain and fixed depths 1/2/3/5 through `--no-mtp-schedule`): five classes at C1/C2/C4/C8, three cold probes each at 512/2K/8K/32K, the context matrix to 512K, the 300-item quality set, the API, greedy-transcript and isolation checks, every rank at zero swap, zero cached tokens in the 12 cold probes, matching operation streams. The six-slot template's C8 cell is six live requests and two queued, with a three-repeat spread the [model card](model_cards/DeepSeek-V4.1-Flash-1017.md) measures ("The six-slot template at C6 and C8"); the 2026-10-19 rows (`0d69d565`, binary `9350b38a1e5b4908`) and the `engine.index_topk` 2048 set are priced in the model card, not tabled here |
 | Qwen3.8-27B refresh | 2026-10-17/18 | `8e5e7d42` (the NVFP4 rows, 2026-10-17) / `aa88b8f7` (the FP8 rows, 2026-10-18, on the fp8 K/V pool) | FP8 and NVFP4 at worlds 1/2/4 on the templates as shipped (the fp8 K/V pool — the mixed release's shipped scales, unit scales on the FP8 release — the fp8 prefill attention and the native activation recipe on both; the pools and prefix arenas sized to the node), five classes at C1/C2/C4/C8, cold 2K/8K/32K prefill, the context matrix to 256K, the 300-item quality set, the API and greedy-transcript checks, the adaptive prefill defaults |
 | Swift 1.5 Qwen3.8-Flash-Next NVFP4 | 2026-10-17 | `1cc9fefc` | Community checkpoint `a00c7c2f` on two nodes, MTP4, five classes at C1/C2/C4/C8, three cold probes each at 2K/8K/32K, adaptive prefill within 4K busy/idle caps |
@@ -76,6 +78,16 @@ was run. See the [checkpoint and serving notes](model_cards/Qwen3.8-Flash-Next-S
 
 Decode throughput by concurrency (the engine's decode steps only: every request's generated tokens over the decode time the group took, prefill and queueing excluded) with cold prefill beside it. Rows measured before 2026-10-18 recorded the decode rate at every concurrency but kept only C1; their C2–C8 cells read — until each is re-measured.
 
+The FP4-Local rows use the one-Spark template at `7c3086939006`, checkpoint
+`b9ce18a6887e18c089fdea8509a33e63429a3300`, and server SHA-256
+`c8f6aaf59ce5d08a54cfa54d31587baa46209ce474deb49789b453e83d082ff9`.
+The fabric was otherwise idle; all cold probes had zero cached tokens,
+and the original production deployment was restored after the campaign.
+C8 means four live requests and four queued on this four-slot template.
+The shared QSA scorer now reuses key stripes beyond L2 capacity; the indexer's
+underlying quadratic cold-prefill work remains (see the
+[checkpoint and shared-path notes](fp4local_plan.md)).
+
 <!-- BEGIN serving -->
 
 | Model / weights | Nodes | Options | C1 decode tok/s | C2 decode tok/s | C4 decode tok/s | C8 decode tok/s | Cold prefill s: ~2K / ~8K / ~32K |
@@ -97,6 +109,7 @@ Decode throughput by concurrency (the engine's decode steps only: every request'
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 43.4–69.8 | — | — | — | 1.276 / 4.356 / 17.159 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 43.1–69.0 | — | — | — | 1.182 / 4.077 / 16.682 |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 41.1–50.2 | — | — | — | 1.412 / 5.236 / 21.477 |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 35.3–75.9 | 58.1–105.2 | 67.3–122.3 | 65.6–133.1 | 1.623 / 5.748 / 23.047 |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 28.3–31.4 | — | — | — | 3.493 / 16.219 / 70.249 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 27.0–30.4 | — | — | — | 3.555 / 17.188 / 74.270 |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 27.4–30.5 | — | — | — | 3.770 / 17.180 / 74.988 |
@@ -143,6 +156,7 @@ Request wall throughput, the service-level view: total completed output over the
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 42.3–66.9 | 57.6–90.3 | 76.5–115.7 | 76.0–124.8 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 42.1–66.0 | 55.6–91.8 | 78.9–120.1 | 77.1–124.4 |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 40.1–48.6 | 63.5–74.6 | 87.8–99.6 | 86.6–100.8 |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 34.6–72.0 | 56.5–99.6 | 65.8–117.2 | 65.0–130.2 |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 26.9–29.5 | 35.7–38.4 | 46.1–49.7 | 52.9–55.7 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 25.8–28.7 | 36.0–38.5 | 46.0–49.3 | 53.2–56.6 |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 26.1–28.8 | 36.4–37.7 | 45.4–49.6 | 52.4–56.9 |
@@ -237,6 +251,7 @@ a row exactly.
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 4 | 262,144 | bf16 | 3 | 4,096 / 4,096 | MTP3 | — |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 4 | 262,144 | bf16 | 3 | 4,096 / 4,096 | MTP3 | — |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 4 | 131,072 | bf16 | 1 | adaptive (default) | MTP1 | [JSON](../deploy/cluster_qwen-3.8-flash-next_nvfp4-qad_w1.example.json) |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 4 | 1,048,576 | fp8 | 3 | adaptive (default) | MTP3 + lookup | [JSON](../deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json) |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 8 | 122,880 | bf16 | 1.0 | 0 / 0 | MTP1 | — |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 8 | 212,992 | fp8 | 1.5 | 0 / 0 | MTP1 | — |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 8 | 262,144 | fp4 | 1.5 | 0 / 0 | MTP1 | — |
@@ -343,6 +358,7 @@ Engine tokens/s, greedy; median of three repetitions.
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 43.4 | 59.7 | 69.8 | 60.9 | 45.6 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 43.1 | 58.3 | 69.0 | 59.3 | 45.6 |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 43.6 | 48.2 | 50.2 | 47.6 | 41.1 |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 36.4 | 66.6 | 75.9 | 64.0 | 35.3 |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 30.1 | 31.4 | 31.3 | 30.0 | 28.3 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 30.1 | 30.4 | 30.4 | 29.8 | 27.0 |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 29.9 | 29.2 | 30.5 | 29.6 | 27.4 |
@@ -427,7 +443,7 @@ C1 engine tokens/s; each range spans the five class medians. **MTP1**, **MTP2** 
 
 ## Quality and correctness
 
-These are the original campaigns' quality results, retained separately from the performance refresh; the six Qwen3.8-27B rows are from the 2026-10-17/18 refresh on the current templates. Scores apply to their saved configurations, prompts, evaluator and output limits; current deployment settings may differ.
+These are the original campaigns' quality results, retained separately from the performance refresh; the six Qwen3.8-27B rows are from the 2026-10-17/18 refresh, and FP4-Local is from the 2026-10-21 campaign on its shipped template. Scores apply to their saved configurations, prompts, evaluator and output limits; current deployment settings may differ.
 
 | Evaluation setting | Value |
 |---|---|
@@ -455,6 +471,7 @@ These are the original campaigns' quality results, retained separately from the 
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 159/164 | 292/300 | 100/100 | 1 |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 159/164 | 291/300 | 100/100 | 2 |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 161/164 | 297/300 | 100/100 | 1 |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 162/164 | 296/300 | 100/100 | 2 |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 159/164 | 292/300 | 100/100 | 0 |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 160/164 | 293/300 | 100/100 | 0 |
 | GLM-5.3 NF4I8 H32 g128 | 4 | 272K FP8 KV | 157/164 | 294/300 | 100/100 | 0 |
@@ -481,6 +498,14 @@ GSM8K and 512 for extraction; none of the 40 responses were truncated.
 This is not a full quality campaign or
 a matched comparison with the original Qwen checkpoint; HumanEval was not run.
 
+The FP4-Local HumanEval result is 162/164 after rechecking all 164 unchanged
+saved answers with the scorer fix in `9b7439b5`. The original scorer reported
+161/164: it discarded the supplied `encode_cyclic` helper when the answer
+contained the complete requested `decode_cyclic` function, falsely failing
+HumanEval/38. That is the only changed verdict; original scores and answers
+are retained in the run records. Older rows have not been re-scored. The two
+remaining failures are an output-cap truncation and an incorrect answer.
+
 The Qwen3.8-Flash-Next QAD row's and the six Qwen3.8-27B rows' HumanEval ran each returned code block in a local subprocess with a 10 s timeout (`scripts/serve_eval.py`, 2026-10-14), not in a network-disabled container; their truncated responses are the cap column.
 
 DeepSeek-V4's strict HumanEval scores count responses with unclosed code fences as failures. Executing those open blocks raises the two-node score to 153/164 and the four-node score to 152/164. Plain decoding produces the same answers; the checkpoint's reference implementation also prefers end-of-sequence at that position.
@@ -499,6 +524,7 @@ DeepSeek-V4's strict HumanEval scores count responses with unclosed code fences 
 | Qwen3.8-Flash-Next FP8 | 4 | 256K BF16 KV, 4 slots | 4/4 | 5/5 classes | different |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 5/5 | 5/5 classes | different |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 5/5 | 5/5 classes | different |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 9/9 | 5/5 classes | different |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV | 4/4 | 5/5 classes | identical |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 3/3 | 5/5 classes | identical |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 5/5 | 5/5 classes | identical |
@@ -533,6 +559,7 @@ Later checks do not replace the historical verdicts above.
 | GLM Flash NVFP4/FP8, four nodes | Original dispatch settings | Solo and C2 matched; C3/C4 diverged. |
 | GLM Flash NVFP4/FP8, four nodes | `DGPP_DENSE_GEMV_ROWS=8` or `256` | Tested C1–C4 responses matched solo, supporting kernel dispatch as the cause. This does not establish isolation for every workload. [Issue #32](https://github.com/HawkBearPig/dgpp/issues/32) |
 | Qwen3.8-Flash-Next QAD, 2026-10-14 | `timed_load --isolation 4` on one node with this build, then the NVIDIA NVFP4 export's one-node template on the same binary | Both exports' solo and batched transcripts diverged at a near-tie (the QAD export at character 173, the NVIDIA export at 149); the batch-shape dependence belongs to the build, not to the export's formats |
+| Qwen3.8-Flash-Next FP4-Local, 2026-10-21 | Shipped one-node template at `7c3086939006`, solo versus three concurrent neighbors | Solo/batched text differed at character 161. Repeated C1 transcripts and plain/default decode matched in all five classes. The new long-context QSA traversal is inactive for this short-prompt probe. |
 | GLM-4.7 | Excluded at the user's earlier request | Cold-prefill failures and node recoveries occurred; the cause was not established |
 
 ## Long context
@@ -600,6 +627,7 @@ The original matrix refresh fixed the three bottlenecks below. The completion ca
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 262,144 | 17.514 | 54.88 | 55.3 | 58.08 | 51.1 | 58.42 | 50.2 | 59.72 | 52.1 | 61.92 | 48.4 | Limit | Limit |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 262,144 | 16.869 | 55.44 | 56.8 | 58.53 | 51.9 | 58.82 | 51.6 | 60.59 | 47.3 | 62.81 | 51.4 | Limit | Limit |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 131,072 | 20.595 | 39.82 | 46.1 | 41.99 | 44.0 | 42.33 | 44.0 | 43.30 | 41.8 | Limit | Limit | Limit | Limit |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 1,048,576 | 20.227 | 68.06 | 54.3 | 71.23 | 48.4 | 71.41 | 43.5 | 72.91 | 53.0 | 76.07 | 41.4 | 89.37 | 41.4 |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 122,880 | 70.959 | 64.37 | 29.1 | 76.25 | 25.7 | 80.89 | 24.4 | Limit | Limit | Limit | Limit | Limit | Limit |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 212,992 | 75.099 | 64.18 | 29.2 | 76.24 | 25.7 | 81.06 | 24.2 | 90.13 | 21.9 | Limit | Limit | Limit | Limit |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 262,144 | 74.567 | 64.08 | 29.0 | 75.99 | 26.0 | 80.81 | 24.5 | 89.94 | 22.1 | 109.90 | 18.0 | Limit | Limit |
@@ -645,6 +673,7 @@ Engine prefill seconds at each context bucket, one uncached sample per cell:
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3 | 0.301 | 17.514 | 36.785 | 81.839 | 195.498 | Limit |
 | Qwen3.8-Flash-Next AutoRound int4/int8 | 1 | 256K BF16 KV, 4 slots, MTP3, prefill optimizations on | 0.247 | 16.869 | 35.678 | 79.916 | 191.961 | Limit |
 | Qwen3.8-Flash-Next NVFP4 (QAD) | 1 | MXFP8 dense, resident n-gram table, 128K BF16 KV, 4 slots | 0.334 | 20.595 | 43.229 | 95.045 | Limit | Limit |
+| Qwen3.8-Flash-Next FP4-Local | 1 | MXFP8 dense, mapped n-gram table, 1M FP8 KV, 4 slots, MTP3 + lookup | 0.354 | 20.227 | 42.303 | 93.128 | 224.228 | 595.753 |
 | GLM-5.3 int4/int8 | 4 | 120K BF16 KV, 8 slots | 0.821 | 70.959 | 153.616 | Limit | Limit | Limit |
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV, 8 slots | 0.840 | 75.099 | 161.000 | 366.933 | Limit | Limit |
 | GLM-5.3 int4/int8 | 4 | 256K FP4 KV, 8 slots | 0.787 | 74.567 | 159.966 | 365.499 | 898.244 | Limit |

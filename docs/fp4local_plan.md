@@ -94,8 +94,16 @@ row counts around 128, chunk cuts, CUDA graph replay, output padding, and
 large valid E8M0 exponents. Host tests cover malformed CSF sidecars and
 quantized vision shapes, including same-byte-count transpositions.
 
-Real-checkpoint serving results belong in `docs/benchmarks.md` and follow
-its workload and timing rules. Run the deployment's row set with:
+Real-checkpoint serving results are recorded in [benchmarks](benchmarks.md)
+with source and binary provenance. The final campaign covers context through
+512K, quality, API behavior, and plain/default greedy transcript agreement.
+Live image API checks passed. A separate capacity probe completed three
+requests at 1,048,094 prompt tokens with zero swap, including prefix reuse;
+it does not establish retrieval quality at that context. Solo/batched greedy
+text differs for the recorded probe, as with the other Qwen exports, while
+repeated C1 and plain/default transcripts match across all five classes.
+
+Run the deployment's row set with:
 
 ```sh
 python3 scripts/serve_campaign.py run \
