@@ -907,9 +907,10 @@ void expect_fp4(const Fixture& fx, const dgpp::GlmFp4Matrix& m, const std::strin
 }
 }  // namespace
 
-DGPP_TEST(qwen_loader_loads_the_qad_export_byte_exact_at_worlds_1_2_4) {
+static void check_qad_loader(bool csf) {
   const Fixture fx = write_qad_fixture();
-  const QwenTextConfig& cfg = fx.cfg;
+  const QwenTextConfig cfg = csf ? qwenfx::tiny_fp4local_config() : fx.cfg;
+  if (csf) qwenfx::write_fixture_for(cfg, fx.dir);
   require(cfg.dense_mxfp8_shipped && cfg.ngram_table_nvfp4 && cfg.mtp_experts_nvfp4 && cfg.norms_f32,
           "the fixture selects the QAD export's forms");
   require(!QwenLayerStream::dense_weights_fp8(), "the dense stack is served as shipped, no engine key");
@@ -1026,6 +1027,9 @@ DGPP_TEST(qwen_loader_loads_the_qad_export_byte_exact_at_worlds_1_2_4) {
     }
   }
 }
+
+DGPP_TEST(qwen_loader_loads_the_qad_export_byte_exact_at_worlds_1_2_4) { check_qad_loader(false); }
+DGPP_TEST(qwen_loader_loads_nested_csf_export_byte_exact_at_worlds_1_2_4) { check_qad_loader(true); }
 
 DGPP_TEST(qwen_loader_qad_ngram_table_resident_and_mmap) {
   const Fixture fx = write_qad_fixture();

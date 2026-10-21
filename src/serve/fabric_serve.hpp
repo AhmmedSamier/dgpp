@@ -152,7 +152,7 @@ struct WorldSettings {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
-  std::string prefill_dense = "tile";        // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+  std::string prefill_dense = "auto";        // family default | tile | streaming
   bool prefill_fold_overlap = true;
   bool decode_pdl = true;                    // the decode graph's kernel edges programmatic          // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
   std::string prefill_window = "flash";      // the DeepSeek-V4.1 prefill's window attention: flash | scalar

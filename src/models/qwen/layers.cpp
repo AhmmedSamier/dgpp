@@ -29,6 +29,7 @@
 #include "kernels/fp8_per_tensor.hpp"
 #include "kernels/full_attn.hpp"
 #include "kernels/scale_gemm.hpp"
+#include "kernels/fp8w_gemm.hpp"
 #include "kernels/qwen_norm.hpp"
 #include "kernels/qwen_ple.hpp"
 
@@ -91,16 +92,15 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
     if (w8.rows != n || w8.cols != k)
       throw std::invalid_argument("qwen dense fp8: the matrix's shape disagrees with the product");
     if (w8.scales_e8m0) {
-      // The QAD export's MXFP8 with its e8m0 bytes resident (the 1 x 32
-      // grid): decode rows on the streaming MMA — the one form that reads
-      // the byte grid, whose shape the loader guaranteed (k % 64) — and the
-      // prefill-shaped rows through the dequant bridge into the BF16 GEMM,
-      // as every fp8 matrix above the GEMV ceiling.
+      // MXFP8's resident byte scales share the prefill tile with other
+      // FP8 grids. Decode keeps its streaming MMA accumulation chain.
       int rs = 0, cs = 5;
       if (!quant_scale_shifts(w8, rs, cs))
         throw std::invalid_argument("qwen dense mxfp8: the matrix's scale grid is not a power-of-two block size");
       const size_t bf16_bytes = static_cast<size_t>(n) * static_cast<size_t>(k) * 2;
-      if (m > 128) {
+      const bool tile = g.prefill_dense_tile && *g.prefill_dense_tile &&
+                        fp8w_gemm_shape_ok(act, static_cast<size_t>(act_stride), k);
+      if (m > 128 && !tile) {
         if (!g.dequant || bf16_bytes > g.dequant_bytes)
           throw std::invalid_argument("qwen dense mxfp8: the prefill bridge is missing or smaller than the matrix");
         launch_fp8_dequant_blocks_e8m0(w8.payload, w8.scales_e8m0, g.dequant, n, k, stream, rs, cs);
@@ -110,11 +110,11 @@ void gemm_dense(const QwenGemmWorkspace& g, const uint16_t* act, int64_t act_str
       if (out_type == GemmOut::F32)
         launch_scale_gemm_grid_e8m0_f32(act, static_cast<size_t>(act_stride), w8.payload, w8.scales_e8m0,
                                         static_cast<float*>(out), m, n, k, stream, static_cast<size_t>(n), rs, cs,
-                                        g.ws, g.ws_bytes);
+                                        g.ws, g.ws_bytes, tile);
       else
         launch_scale_gemm_grid_e8m0_bf16(act, static_cast<size_t>(act_stride), w8.payload, w8.scales_e8m0,
                                          static_cast<uint16_t*>(out), m, n, k, stream, static_cast<size_t>(n), rs,
-                                         cs, g.ws, g.ws_bytes);
+                                         cs, g.ws, g.ws_bytes, tile);
       return;
     }
     // The resident scale grid as the kernels' log2 block sizes. The 128x128

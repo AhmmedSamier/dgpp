@@ -14,7 +14,8 @@
 // PerGroup 5.5 ms against the bridge's 5.3 (dequant 1.3 + cuBLASLt 4.1)
 // and 13.5 ms for the scale GEMM's tile kernel — the bf16 mma pipe issues
 // at ~90 TF and the decode's instructions share its issue slots, so the
-// kernel replaces the tile kernel's route, not the bridge's.
+// measurement compares the 128 x 128 scale grid. MXFP8 prefill can select
+// the same per-weight tile on its 1 x 32 grid through prefill_dense.
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -40,5 +41,14 @@ void launch_fp8w_gemm_bf16(const uint16_t* act, size_t act_stride, const uint8_t
 void launch_fp8w_gemm_f32(const uint16_t* act, size_t act_stride, const uint8_t* w, const float* w_scales,
                           float* out, int m, int n, int k, Fp8wScale scale, cudaStream_t stream,
                           size_t out_stride = 0, int rs = 7, int cs = 7);
+
+// The same per-weight tile and accumulation with resident E8M0 byte scales
+// (MXFP8, normally rs=0/cs=5). No widened scale grid or BF16 weight bridge.
+void launch_fp8w_gemm_e8m0_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
+                                const uint8_t* scales, uint16_t* out, int m, int n, int k,
+                                cudaStream_t stream, size_t out_stride = 0, int rs = 0, int cs = 5);
+void launch_fp8w_gemm_e8m0_f32(const uint16_t* act, size_t act_stride, const uint8_t* w,
+                               const uint8_t* scales, float* out, int m, int n, int k,
+                               cudaStream_t stream, size_t out_stride = 0, int rs = 0, int cs = 5);
 
 }  // namespace dgpp

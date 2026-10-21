@@ -530,14 +530,26 @@ void check_e8m0_grid(const uint16_t* act, size_t act_stride, const uint8_t* w, c
 void launch_scale_gemm_grid_e8m0_bf16(const uint16_t* act, size_t act_row_stride_elems, const uint8_t* w_payload,
                                       const uint8_t* w_scales, uint16_t* out, int m, int n, int k,
                                       cudaStream_t stream, size_t out_row_stride_elems, int rs, int cs, void* ws,
-                                      size_t ws_bytes) {
+                                      size_t ws_bytes, bool prefill_tile) {
+  if (prefill_tile && m >= 1 && n > 0 && k > 0 && rs >= 0 && rs <= 7 && cs >= 4 && cs <= 7 &&
+      fp8w_gemm_shape_ok(act, act_row_stride_elems, k)) {
+    launch_fp8w_gemm_e8m0_bf16(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
+                                  stream, out_row_stride_elems, rs, cs);
+    return;
+  }
   check_e8m0_grid(act, act_row_stride_elems, w_payload, w_scales, m, n, k, cs);
   launch_mma_gemv_fp8e8m0_bf16(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_row_stride_elems,
                                rs, cs, stream, ws, ws_bytes);
 }
 void launch_scale_gemm_grid_e8m0_f32(const uint16_t* act, size_t act_row_stride_elems, const uint8_t* w_payload,
                                      const uint8_t* w_scales, float* out, int m, int n, int k, cudaStream_t stream,
-                                     size_t out_row_stride_elems, int rs, int cs, void* ws, size_t ws_bytes) {
+                                     size_t out_row_stride_elems, int rs, int cs, void* ws, size_t ws_bytes, bool prefill_tile) {
+  if (prefill_tile && m >= 1 && n > 0 && k > 0 && rs >= 0 && rs <= 7 && cs >= 4 && cs <= 7 &&
+      fp8w_gemm_shape_ok(act, act_row_stride_elems, k)) {
+    launch_fp8w_gemm_e8m0_f32(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k,
+                                  stream, out_row_stride_elems, rs, cs);
+    return;
+  }
   check_e8m0_grid(act, act_row_stride_elems, w_payload, w_scales, m, n, k, cs);
   launch_mma_gemv_fp8e8m0_f32(act, act_row_stride_elems, w_payload, w_scales, out, m, n, k, out_row_stride_elems,
                               rs, cs, stream, ws, ws_bytes);

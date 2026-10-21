@@ -384,7 +384,8 @@ __global__ void index_decode_update_kernel(
 }
 
 // ---- scoring ----------------------------------------------------------------
-// Block (stripe, row): the row's q (4 heads x 128) in smem as floats; each
+// Block (stripe, row), or (row, stripe) for long prefills: the row's q
+// (4 heads x 128) in smem as floats; each
 // warp scores one pool per iteration: lane (h = lane / 8, c = lane % 8)
 // holds dims [16c, 16c + 16) of head h and of the key row.
 constexpr int kScoreWarps = 8;
@@ -396,15 +397,15 @@ __global__ __launch_bounds__(kScoreThreads) void index_score_kernel(
     const int64_t* __restrict__ pos, const int32_t* __restrict__ block_tables,
     int blocks_per_request, const uint16_t* __restrict__ index_cache, int pools_per_block,
     int heads, int kpool, uint64_t* __restrict__ keys_ws, int64_t ws_stride, float sqrt_dim,
-    int select_k) {
+    int select_k, bool stripe_first) {
   dgpp_pdl_wait();
   __shared__ float qs[4 * 128];
-  const int64_t r = blockIdx.y;
+  const int64_t r = stripe_first ? blockIdx.x : blockIdx.y;
   const int64_t p = pos[r];
   if (p < 0) return;
   const int64_t visible = (p + 1) / kpool;
   if (visible <= select_k) return;
-  const int64_t p0 = static_cast<int64_t>(blockIdx.x) * kScorePoolsPerBlock;
+  const int64_t p0 = static_cast<int64_t>(stripe_first ? blockIdx.y : blockIdx.x) * kScorePoolsPerBlock;
   if (p0 >= visible) return;
   // Heads beyond `heads` (<= 4) hold zeros: their lanes add nothing.
   for (int i = threadIdx.x; i < 4 * 128; i += kScoreThreads)
@@ -1093,10 +1094,19 @@ void qsa_index_score(const uint16_t* q, int64_t q_row_stride, const int32_t* req
   if (pools <= select_k) return;
   const int64_t stripes = (pools + kScorePoolsPerBlock - 1) / kScorePoolsPerBlock;
   if (stripes > 0x7fffffff) throw std::invalid_argument("qsa_index_score: too many pools");
-  const dim3 grid(static_cast<unsigned>(stripes), static_cast<unsigned>(rows));
+  // Once the compressed key cache exceeds GB10's 24 MiB L2, walking all
+  // stripes for each row streams it again for every query. Visit the rows
+  // of one stripe together instead, so they reuse its keys. The arithmetic,
+  // causal bounds and output addresses stay identical. Short contexts and
+  // decode retain their original traversal. The pool-id bound above caps
+  // stripes at 8192, within CUDA's grid.y limit in either orientation.
+  constexpr int64_t cache_pools = (24 << 20) / (128 * sizeof(uint16_t));
+  const bool stripe_first = rows >= 128 && pools >= cache_pools;
+  const dim3 grid(static_cast<unsigned>(stripe_first ? rows : stripes),
+                  static_cast<unsigned>(stripe_first ? stripes : rows));
   index_score_kernel<<<grid, kScoreThreads, 0, stream>>>(
       q, q_row_stride, req_ids, pos, block_tables, blocks_per_request, index_cache, pools_per_block,
-      heads, kpool, keys_ws, ws_stride, std::sqrt(static_cast<float>(dim)), select_k);
+      heads, kpool, keys_ws, ws_stride, std::sqrt(static_cast<float>(dim)), select_k, stripe_first);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

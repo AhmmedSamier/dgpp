@@ -526,7 +526,7 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_schedule_sampled_scale":1.5}})",
        "'engine.mtp_schedule_sampled_scale' must be in [0, 1]"},
       {R"({"model":"m","nodes":["h"],"engine":{"prefill_dense":"fast"}})",
-       "'engine.prefill_dense' must be \"tile\" or \"streaming\""},
+       "'engine.prefill_dense' must be \"auto\", \"tile\" or \"streaming\""},
       {R"({"model":"m","nodes":["h"],"engine":{"prefill_window":"mma"}})",
        "'engine.prefill_window' must be \"flash\" or \"scalar\""},
       {R"({"model":"m","nodes":["h"],"engine":{"decode_window":"split"}})",
@@ -679,6 +679,47 @@ DGPP_TEST(cluster_config_the_yarn512k_template_is_a_deployment_the_engine_reads)
           "request must be admissible in this template");
 }
 
+DGPP_TEST(cluster_config_the_fp4local_template_is_a_deployment_the_engine_reads) {
+  // deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json, the
+  // ready-to-run shape for the FP4-Local export (2026-10-17). The resident
+  // footprint (98.2 GiB: the experts with their CSF-wrapped scales and the
+  // resident n-gram table's codes) fits one 121.6 GiB device, so the
+  // template seats a whole model in world 1. What this checks: every field
+  // name in the file is one this parser reads (an unknown one is a hard
+  // failure), and the recipe the loader was validated against — the MTP
+  // draft at depth 3 with the screened head behind the lookup draft, the
+  // BF16 remainder FP8 at load, the table mapped rather than resident, the
+  // Full layers' K/V at fp8 with the fp8 prefill attention (half the bf16
+  // pool, sized here to four full 262144-token contexts; interleaved on one
+  // Spark it measured 1459-1469 t/s prefill at 4-8K depth against 1141-1260
+  // bf16, decode unchanged, 2026-10-18), and the YaRN ramp to a 1M positional
+  // ceiling (the cap, not the pool) — is what the file spells.
+  const std::string path = std::string(DGPP_SOURCE_DIR) +
+                           "/deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json";
+  std::ifstream in(path);
+  require(in.good(), "the tracked template is readable: " + path);
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(text, path);
+  require(c.model == "nvidia/Qwen3.8-Flash-Next-FP4-Local" && c.world() == 1,
+          "the single-Spark FP4-Local deployment");
+  require(c.engine.mtp && c.engine.mtp_depth == 3 && c.engine.decode_graph &&
+              c.engine.draft_head == "screen" && c.engine.lookup_draft && c.engine.lookup_tail == 2 &&
+              c.engine.ngram_table == "mmap",
+          "the draft and lookup recipe the validation measured");
+  require(c.engine.dense_weights == "fp8" && c.engine.fp8_head == "mma",
+          "the BF16 remainder FP8 at load and the tensor-core head, as the sibling NVFP4 templates");
+  require(c.engine.kv_dtype == "fp8" && c.engine.prefill_attention == "fp8",
+          "the Full layers' K/V at fp8 with the fp8 prefill attention: half the bf16 pool, the long-depth prefill win");
+  require(c.engine.rope_scaling.has_value() && c.engine.rope_scaling->factor == 4.0 &&
+              c.engine.rope_scaling->original_max_position_embeddings == 262144 &&
+              c.engine.rope_scaling->context_limit() == 1048576,
+          "the YaRN ramp to a 1M positional ceiling: the cap moves, not the pool (it costs no K/V bytes)");
+  require(c.engine.max_concurrency == 4 && c.engine.kv_capacity % 64 == 0 &&
+              c.engine.kv_capacity > c.engine.default_max_tokens && c.engine.prefix_cache_gib == 3 &&
+              c.engine.model_alias == "Qwen3.8-Flash-Next-FP4",
+          "four request slots in a pool that clears a maximal answer, and the one-node Qwen prefix arena");
+}
+
 DGPP_TEST(cluster_config_prefill_defaults_to_auto_with_explicit_opt_out) {
   const auto defaults = dgpp::serve::parse_cluster_config(engine_json("{}"), "t");
   require(defaults.engine.prefill_budget_tokens == -1, "unset prefill budget is automatic");
@@ -746,4 +787,11 @@ DGPP_TEST(cluster_config_tokenizer_cache) {
     require(refusal(json).find("tokenizer") != std::string::npos,
             "malformed tokenizer config refused");
   }
+}
+
+DGPP_TEST(cluster_config_prefill_dense_defaults_to_family_policy) {
+  const auto a = dgpp::serve::parse_cluster_config(engine_json("{}"), "test");
+  require(a.engine.prefill_dense == "auto", "automatic family policy is the default");
+  const auto b = dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_dense":"auto"})"), "test");
+  require(b.engine.prefill_dense == "auto", "explicit automatic policy is accepted");
 }

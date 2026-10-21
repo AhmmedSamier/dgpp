@@ -1600,7 +1600,7 @@ int main(int argc, char** argv) {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;               // engine.ngram_prestage (Qwen)
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
-  std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+  std::string prefill_dense = "auto";  // FP8 grid prefill projections: auto | tile | streaming
   bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
   bool decode_pdl = true;              // the decode graph's kernel edges programmatic (engine/graph_pdl.hpp)
   std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
@@ -2490,7 +2490,8 @@ int main(int argc, char** argv) {
   }
   // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
   dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
-  dgpp::Dsv41Model::set_default_prefill_dense_tile(prefill_dense == "tile");
+  dgpp::Dsv41Model::set_default_prefill_dense_tile(prefill_dense != "streaming");
+  dgpp::QwenModel::set_default_prefill_dense_tile(prefill_dense == "tile");
   dgpp::Dsv41Model::set_default_prefill_fold_overlap(prefill_fold_overlap);
   dgpp::Dsv41Model::set_default_prefill_window_flash(prefill_window == "flash");
   dgpp::Dsv41Model::set_default_decode_window_flash(decode_window == "flash");

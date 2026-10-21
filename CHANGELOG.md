@@ -5,6 +5,25 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **FP4-Local Qwen3.8-Flash-Next export** (`nvidia/Qwen3.8-Flash-Next-FP4-Local`).
+  Load CSF-wrapped NVFP4 expert scales losslessly, discover nested shards
+  through their index, and validate quantized vision matrices before widening
+  them to BF16. The model uses the shared Qwen engine, including the FP4
+  single-pass down projection, tile stealing, attention-combine staging,
+  PDL graphs, MTP copies, and sampling fast paths. MXFP8 attention and shared
+  experts can select the shared FP8 weight-tile prefill kernel through
+  `engine.prefill_dense`, with byte scales kept resident. Automatic dispatch
+  retains Qwen's faster existing bridge while DeepSeek-V4.1 keeps its tile.
+  Long QSA prefills reuse index-cache stripes across queries, preserving
+  score bits while avoiding repeated full-cache reads beyond L2 capacity.
+  Deployment preflight accepts indexed nested shards and rejects traversal. The one-Spark
+  template uses FP8 dense weights and KV, MTP3, a screened draft head,
+  a mapped n-gram table, four request slots, and a 1M-token pool and YaRN
+  positional ceiling. Fix premature source-scale page release for plain
+  NVFP4 column slices. Regression fixtures cover nested CSF checkpoints,
+  TP slicing, independent forward references, graph replay and mixed prefill.
+  See [docs/fp4local_plan.md](docs/fp4local_plan.md).
+
 - **The day's DeepSeek-V4.1 levers ported where they apply; the campaign's
   C8 cell on a six-slot template read** (2026-10-20). Inventory of the
   2026-10-20 commits: the lm head's bf12 tensor-core form lives in the GEMM

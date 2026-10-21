@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 from data_paths import data_dir, require_file
+from humaneval_program import humaneval_program
 
 ap = argparse.ArgumentParser()
 ap.add_argument("host")
@@ -124,11 +125,7 @@ def humaneval_run(item):
               "and nothing else.\n\n```python\n" + item["prompt"] + "```")
     r = chat([{"role": "user", "content": prompt}])
     code = fenced_code(r["content"])
-    # The problem's prompt carries the imports the tests assume; prepend it
-    # when the reply omitted the header (a body-only reply).
-    if item["entry_point"] not in code:
-        code = item["prompt"] + code
-    program = code + "\n\n" + item["test"] + "\n\n" + f"check({item['entry_point']})\n"
+    program = humaneval_program(item, code)
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
         f.write(program)
         path = f.name
