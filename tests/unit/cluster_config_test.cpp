@@ -526,7 +526,7 @@ DGPP_TEST(cluster_config_refusesUnknownKeysAndBadValuesByName) {
       {R"({"model":"m","nodes":["h"],"engine":{"mtp_schedule_sampled_scale":1.5}})",
        "'engine.mtp_schedule_sampled_scale' must be in [0, 1]"},
       {R"({"model":"m","nodes":["h"],"engine":{"prefill_dense":"fast"}})",
-       "'engine.prefill_dense' must be \"tile\" or \"streaming\""},
+       "'engine.prefill_dense' must be \"auto\", \"tile\" or \"streaming\""},
       {R"({"model":"m","nodes":["h"],"engine":{"prefill_window":"mma"}})",
        "'engine.prefill_window' must be \"flash\" or \"scalar\""},
       {R"({"model":"m","nodes":["h"],"engine":{"decode_window":"split"}})",
@@ -787,4 +787,11 @@ DGPP_TEST(cluster_config_tokenizer_cache) {
     require(refusal(json).find("tokenizer") != std::string::npos,
             "malformed tokenizer config refused");
   }
+}
+
+DGPP_TEST(cluster_config_prefill_dense_defaults_to_family_policy) {
+  const auto a = dgpp::serve::parse_cluster_config(engine_json("{}"), "test");
+  require(a.engine.prefill_dense == "auto", "automatic family policy is the default");
+  const auto b = dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_dense":"auto"})"), "test");
+  require(b.engine.prefill_dense == "auto", "explicit automatic policy is accepted");
 }

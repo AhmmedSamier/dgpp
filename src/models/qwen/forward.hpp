@@ -352,7 +352,7 @@ class QwenModel : public SessionModel<QwenModel> {
   QwenLayerStream loader_;
   CublasLtGemm gemm_;
   void configure_gemm_rows(int tokens, bool decode);
-  bool prefill_dense_tile_enabled_ = true;
+  bool prefill_dense_tile_enabled_ = false;
   bool prefill_dense_tile_ = false;
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;

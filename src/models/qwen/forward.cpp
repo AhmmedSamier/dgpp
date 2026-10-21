@@ -28,7 +28,7 @@
 
 namespace dgpp {
 namespace {
-bool default_prefill_dense_tile = true;
+bool default_prefill_dense_tile = false;
 
 template <class T>
 T* dev_alloc(size_t n) {

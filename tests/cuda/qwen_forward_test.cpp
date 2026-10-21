@@ -626,6 +626,9 @@ int run_dump_parity(const std::string& dir, const std::string& dump_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (const char* tile = std::getenv("DGPP_TEST_QWEN_PREFILL_TILE"); tile && tile[0] == '1')
+    dgpp::QwenModel::set_default_prefill_dense_tile(true);
+
   std::string fixture, smoke, checkpoint, dump, cross_limit, qsa_prefill, logits_path;
   std::string rope_scaling_arg;
   bool plan_check = false, w4a4_plan_check = false, gptq = false, qad = false, fp4local = false, nvfp4 = false;

@@ -34,7 +34,7 @@
     "dense_weights": "fp8",
     "fp8_head": "mma",
     "prefill_attention": "fp8",
-    "prefill_dense": "tile"
+    "prefill_dense": "auto"
   },
   "paths": {
     "resident_cache": ""

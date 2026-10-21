@@ -29,8 +29,9 @@ its low-24-bit flat index. Expansion preserves the original E4M3 bytes;
 row and column slicing happens afterward. The resident weight layout and
 kernel inputs are the same as the plain NVFP4 export.
 
-Shard discovery follows `model.safetensors.index.json`, including its
-`tensors/` paths. The loader retains source scale pages until their copy
+Shard discovery and deployment preflight both follow
+`model.safetensors.index.json`, including its `tensors/` paths. Preflight
+rejects absolute paths and traversal while accepting nested relative paths. The loader retains source scale pages until their copy
 finishes, then releases them through the shared resident-loader machinery.
 
 ## Shared engine paths
@@ -41,12 +42,16 @@ integrated with the engine changes on master through `a0d4e055`.
 | Engine optimization | FP4-Local path |
 |---|---|
 | FP4 single-pass down projection and tile stealing | `QwenMoeLayer` → `GlmMoeLayer`; the 640-column expert down projection qualifies |
-| FP8 weight-tile prefill | MXFP8 attention uses E8M0 byte scales directly; shared experts use the same tile with F32 scales |
+| Optional FP8 weight-tile prefill | MXFP8 attention supports resident E8M0 byte scales; shared experts support the same tile with F32 scales |
 | Staged attention-combine metadata | Shared full-attention/DSA kernels, including the FP8 KV pool |
 | Programmatic dependent launches | Shared graph and kernel launch paths |
 | Draft hidden-state copies | Shared Qwen MTP kernels |
 | Neutral sampling penalties | Shared sampling fast path |
 | BF12 companions and L2 prefetch | Existing Qwen dispatch where the resident weight form permits them |
+
+`engine.prefill_dense: "auto"` preserves the faster existing MXFP8 bridge
+policy for Qwen. The shared tile remains available for explicit selection;
+DeepSeek-V4.1 continues to choose its tile under `auto`.
 
 `engine.prefill_dense: "tile"` selects the shared weight tile for MXFP8
 prefill at every supported row count. It reads compressed weights directly,

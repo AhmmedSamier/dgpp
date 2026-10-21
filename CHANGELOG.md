@@ -11,8 +11,10 @@ project procedures and design guidance live in `docs/`.
   them to BF16. The model uses the shared Qwen engine, including the FP4
   single-pass down projection, tile stealing, attention-combine staging,
   PDL graphs, MTP copies, and sampling fast paths. MXFP8 attention and shared
-  experts now reach the shared FP8 weight-tile prefill kernel through
-  `engine.prefill_dense`, with byte scales kept resident. The one-Spark
+  experts can select the shared FP8 weight-tile prefill kernel through
+  `engine.prefill_dense`, with byte scales kept resident. Automatic dispatch
+  retains Qwen's faster existing bridge while DeepSeek-V4.1 keeps its tile.
+  Deployment preflight accepts indexed nested shards and rejects traversal. The one-Spark
   template uses FP8 dense weights and KV, MTP3, a screened draft head,
   a mapped n-gram table, four request slots, and a 1M-token pool and YaRN
   positional ceiling. Fix premature source-scale page release for plain

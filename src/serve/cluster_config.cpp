@@ -301,8 +301,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'" + ek + "' must be \"bounded\" or \"exact\"");
         } else if (p.key == "prefill_dense") {
           e.prefill_dense = text(x, ek, what);
-          if (e.prefill_dense != "tile" && e.prefill_dense != "streaming")
-            fail(what, "'" + ek + "' must be \"tile\" or \"streaming\"");
+          if (e.prefill_dense != "auto" && e.prefill_dense != "tile" && e.prefill_dense != "streaming")
+            fail(what, "'" + ek + "' must be \"auto\", \"tile\" or \"streaming\"");
         } else if (p.key == "prefill_fold_overlap") {
           e.prefill_fold_overlap = boolean(x, ek, what);
         } else if (p.key == "decode_pdl") {

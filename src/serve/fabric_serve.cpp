@@ -730,9 +730,9 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (v.find("npre")) s.ngram_prestage = flag("npre");
     // Records before 2026-09-14 carry no prefill mode: bounded.
     if (const dgpp::minijson::Value* pf = v.find("pf")) s.prefill = std::string(pf->as_string());
-    // Records before 2026-10-18 carry no prefill dense form: the tile GEMM.
+    // Older records carry no dense form: preserve each family's default.
     if (const dgpp::minijson::Value* pfd = v.find("pfd")) s.prefill_dense = std::string(pfd->as_string());
-    else s.prefill_dense = "tile";
+    else s.prefill_dense = "auto";
     // Records before the fold overlap key (2026-10-18) carry none: on.
     s.prefill_fold_overlap = v.find("pfo") ? flag("pfo") : true;
     s.decode_pdl = v.find("pdl") ? flag("pdl") : true;
@@ -832,7 +832,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         (s.dense_weights != "checkpoint" && s.dense_weights != "fp8") ||
         !parse_bf16_residency(s.bf16_weights, nullptr) ||
         (s.prefill != "bounded" && s.prefill != "exact") ||
-        (s.prefill_dense != "tile" && s.prefill_dense != "streaming") ||
+        (s.prefill_dense != "auto" && s.prefill_dense != "tile" && s.prefill_dense != "streaming") ||
         (s.prefill_window != "flash" && s.prefill_window != "scalar") ||
         (s.decode_window != "flash" && s.decode_window != "scalar") ||
         (s.collective_transport != "write" && s.collective_transport != "send") ||

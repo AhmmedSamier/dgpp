@@ -115,7 +115,7 @@ class QwenMoeLayer {
   // expert, its sigmoid weight, the last fma and the one rounding.
   void shared_tail(const uint16_t* hidden, uint16_t* out, int tokens, cudaStream_t stream, bool prefill = false);
 
-  bool prefill_dense_tile_ = true;
+  bool prefill_dense_tile_ = false;
   QwenMoeWeights w_;
   GlmMoeConfig cfg_;
   IGemm& gemm_;

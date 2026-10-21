@@ -211,7 +211,7 @@ struct ClusterConfig {
     // recipe, half the prefill work) or "exact" (every layer over every
     // row, the parity mode).
     std::string prefill = "bounded";
-    std::string prefill_dense = "tile";  // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+    std::string prefill_dense = "auto";  // family default | tile | streaming
     std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
     std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
     // The fabric's latency-class collective transport for the decode

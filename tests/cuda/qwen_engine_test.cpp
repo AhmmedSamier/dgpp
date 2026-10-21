@@ -2017,6 +2017,9 @@ DGPP_TEST(qwen_engines_loopback_world_2_lookup_skips_sampled_slots) {
 }
 
 int main() {
+  if (const char* tile = std::getenv("DGPP_TEST_QWEN_PREFILL_TILE"); tile && tile[0] == '1')
+    dgpp::QwenModel::set_default_prefill_dense_tile(true);
+
   // DGPP_TEST_QWEN_GPTQ=1: every case runs the AutoRound hybrid's fixture
   // (tests/cuda/qwen_fixture.hpp), whose dense stack ships as block fp8 —
   // the loader's fp8 dense mode is the only one that reads it.
