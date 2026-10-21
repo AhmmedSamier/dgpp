@@ -402,6 +402,9 @@ unrepresentable numbers receive HTTP 400 and close the connection. A valid lengt
 above `http.max_body_bytes` receives HTTP 413. Exceptions escaping
 `HttpHandler::handle` return a generic HTTP 500 JSON message; the server log retains
 the diagnostic. Errors handled within the generation service are unchanged.
+When rejecting a request, the parser stops accepting further requests and drains
+queued replies before closing. Earlier pipelined replies remain intact even when
+the client reads slowly or a later handler throws an exception.
 
 `http.max_body_bytes` caps each serialized HTTP request body. The default is
 268435456 bytes (256 MiB), allowing large document prefills and conversation

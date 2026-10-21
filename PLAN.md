@@ -3,7 +3,9 @@
 HTTP framing validates complete decimal request lengths and matching repeated
 fields before dispatch. Host regressions cover malformed/overflowing lengths,
 keep-alive compatibility, canonical handler-visible headers, connection closure
-and generic replies for exceptions escaping HTTP dispatch.
+and generic replies for exceptions escaping HTTP dispatch. Parser refusals and
+handler exceptions preserve earlier pipelined replies under backpressure; closure
+and disconnect notification wait for queued output to drain.
 
 Request preparation uses one persistent worker per configured engine request
 slot, with bounded request/payload queues and completion-order admission.
