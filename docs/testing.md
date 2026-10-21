@@ -218,6 +218,17 @@ setup. It is registered when the server target is enabled (libibverbs required).
 loopback tests use fixed ports in the 299xx range. Run GPU/RDMA tests only
 on idle test hardware, serially; do not run them alongside production serving.
 
+The common native harness reports each completed case as `[ OK ]`, `[FAIL]`
+or `[SKIP] name: reason`. Its summary includes separate counts, for example
+`12 tests, 0 failed, 10 passed, 2 skipped`; the total includes skipped cases.
+Missing optional devices, checkpoints or an applicable corpus are skips,
+not passing checks. Assertion failures remain failures. A mixed or all-skipped
+harness run retains exit zero when no case fails; failure or an unmatched
+filter returns nonzero. CTest reports the aggregate binary result, not
+individual case skips. Standalone suites that already return skip code 2
+when their prerequisites are absent retain that behavior. Read the case
+counts before treating a passing aggregate result as hardware/model coverage.
+
 The [Chat API extension validation record](openai-api-validation.md) lists
 focused file/custom-tool/reasoning/schema checks, sanitizer commands and
 the distinction between host conformance tests and live model validation.

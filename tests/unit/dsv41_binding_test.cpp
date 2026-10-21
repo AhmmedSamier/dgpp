@@ -155,7 +155,8 @@ DGPP_TEST(dsv41_tp_geometry_accepts_the_deployment_worlds) {
 
 DGPP_TEST(dsv41_binding_matches_the_landed_checkpoint) {
   const auto snap = landed_snapshot();
-  if (snap.empty()) return;
+  if (snap.empty())
+    dgpp::test::skip("required checkpoint snapshot unavailable: deepseek-ai/DeepSeek-V4.1-Flash");
   namespace fs = std::filesystem;
   const dgpp::Dsv41TextConfig cfg = dgpp::Dsv41TextConfig::from_json_file((snap / "config.json").string());
   std::unordered_map<std::string, dgpp::Dsv41TensorDesc> present;
