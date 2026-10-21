@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import cluster_doctor
 import cluster_process
+from humaneval_program import humaneval_program
 import prepare_data
 import site_env
 
@@ -181,6 +182,22 @@ class PortabilityTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("--allow-code-execution", result.stderr)
         self.assertFalse(out.exists())
+
+    def test_humaneval_keeps_supplied_helpers_and_imports(self):
+        item = dict(entry_point="decode", prompt=(
+            "from math import factorial\n"
+            "def encode(n):\n    return factorial(n)\n"
+            "def decode(n):\n    \"\"\"Return n's factorial.\"\"\"\n"),
+            test="def check(candidate):\n    assert candidate(4) == encode(4)\n")
+        for code in ("def decode(n):\n    return factorial(n)\n",
+                     "    return factorial(n)\n",
+                     "    return 1 if n <= 1 else n * decode(n - 1)\n",
+                     "from __future__ import annotations\n"
+                     "def decode(n: MissingType):\n    return factorial(n)\n"):
+            with self.subTest(code=code):
+                exec(humaneval_program(item, code), {})
+        with self.assertRaises(AssertionError):
+            exec(humaneval_program(item, "def decode(n):\n    return 0\n"), {})
 
     def test_peer_procedures_reject_single_node_before_launch(self):
         for name in ("serve_stop_check.sh", "serve_failure_drill.sh", "serve_soak_run.sh"):

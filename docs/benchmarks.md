@@ -431,7 +431,7 @@ These are the original campaigns' quality results, retained separately from the 
 
 | Evaluation setting | Value |
 |---|---|
-| HumanEval | All 164 problems; returned code block executed independently in a network-disabled container without host mounts |
+| HumanEval | All 164 problems; the maintained `serve_eval.py` preserves supplied helpers/imports and executes each returned code block against the tests in a Python subprocess with a 10-second timeout (`--allow-code-execution`) |
 | GSM8K | First 300 test problems |
 | Schema extraction | 100 deterministic records |
 | Temperature | Zero |
