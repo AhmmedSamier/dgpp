@@ -14,6 +14,8 @@ project procedures and design guidance live in `docs/`.
   experts can select the shared FP8 weight-tile prefill kernel through
   `engine.prefill_dense`, with byte scales kept resident. Automatic dispatch
   retains Qwen's faster existing bridge while DeepSeek-V4.1 keeps its tile.
+  Long QSA prefills reuse index-cache stripes across queries, preserving
+  score bits while avoiding repeated full-cache reads beyond L2 capacity.
   Deployment preflight accepts indexed nested shards and rejects traversal. The one-Spark
   template uses FP8 dense weights and KV, MTP3, a screened draft head,
   a mapped n-gram table, four request slots, and a 1M-token pool and YaRN

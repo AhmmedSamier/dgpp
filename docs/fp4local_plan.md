@@ -1,7 +1,7 @@
 # Qwen3.8-Flash-Next FP4-Local
 
 `nvidia/Qwen3.8-Flash-Next-FP4-Local` uses the Qwen3.8 engine and its
-48-layer GDN/full-attention MoE. The deployment template is
+48-layer GDN/sparse-attention MoE. The deployment template is
 `deploy/cluster_qwen-3.8-flash-next-fp4local_w1.example.json`.
 The checkpoint used for validation is revision
 `b9ce18a6887e18c089fdea8509a33e63429a3300`.
@@ -44,6 +44,7 @@ integrated with the engine changes on master through `a0d4e055`.
 | FP4 single-pass down projection and tile stealing | `QwenMoeLayer` → `GlmMoeLayer`; the 640-column expert down projection qualifies |
 | Optional FP8 weight-tile prefill | MXFP8 attention supports resident E8M0 byte scales; shared experts support the same tile with F32 scales |
 | Staged attention-combine metadata | Shared full-attention/DSA kernels, including the FP8 KV pool |
+| Long-context indexer cache reuse | Shared QSA scoring visits query rows together for each key stripe once the index cache exceeds L2 |
 | Programmatic dependent launches | Shared graph and kernel launch paths |
 | Draft hidden-state copies | Shared Qwen MTP kernels |
 | Neutral sampling penalties | Shared sampling fast path |
@@ -67,6 +68,16 @@ the screened draft head, and lookup drafting. The n-gram table is mmap'ed.
 It reserves 1,048,576 KV tokens and uses YaRN factor 4 over the checkpoint's
 262,144-token window. The pool is shared across four request slots; a
 single request at the full positional ceiling consumes the pool.
+
+Sparse attention bounds the final attention walk to 2,048 selected tokens
+plus an incomplete compression group. Its indexer still scores every
+visible group of four tokens for each query, so total cold-prefill indexing
+work grows quadratically with prompt length. Long-context prefill reorders
+score blocks to reuse each key stripe across queries rather than repeatedly
+streaming the entire compressed key cache. This preserves every score bit,
+selection, and causal bound; short contexts and decode retain their previous
+ordering. It removes an avoidable cache penalty without changing that
+underlying scaling.
 
 ## Regression coverage
 
