@@ -732,7 +732,7 @@ if(DGPP_ENABLE_IBV)
     src/net/nic_visibility.cu)
   target_link_libraries(dgpp_bus
     PUBLIC dgpp_net CUDA::cudart ${IBVERBS_LIBRARY})
-  target_include_directories(dgpp_bus PUBLIC ${IBVERBS_INCLUDE_DIR})
+  target_include_directories(dgpp_bus SYSTEM PUBLIC ${IBVERBS_INCLUDE_DIR})
   dgpp_set_common(dgpp_bus)
 
   add_executable(bus_check apps/bus_check.cpp)
@@ -2259,7 +2259,8 @@ if(DGPP_BUILD_BENCHMARKS)
   # Check every source, including auxiliary translation units, before defining
   # the target so no target properties refer to a skipped benchmark.
   function(dgpp_add_benchmark target)
-    cmake_parse_arguments(BENCH "" "" "SOURCES;LIBRARIES;INCLUDE_DIRECTORIES" ${ARGN})
+    cmake_parse_arguments(BENCH "" ""
+      "SOURCES;LIBRARIES;INCLUDE_DIRECTORIES;SYSTEM_INCLUDE_DIRECTORIES" ${ARGN})
     foreach(source IN LISTS BENCH_SOURCES)
       if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
         message(STATUS "Skipping benchmark ${target}: missing ${source}")
@@ -2270,6 +2271,9 @@ if(DGPP_BUILD_BENCHMARKS)
     target_link_libraries(${target} PRIVATE ${BENCH_LIBRARIES})
     if(BENCH_INCLUDE_DIRECTORIES)
       target_include_directories(${target} PRIVATE ${BENCH_INCLUDE_DIRECTORIES})
+    endif()
+    if(BENCH_SYSTEM_INCLUDE_DIRECTORIES)
+      target_include_directories(${target} SYSTEM PRIVATE ${BENCH_SYSTEM_INCLUDE_DIRECTORIES})
     endif()
     dgpp_set_common(${target})
   endfunction()
@@ -2360,7 +2364,7 @@ if(DGPP_BUILD_BENCHMARKS)
     dgpp_add_benchmark(micro_gdr_probe
       SOURCES benchmarks/micro/gdr_probe.cpp src/common/log.cpp
       LIBRARIES CUDA::cudart ${IBVERBS_LIBRARY}
-      INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
+      SYSTEM_INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
 
     # The send-doorbell mapping probe (2026-09-19): mlx5 direct verbs, only
     # where libmlx5 is installed.
@@ -2369,13 +2373,13 @@ if(DGPP_BUILD_BENCHMARKS)
       dgpp_add_benchmark(micro_uar_probe
         SOURCES benchmarks/micro/uar_probe.cpp
         LIBRARIES ${MLX5_LIBRARY} ${IBVERBS_LIBRARY} CUDA::cudart
-        INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
+        SYSTEM_INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
     endif()
 
     dgpp_add_benchmark(micro_ibv_smoke
       SOURCES benchmarks/micro/ibv_smoke.cpp src/net/nic_visibility.cu src/common/log.cpp
       LIBRARIES ${IBVERBS_LIBRARY} CUDA::cudart
-      INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
+      SYSTEM_INCLUDE_DIRECTORIES ${IBVERBS_INCLUDE_DIR})
   endif()
 endif()
 

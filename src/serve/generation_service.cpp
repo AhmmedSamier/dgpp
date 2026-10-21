@@ -1689,7 +1689,12 @@ bool GenerationService::parse_chat(const dgpp::minijson::Value& body,
           return refuse("this model accepts text content only", at + ".type", "unsupported_content_type");
         const auto* text = part.find(is_refusal ? "refusal" : "text");
         if (!text || !text->is_string()) return refuse("content part text must be a string", at);
-        parts.push_back(is_refusal ? Value::make_object({{"type", Value::make_string("text")}, {"text", *text}}) : part);
+        if (is_refusal) {
+          parts.push_back(
+              Value::make_object({{"type", Value::make_string("text")}, {"text", *text}}));
+        } else {
+          parts.push_back(part);
+        }
       }
       // only thinking parts: the visible content is empty
       normalized_content = (saw_thinking && parts.empty()) ? Value::make_string("")
