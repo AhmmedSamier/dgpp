@@ -209,6 +209,28 @@ ctest --test-dir build-ci -L host -LE checkpoint --output-on-failure
 ctest --test-dir build-ci -L python --output-on-failure
 ```
 
+These selections include `cluster_process_swap_test`'s four cheap policy and
+mocked propagation checks. Run the four systemd integration checks explicitly
+on a Linux host with systemd user scopes:
+
+```bash
+ctest --test-dir build-ci -L systemd --output-on-failure -V
+```
+
+To run the remaining CTest groups while explicitly excluding real systemd
+scopes, use `ctest --test-dir build-ci -LE systemd --output-on-failure` after
+building their targets and satisfying their hardware/checkpoint requirements.
+
+`cluster_process_swap_systemd_test` is excluded from the `host` and `python`
+labels so those selections do not start real scopes. Positive checks report
+skips when systemd tools, a user manager or cgroup v2 memory/swap controls are
+unavailable. The missing-bus failure checks still run without a working user
+manager; they verify that scope failure never falls back to an unprotected
+command. Once a scope is launched, a behavioral failure remains a failure.
+Run this group when changing process launch, swap policy or version probes;
+directly running `tests/python/cluster_process_swap_test.py -v` retains all
+eight checks and reports individual skips.
+
 `serve_startup_test` uses the built server for two- and four-process settings
 handshakes over loopback. It deliberately fails a local HTTP capacity check
 after settings adoption, before model loading, CUDA initialization or RDMA
@@ -233,7 +255,8 @@ The [Chat API extension validation record](openai-api-validation.md) lists
 focused file/custom-tool/reasoning/schema checks, sanitizer commands and
 the distinction between host conformance tests and live model validation.
 
-CTest labels are `host`, `python`, `checkpoint`, `gpu`, `rdma` and `fixture`.
+CTest labels are `host`, `python`, `checkpoint`, `gpu`, `rdma`, `fixture` and
+`systemd`.
 Use `ctest --test-dir build-ci -N -L LABEL` to inspect a group before running
 it. Fixture producers are added automatically when a selected test requires
 them. Build all targets before a full CTest run. The `checkpoint` label marks

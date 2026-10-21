@@ -1119,6 +1119,18 @@ add_test(NAME bootstrap_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/bootstrap_test.py)
 add_test(NAME launcher_test
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/launcher_test.py)
+add_test(NAME cluster_process_swap_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/cluster_process_swap_test.py -v
+    ProcessSwapTest.test_invalid_policy_is_rejected
+    ProcessSwapTest.test_version_probe_rejects_invalid_policy
+    ProcessSwapTest.test_preflight_forwards_swap_policy_to_peer_version_probes
+    ProcessSwapTest.test_preflight_respects_resolved_node_swap_policy)
+add_test(NAME cluster_process_swap_systemd_test
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/cluster_process_swap_test.py -v
+    ProcessSwapTest.test_scope_has_zero_swap_and_recorded_group_can_stop_it
+    ProcessSwapTest.test_scope_failure_does_not_run_the_command_without_protection
+    ProcessSwapTest.test_version_probe_uses_zero_swap_scope
+    ProcessSwapTest.test_version_probe_does_not_fall_back_when_scope_fails)
 if(TARGET dgpp_serve_app)
   add_test(NAME serve_startup_test
     COMMAND ${CMAKE_COMMAND} -E env "DGPP_SERVE_TEST_BINARY=$<TARGET_FILE:dgpp_serve_app>"
@@ -2393,13 +2405,15 @@ set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test s
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
-  site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test PROPERTIES LABELS "host;python")
+  site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test cluster_process_swap_test PROPERTIES LABELS "host;python")
+set_tests_properties(cluster_process_swap_systemd_test PROPERTIES LABELS "systemd" TIMEOUT 180)
 if(TARGET dgpp_serve_app)
   set_tests_properties(serve_startup_test PROPERTIES LABELS "host;python" TIMEOUT 180)
 endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
-  dsv4_tokenizer_test dsv4_prompt_test
+  dsv4_tokenizer_test dsv4_prompt_test glm_dsa_tokenizer_test mimo_tokenizer_test
+  glm_dsa_chat_template_test mimo_chat_template_test
   PROPERTIES LABELS "host;checkpoint")
 foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
     glm4_forward_generate mimo_forward_fixture mimo_forward_generate mimo_forward_generate_teacher
