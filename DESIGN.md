@@ -2344,6 +2344,8 @@ generic HTTP 500 JSON error. Service-level error responses are unchanged.
 Parser refusals stop further request processing and drain queued responses before
 closing, including earlier pipelined replies under output backpressure. Handler
 exceptions replace only that handler's pending output, preserving earlier replies.
+Input arriving during the drain is discarded without dispatch or buffering so
+unread request bytes do not reset the socket when queued output finishes.
 
 The server separates HTTP processing from model execution. Rank 0 runs
 the text frontend and generation service; every rank runs a scheduler and

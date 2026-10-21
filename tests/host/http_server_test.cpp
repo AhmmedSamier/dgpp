@@ -426,9 +426,11 @@ DGPP_TEST(http_refusals_drain_prior_response_before_closing_under_backpressure) 
     std::string request;
     const char* status;
     int dispatched;
+    bool late_input = false;
   };
   const Case cases[] = {
       {"GET / HTTP/1.1\r\nContent-Length: +0\r\n\r\n", "400 Bad Request", 1},
+      {"GET / HTTP/1.1\r\nContent-Length: +0\r\n\r\n", "400 Bad Request", 1, true},
       {"GET / HTTP/1.1\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n", "400 Bad Request", 1},
       {"bad-request\r\n\r\n", "400 Bad Request", 1},
       {"GET / HTTP/1.0\r\n\r\n", "400 Bad Request", 1},
@@ -481,6 +483,7 @@ DGPP_TEST(http_refusals_drain_prior_response_before_closing_under_backpressure) 
     for (int i = 0; i < 1000 && !handler.processed.load(); ++i)
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     require(handler.processed.load(), "server processed pipelined requests");
+    if (test.late_input) client.send_all("GET /late HTTP/1.1\r\n\r\n");
     const auto response = client.read_available(1000);
     server.stop();
     loop.join();

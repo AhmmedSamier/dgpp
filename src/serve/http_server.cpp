@@ -406,7 +406,7 @@ void HttpServer::accept_new() {
 
 void HttpServer::on_readable(Conn& c) {
   char buf[kReadChunk];
-  while (!c.closing && !c.gone) {
+  while (!c.gone) {
     const ssize_t got = ::recv(c.fd, buf, sizeof(buf), 0);
     if (got < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) return;
@@ -418,14 +418,21 @@ void HttpServer::on_readable(Conn& c) {
       close_conn(c, /*notify_disconnect=*/true);
       return;
     }
+    // Once a refusal is queued, discard later input without parsing or
+    // buffering it. Leaving it unread can make close() reset the socket
+    // and discard response bytes that are still in the kernel send queue.
+    if (c.closing) continue;
     c.in.append(buf, static_cast<size_t>(got));
-    if (!process_requests(c)) return;  // error/close already handled
+    if (!process_requests(c)) {
+      if (c.fd < 0) return;
+      continue;  // drain input while the terminal response waits on output
+    }
     if (c.in.size() > kMaxHeaderBytes + max_body_bytes_) {
       queue_response(c, 413, "text/plain",
                      "payload too large: http.max_body_bytes is " +
                          std::to_string(max_body_bytes_) + " bytes", true);
       flush_out(c);
-      return;
+      if (c.fd < 0) return;
     }
   }
 }
@@ -622,8 +629,7 @@ bool HttpServer::flush_out(Conn& c) {
     if (put < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       // Arm EPOLLOUT so the remainder drains.
       epoll_event ev{};
-      ev.events = EPOLLOUT | EPOLLRDHUP;
-      if (!c.closing) ev.events |= EPOLLIN;
+      ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
       ev.data.fd = c.fd;
       (void)!::epoll_ctl(epoll_fd_, EPOLL_CTL_MOD, c.fd, &ev);
       return true;
