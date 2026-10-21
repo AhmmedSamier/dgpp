@@ -120,6 +120,24 @@ class PortabilityTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "length"):
             cluster_doctor.checkpoint_size(snapshot)
 
+    def test_indexed_nested_shards_and_invalid_paths(self):
+        snapshot = self.checkpoint()
+        (snapshot / "tensors").mkdir()
+        shard = snapshot / "tensors/model.safetensors"
+        (snapshot / "model.safetensors").rename(shard)
+        index = snapshot / "model.safetensors.index.json"
+        index.write_text(json.dumps({"weight_map": {"weight": "tensors/model.safetensors"}}))
+        self.assertEqual(cluster_doctor.checkpoint_size(snapshot), shard.stat().st_size)
+        for name in ("../model.safetensors", "/tmp/model.safetensors", "tensors/../../model.safetensors",
+                     "tensors//model.safetensors", "tensors/./model.safetensors", "tensors\\model.safetensors"):
+            with self.subTest(name=name):
+                index.write_text(json.dumps({"weight_map": {"weight": name}}))
+                with self.assertRaisesRegex(ValueError, "invalid shard path"):
+                    cluster_doctor.checkpoint_size(snapshot)
+        index.write_text(json.dumps({"weight_map": {"weight": "tensors/missing.safetensors"}}))
+        with self.assertRaises(FileNotFoundError):
+            cluster_doctor.checkpoint_size(snapshot)
+
     def test_snapshot_ambiguity_and_missing_shard(self):
         snapshot = self.checkpoint()
         (snapshot.parent / "other").mkdir()
@@ -196,6 +214,7 @@ class PortabilityTest(unittest.TestCase):
 
     def test_deployment_filenames_describe_their_settings(self):
         models = {
+            "nvidia/Qwen3.8-Flash-Next-FP4-Local": "qwen-3.8-flash-next-fp4local",
             "HawkBearPig/GLM-5.3-Flash-NVFP4-FP8": "glm-5.3-flash_nvfp4-fp8",
             "HawkBearPig/GLM-5.3-Int4-Int8Mix-RTN-g64": "glm-5.3_int4-int8",
             "HawkBearPig/GLM-5.3-NF4I8-GPTQ-H32-g128": "glm-5.3_nf4i8",
