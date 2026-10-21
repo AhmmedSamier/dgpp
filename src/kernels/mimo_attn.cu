@@ -1,4 +1,5 @@
 #include "kernels/mimo_attn.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cmath>
 #include <stdexcept>
@@ -131,6 +132,7 @@ __global__ void qkv_finish_kernel(const float* __restrict__ qkv, int64_t qkv_str
                                   int block_tokens, uint16_t* __restrict__ q_out, int64_t q_out_stride,
                                   uint16_t* __restrict__ k_cache, uint16_t* __restrict__ v_cache,
                                   float* __restrict__ k_scale, float* __restrict__ v_scale) {
+  dgpp_pdl_wait();
   const int heads_total = local_heads + 2 * kv_heads;
   const int item = static_cast<int>(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;
   if (item >= rows * heads_total) return;
@@ -250,6 +252,7 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_st
                                     float* __restrict__ c_ws,
                                     const float* __restrict__ k_scale,
                                     const float* __restrict__ v_scale) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t smem[];
   const int hpk = local_heads / kv_heads;
   const int r = static_cast<int>(blockIdx.x);
@@ -403,6 +406,7 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_st
 __global__ void attn_combine_kernel(const float* __restrict__ m_ws, const float* __restrict__ l_ws,
                                     const float* __restrict__ c_ws, int n_split, int local_heads,
                                     uint16_t* __restrict__ out) {
+  dgpp_pdl_wait();
   const int r = static_cast<int>(blockIdx.x);
   const int h = static_cast<int>(blockIdx.y);
   const int d = threadIdx.x;  // DV threads
@@ -597,6 +601,7 @@ __device__ __forceinline__ void store_tile_pieces(const MimoAttnFusedArgs& a, co
 
 template <bool kFp8>
 __global__ void __launch_bounds__(kFusedMaxThreads) attn_fused_kernel(MimoAttnFusedArgs a) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t smem[];
   __shared__ int s_last;
   const int hpk = a.local_heads / a.kv_heads;

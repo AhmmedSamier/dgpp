@@ -39,6 +39,7 @@ benchmarks/*
 !benchmarks/micro/
 benchmarks/micro/*
 !benchmarks/micro/qsa_fp8_bench.cu
+!benchmarks/micro/host_penalties_bench.cpp
 
 # --- Debug residue ---------------------------------------------------------------
 

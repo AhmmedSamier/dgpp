@@ -21,6 +21,7 @@
 // dsa_attn_combine (qsa_test), not bitwise -- the same class as SGLang's
 // kernel, which also rounds P to bf16.
 #include "kernels/qsa.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cmath>
 #include <stdexcept>
@@ -74,6 +75,7 @@ __global__ __launch_bounds__(32) void qsa_attn_prefill_warp_kernel(
     const float* __restrict__ v_scale, const int32_t* __restrict__ req_ids, const int32_t* __restrict__ topk,
     int topk_stride, const int32_t* __restrict__ counts, int local_heads, int kv_heads, int block_tokens,
     const int32_t* __restrict__ block_tables, int blocks_per_request, float scale, float* __restrict__ out) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t sm[];
   const int64_t r = blockIdx.x;
   const int kvh = blockIdx.y;

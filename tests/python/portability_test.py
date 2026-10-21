@@ -205,11 +205,13 @@ class PortabilityTest(unittest.TestCase):
             "nvidia/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4",
             "RadixArk/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-radixark",
             "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek-v4.1-flash_mxfp4-fp8",
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017": "deepseek-v4.1-flash-1017_mxfp4-fp8",
             "XiaomiMiMo/MiMo-V2.6-Flash-RL": "mimo-v2.6-flash_mxfp4-fp8",
             "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4-flash_mxfp4-fp8",
             "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN": "qwen-3.8-flash-next_autoround-int4",
             "Qwen/Qwen3.8-27B-FP8": "qwen3.8-27b_fp8",
             "unsloth/Qwen3.8-27B-NVFP4": "qwen3.8-27b_nvfp4",
+            "nvidia/Qwen3.5-122B-A10B-NVFP4": "qwen3.5-122b-a10b_nvfp4",
             "local-inference-lab/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-qad",
             "kaushikvira/Qwen3.8-Flash-Next-swift15-nvfp4-dgpp": "qwen-3.8-flash-next_nvfp4-swift15",
         }

@@ -140,7 +140,8 @@ struct WorldSettings {
   bool prefill_group = true;  // engine.prefill_group (2026-10-05): every rank admits the same way
   // engine.l2_prefetch* (2026-10-05): every rank prefetches the same way (the step's timing).
   bool l2_prefetch = true, l2_prefetch_merge = true;
-  std::string l2_prefetch_form = "load", l2_prefetch_boundary_rate = "light", l2_prefetch_layer_rate = "light";
+  std::string l2_prefetch_form = "load", l2_prefetch_full_form = "16x8", l2_prefetch_boundary_rate = "light",
+              l2_prefetch_layer_rate = "light";
   int l2_prefetch_window_mib = 12, l2_prefetch_boundary_window_mib = 20;
   bool dflash_draft_batch = true;
   int dflash_depth = 0;
@@ -151,10 +152,22 @@ struct WorldSettings {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
+  std::string prefill_dense = "tile";        // the DeepSeek-V4.1 prefill's dense projections: tile | streaming
+  bool prefill_fold_overlap = true;
+  bool decode_pdl = true;                    // the decode graph's kernel edges programmatic          // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
+  std::string prefill_window = "flash";      // the DeepSeek-V4.1 prefill's window attention: flash | scalar
+  std::string decode_window = "flash";       // the DeepSeek-V4.1 decode's window attention: flash | scalar
+  std::string collective_transport = "write"; // the latency collectives' transport: write | send
   std::optional<dgpp::RopeScaling> rope_scaling;  // the opt-in YaRN ramp: absent = plain
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8
   std::string attention_weights = "checkpoint";  // the full GLM-5.3 attention projections: checkpoint | int4
+  // The DeepSeek-V4.1 index budget (engine.index_topk / candidate_topk_blocks /
+  // candidate_block_size, 2026-10-18): 0 = the checkpoint's. Every rank
+  // selects the same entries or the ranks' attention diverges.
+  int index_topk = 0;
+  int candidate_topk_blocks = 0;
+  int candidate_block_size = 0;
   int default_max_tokens = 0;
   int queue_limit = 0;
   bool no_eos = false;

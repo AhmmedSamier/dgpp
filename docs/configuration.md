@@ -307,15 +307,15 @@ during generation. They do not select a different checkpoint unless stated.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.bf16_weights` | Storage for supported BF16 weights. `checkpoint` keeps the original form. `bf12` uses a lossless 12-bit form, reducing weight reads and usually memory use, but prefill must unpack it. `bf12+bf16` keeps both forms for faster decode without unpacking during prefill, using extra memory. Values and decode results are preserved. Qwen retains both forms even with `bf12`; already-FP8 weights are unaffected. DeepSeek currently packs no weights. See the model notes in [operations](operations.md). | `checkpoint` |
+| `engine.bf16_weights` | Storage for supported BF16 weights. `checkpoint` keeps the original form. `bf12` uses a lossless 12-bit form, reducing weight reads and usually memory use, but prefill must unpack it. `bf12+bf16` keeps both forms for faster decode without unpacking during prefill, using extra memory. Values and decode results are preserved. Qwen retains both forms even with `bf12`; already-FP8 weights are unaffected. DeepSeek-V4.1 and DeepSeek-V4 pack their lm heads (the tensor-core decode form reads the 12-bit companion; the bf16 bytes stay resident for prefill). See the model notes in [operations](operations.md). | `checkpoint` |
 | `engine.dense_weights` | Qwen's dense-projection storage. `checkpoint` keeps the shipped formats. `fp8` converts supported BF16 projections to FP8 at load time, saving memory and weight reads but introducing quantization error that can change answers. On Qwen3.8-27B this includes the BF16 vocabulary head; its templates enable it. Expert quantization is unchanged. Other families ignore this setting. | `checkpoint` |
 | `engine.attention_weights` | Full GLM-5.3 only: `checkpoint` keeps shipped attention projections; `int4` converts selected projections to 4-bit weights at load time. This saves memory and generation bandwidth but is lossy and can change answer quality. Other families ignore it. Validate quality before using it. | `checkpoint` |
 | `engine.embed_sharding` | Full GLM-5.3 and DeepSeek embedding-table placement. `replicated` keeps the full table on every rank. `vocab` divides vocabulary rows among ranks, saving memory but adding communication for token lookups. Other families ignore it. | `replicated` |
 | `engine.ngram_table` | Qwen3.8-Flash-Next's n-gram table, which supplies embeddings for token sequences. `resident` keeps it in device-accessible memory. `mmap` reads needed rows from local storage through the host page cache, saving resident memory but adding storage access that can slow requests. DeepSeek's Engram table uses its own mapped sidecar. | `resident` |
 | `engine.ngram_table_model` | Hugging Face `ORG/NAME` repository supplying the n-gram table when the main Qwen checkpoint omits it, as with the AutoRound hybrid. Only table tensors come from this repository. It must be available in the model cache. | Empty: use the main checkpoint's table |
-| `engine.ngram_prestage` | With Qwen's `ngram_table: "mmap"`, fetch the next prefill chunk's table rows while the current chunk runs. Overlapping the work can reduce waiting without changing values. `false` uses sequential staging. | true |
+| `engine.ngram_prestage` | With Qwen's `ngram_table: "mmap"`, and with DeepSeek-V4.1's Engram tables (always mmap'ed), fetch the next prefill chunk's table rows while the current chunk runs: the next chunk's rows are hashed from its host ids behind the current chunk's last tokens and gathered on a side stream; the next chunk takes them when its identity matches. Overlapping the work reduces waiting without changing values (a 32K DeepSeek-V4.1 prefill had 110–160 ms of the gather exposed per 4,096-token chunk). `false` uses sequential staging. | true |
 | `engine.fp8_head` | Qwen FP8 vocabulary-head computation: `gemv` processes rows in chunks; `mma` uses a streaming tensor-core computation. `mma` can improve performance and uses the same head reduction across row counts, but does not remove numerical differences earlier in the model. Requires `dense_weights: "fp8"`; NVFP4 templates select `mma`. | `gemv` |
-| `engine.mtp_expert_format` | Qwen MTP draft-expert checkpoint layout. Use `fp8` for the NVIDIA release's separate FP8 experts, or `bf16_fused` for the RadixArk release's combined BF16 tensors, which are converted to FP8 at load time. Match the checkpoint layout so the loader can read it. Other families ignore it. | `fp8` |
+| `engine.mtp_expert_format` | Qwen MTP draft-expert checkpoint layout. Use `fp8` for the NVIDIA release's separate FP8 experts, or `bf16_fused` for the RadixArk release's combined BF16 tensors, which are converted to FP8 at load time. The Qwen3.5 MoE release uses `bf16` for separate BF16 draft experts, converted to block FP8 at load time. This changes draft proposals; the target still verifies them. Match the checkpoint layout so the loader can read it. Other families ignore it. | `fp8` |
 
 ### Prefill computation and precision
 
@@ -326,6 +326,12 @@ Keep the template's choices unless you have measured both speed and quality.
 | Key | What it controls and what to expect | Default |
 |---|---|---|
 | `engine.prefill` | DeepSeek-V4.1 prefill mode. `bounded` processes the whole prompt in the encoder and only the final window in the decoder, following the model's serving recipe. `exact` processes every row through every layer for reference comparisons and costs more work. Other families ignore it. | `bounded` |
+| `engine.prefill_dense` | The DeepSeek-V4.1 prefill walk's dense projections (the attention's q/kv/o projections, the indexer's, the Engram projection, the draft's main projection): `tile` runs them on the fp8-weight tile GEMM, `streaming` on the decode rows' streaming form, which re-reads each weight once per 128 rows and ran a prompt's 4096-row chunks at a quarter of the tile kernel's rate. Both place the same bf16(e4m3 × scale) weights and accumulate in fp32 in different orders: equal within rounding, not bitwise, so a prefill row's value depends on the form, never on the chunk cut. Measured on DeepSeek-V4.1-Flash-1017 on four nodes (2026-10-18): cold prefill 0.480 / 1.415 / 4.045 / 15.328 s at 512 / 2K / 8K / 32K tokens against 0.514 / 1.572 / 4.715 / 17.916 streaming (−14 % at 8K and 32K); decode untouched. Other families ignore the key. | `tile` |
+| `engine.prefill_fold_overlap` | The DeepSeek-V4.1 prefill walk's boundary folds overlapped with compute: a walk of 512 rows or more on a multi-rank world runs each layer as two row blocks (the boundary a row of the request's block grid nearest the middle), so every all-reduce of one block lands under the other block's attention, mHC site, router or expert accumulation, and block B's MoE fold under the next layer's block A. Bitwise the one-block walk (the attention takes the second block as it takes any chunk; the MoE's phased form runs the same kernels per row). Under the bounded prefill the encoder layers overlap; the decoder's replay segments are shorter than a block pair. Measured on DeepSeek-V4.1-Flash-1017 on four nodes (2026-10-18): see the model card. Other families keep their own overlap (GLM, DeepSeek-V4). | `true` |
+| `engine.decode_pdl` | The decode graph's kernel-to-kernel edges as programmatic dependencies: a kernel's blocks are scheduled as its predecessor's blocks exit and wait, before their first read, for the predecessor's completion, so each launch's ramp overlaps the previous drain. Only kernels that carry the wait take the edge (the registry in `engine/graph_pdl.hpp`); others keep plain edges. Arithmetic unchanged. `false` leaves every edge plain. | `true` |
+| `engine.prefill_window` | The DeepSeek-V4.1 prefill walk's window attention (the sliding window over the ring and the chunk's own rows): `flash` runs it on the flash listed attention kernel the main source uses, which reads a tile's keys once into shared memory per slab; `scalar` runs the partial kernel the decode window runs, which reads them once per thread. The two sum each row's window scores in different fp32 orders: equal within rounding, not bitwise (the model test gates the forms against each other; the decode audit walks the scalar form). The scalar kernel held 12 % of a 32K prefill. Other families ignore the key. | `flash` |
+| `engine.decode_window` | The DeepSeek-V4.1 decode step's window attention (the 128-key sliding window over the ring): `flash` runs it on the flash listed attention kernel, split eight ways like the scalar form (one 16-token tile per block), on a side stream beside the main source's kernel (the two read disjoint caches and write disjoint partials; the finish joins them); `scalar` runs the scalar partial kernel split eight ways in line, the form until 2026-10-19. The two differ in the window's fp32 summation order, the rounding class the decode audit certifies. The DSpark draft block's rows take the same form (before 2026-10-20 they kept the scalar kernel: 131–170 µs a draft layer). | `flash` |
+| `engine.collective_transport` | The fabric's transport for the latency-class collectives (the decode step's recorded folds and the pick's stream collectives): `write` lays every row out as 512-byte self-describing chunks (31 lanes of bf16 and a trailer with the chunk's hash and generation), RDMA-writes it into each peer's write ring, and folds it with a grid of warps as the chunks prove themselves — no door cells, claim rounds, acks or credits; `send` is the form until 2026-10-19 (payload and doorbell SEND pairs claimed by one block, hash-gated, acked and credited). Both fold bitwise alike; the prefill's bulk collectives and the eager one-shot are unaffected. | `write` |
 | `engine.prefill_bf16_partials` | Qwen3.8 AutoRound hybrid: store intermediate expert outputs in BF16 instead of FP32 during prefill. This halves their memory traffic and can speed prefill, with extra rounding that can change answers. The AutoRound template enables it. | false |
 | `engine.prefill_fold_scales` | Qwen3.8 AutoRound hybrid: apply expert quantization scales to BF16 weights before multiplication. This changes rounding and can change answers. It is a performance experiment; recorded measurements found no speed gain and templates leave it off. | false |
 | `engine.prefill_fp8_gemm` | Qwen with `dense_weights: "fp8"`: use FP8 tensor cores for eligible block-FP8 dense prefill projections instead of expanding their weights to BF16 first. Smaller projections and unsupported scale grids retain their existing computation paths. Quantizes activations and can change answers. Independent of KV-cache and attention precision. The AutoRound template enables it. | false |
@@ -376,6 +382,26 @@ templates retain BF16 cache storage and arithmetic by default. See
 kernel timings and full-checkpoint smoke comparison; these do not establish
 end-to-end serving gains or accuracy across workloads.
 
+### DeepSeek-V4.1 index budget
+
+On every compressed-KV layer DeepSeek-V4.1-Flash attends only the entries
+its indexer selects: `index_topk` of them per query, chosen on the reindex
+layers from a candidate pool of `candidate_topk_blocks` blocks of
+`candidate_block_size` entries that the candidate layer scores once per
+query. The checkpoint ships 512 entries out of a 2048 × 8 pool. These keys
+replace those values for a deployment; every rank applies the same budget
+(the config digest and the settings record carry it). A wider budget shows
+each query more of its context — the lever against a sparse attention
+missing what a long input holds — and changes the model's answers, not only
+its speed: the released weights were trained at 512. The DeepSeek-V4.1 family
+alone takes these keys; other families refuse them.
+
+| Key | What it controls and what to expect | Default |
+|---|---|---|
+| `engine.index_topk` | Compressed-KV entries each query attends on a compressing layer: a power of two up to 2048, the select networks' bound. Above the checkpoint's value every query reads more cache rows and the selection ranks a wider list; below the visible entry count (short prompts) nothing changes. Measured on DeepSeek-V4.1-Flash-1017 at 2048 against 512 (2026-10-18, four nodes, the same binary): short-context decode level, cold prefill 9 % (2K) to 48 % (32K) longer, decode at 32K–512K of context 3–8 % slower per pass, quality unchanged; the 1017 template ships the checkpoint's 512. | 0: the checkpoint's (512) |
+| `engine.candidate_topk_blocks` | Blocks the candidate layer keeps per query for the reindex layers to select among: a power of two up to 2048. Blocks × block size must hold at least `index_topk` entries. | 0: the checkpoint's (2048) |
+| `engine.candidate_block_size` | Entries per candidate block, 1 to 1024. Scored as a block (its maximum), kept or dropped whole. | 0: the checkpoint's (8) |
+
 ### Speculative decoding
 
 Native multi-token prediction (MTP) uses the model's draft layers. DFlash2
@@ -397,7 +423,7 @@ as described above.
 |---|---|---|
 | `engine.mtp` | Enable native MTP drafting and verification. Can reduce generation time but uses draft state and extra computation. Requires `decode_graph: true`; cannot be combined with `dflash_model`. | false |
 | `engine.mtp_depth` | Native MTP tokens proposed per step, from 1 to 5. More drafts can produce more accepted tokens per pass, but use extra verification rows and can waste work. Values above 1 require MTP. DeepSeek templates set their supported block depth explicitly: V4.1 uses 4 and V4 uses 5. | 1; when omitted with DeepSeek MTP, use the checkpoint's DSpark block size |
-| `engine.mtp_draft` | Draft choice for sampled requests. `sampled` draws from the draft distribution; `greedy` proposes its most likely token. Both use exact verification but can have different acceptance rates. `auto` selects greedy for DeepSeek-V4-Flash and sampled for other native families. DFlash2 uses sampled for `auto`. Greedy client requests are unaffected. | `auto` |
+| `engine.mtp_draft` | Draft choice for sampled requests. `sampled` draws from the draft distribution; `greedy` proposes its most likely token. Both use exact verification but can have different acceptance rates. `auto` selects greedy for DeepSeek-V4-Flash and DeepSeek-V4.1-Flash (their DSpark block's argmax out-proposes a draw from it, and only greedy slots take the scheduled verify depth) and sampled for other native families. DFlash2 uses sampled for `auto`. Greedy client requests are unaffected. | `auto` |
 | `engine.mtp_draft_temperature` | Draft sampling temperature as a multiple of the client's temperature, greater than 0 and at most 4. Lower values make proposals more concentrated; higher values spread them out. This changes draft acceptance, not the target output distribution. Applies to sampled MTP and DFlash2 proposals. | 1.0 |
 | `engine.mtp_verify` | Verification rule for sampled drafts. `token` checks them one at a time. `block` checks them jointly and can accept more tokens, while preserving the target distribution. It falls back to token verification where the block rule cannot be used. Greedy requests are unaffected. | `token` |
 | `engine.mtp_head` | Full GLM-5.3 draft vocabulary head. `checkpoint` uses the main head's storage form; `fp8` adds an FP8 copy at load time to reduce draft-head reads. Uses extra memory and can change acceptance, while the main verifier stays unchanged. Other families ignore it. | `checkpoint` |
@@ -414,7 +440,7 @@ settings; use your deployment's measured values.
 | Key | What it controls and what to expect | Default |
 |---|---|---|
 | `engine.mtp_schedule` | Choose how many leading drafts to verify from their predicted acceptance and the cost settings below. Requires graph execution with MTP or DFlash2. Supports DSpark, DFlash2 and native MTP confidence estimates. Sampled requests use it with greedy proposals; drawn proposals keep their configured depth. Can avoid wasted verification work. Cannot be combined with `dflash_batch_rows` or `lookup_tail`. Qwen at 16 slots and MTP depth 3 exceeds the available graph variants; leave it off there. | false |
-| `engine.mtp_schedule_row_ms` | Estimated milliseconds for one verification row; must be greater than 0. Higher row cost makes extra drafts less attractive. Set from measurements of the deployment. | 8.0 ms |
+| `engine.mtp_schedule_row_ms` | Estimated milliseconds for one verification row; must be greater than 0. Higher row cost makes extra drafts less attractive. Set from measurements of the deployment: a sweep of fixed depths gives the row cost as the slope of the pass time and the base as its intercept (DeepSeek-V4.1-Flash-1017 on four nodes, 2026-10-18: 5.17 ms per row on a 31.1 ms base; the template carries 5.2 / 31.1). | 8.0 ms |
 | `engine.mtp_schedule_base_ms` | Estimated fixed milliseconds per pass, including draft work; must be nonnegative. Higher fixed cost makes accepting several tokens in one pass more valuable. Used with row cost to estimate throughput. | 28.0 ms |
 | `engine.mtp_schedule_lambda` | Value assigned to decode time, in tokens/ms. Higher values demand more expected benefit before checking another draft. `0` derives an initial value as `1 / (base_ms + row_ms)`; a positive value supplies the floor for adaptation. | 0 (derived) |
 | `engine.mtp_schedule_min_depth` | Fewest drafts verified per scheduled step, from 1 to 5 and no more than the draft width. Higher values force more checking even when confidence is low. | 1 |
@@ -429,7 +455,7 @@ multi-node DFlash2. Options marked eager-only do not tune the graph path.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.dflash_model` | Qwen3.8-27B draft checkpoint, as a Hugging Face ID or local directory; for example, `z-lab/Qwen3.8-27B-DFlash2`. Replaces native MTP, so set `mtp: false`. Proposes seven tokens per step and needs extra model memory. Multi-node use requires `decode_graph: true`; one node can use either engine. Requests with logprobs, logit bias or a grammar use plain decode. | Empty (off) |
+| `engine.dflash_model` | Qwen draft checkpoint, as a Hugging Face ID or local directory; for example, `z-lab/Qwen3.8-27B-DFlash2` or `z-lab/Qwen3.5-122B-A10B-DFlash`. The architecture selects v2 or v1. Replaces native MTP, so set `mtp: false`. Verifies up to seven proposals per step and needs extra model memory. The v1 drafter still computes its full 16-row block; use BF16 draft weights and keep `mtp_schedule: false`. Multi-node use requires `decode_graph: true`; one node can use either engine. Requests with logprobs, logit bias or a grammar use plain decode. | Empty (off) |
 | `engine.dflash_weights` | Draft-matrix storage. `checkpoint` keeps BF16 weights, with lossless packing where supported by `bf16_weights`. `fp8` converts them to FP8 at load time, reducing draft weight reads; some BF16 data remains for context processing. Quantization can change proposals and acceptance, while target verification remains exact. | `checkpoint` |
 | `engine.dflash_verify_graph` | Eager engine: replay the multi-request verification batch as a CUDA graph to reduce launch overhead. `false` launches the packed batch directly. A lone request stays on its scalar path. | true |
 | `engine.dflash_draft_batch` | Eager engine: propose drafts for active speculative requests together, reusing one read of the draft weights. `false` drafts one request at a time. Batching can improve total throughput. | true |
@@ -486,11 +512,12 @@ a specific bottleneck.
 | `engine.expert_gemm_pair` | Combine the expert gate and up projections into one GPU launch. Reduces launch count without changing results, but measured performance was similar, so it remains off by default. | false |
 | `engine.l2_prefetch` | Fetch upcoming layer weights into the GPU's L2 cache before use. Can reduce memory stalls, but competes with other GPU work. `false` disables this prefetcher. All ranks use the same settings. | true |
 | `engine.l2_prefetch_form` | How the cache is warmed: `load` reads the bytes, `lines` requests one prefetch per 128-byte cache line, and `touch` touches one line per 64 KiB to prepare memory mappings. These do different amounts of work; compare latency on the actual model. | `load` |
-| `engine.l2_prefetch_window_mib` | Data budget for a prefetch window, from 1 to 64 MiB. Larger windows fetch more ahead but can displace useful cached data. | 12 MiB |
+| `engine.l2_prefetch_full_form` | The full-rate window's shape: `16x8` (16 blocks × 8 loads, 512 KB in flight — the DRAM rate at the light form's SM footprint, so the small kernels beside it run unstretched) or `48x4` (768 KB in flight on every SM — a window keeps its bandwidth share beside streaming kernels). Measured per family: DeepSeek-V4.1, Qwen and GLM-5.3-Flash take `16x8`; GLM-5.3 ships `48x4` (+0.3–0.8 % a pass at `16x8`, 2026-10-20). | `16x8` |
+| `engine.l2_prefetch_window_mib` | Data budget for a prefetch window, from 1 to 64 MiB. Larger windows fetch more ahead but can displace useful cached data. DeepSeek-V4.1's windows take it since 2026-10-19 (its template pins 18 MiB, the best of 18/12/8/6 at C1). | 12 MiB |
 | `engine.l2_prefetch_boundary_window_mib` | Prefetch-window budget beside inter-node communication, from 0 to 64 MiB. `0` uses `l2_prefetch_window_mib`. Larger windows may hide more memory work but compete with communication. | 20 MiB |
-| `engine.l2_prefetch_boundary_rate` | Prefetch intensity while overlapping inter-node communication: `off`, `light` or `full`. Higher intensity can fetch sooner but increase contention. | `light` |
-| `engine.l2_prefetch_layer_rate` | Prefetch intensity inside attention layers: `off`, `light` or `full`. Higher intensity can reduce later waits while slowing the small computations running beside it. | `light` |
-| `engine.l2_prefetch_merge` | Combine adjacent prefetch ranges into fewer launches, reducing launch and graph overhead. Disable when comparing prefetch behavior. | true |
+| `engine.l2_prefetch_boundary_rate` | Prefetch intensity while overlapping inter-node communication: `off`, `light` or `full`. `light` streams from 16 blocks with 2 loads in flight each (~80 % of the DRAM rate, no measurable effect on the kernels beside it); `full` from 16 blocks with 8 loads in flight (the DRAM rate; a latency chain beside it runs ~3 % longer). | `light` |
+| `engine.l2_prefetch_layer_rate` | Prefetch intensity inside attention layers: `off`, `light` or `full` (the same two forms as the boundary rate). Higher intensity can reduce later waits while slowing the small computations running beside it. | `light` |
+| `engine.l2_prefetch_merge` | Combine adjacent prefetch ranges into fewer launches, reducing launch and graph overhead; a hole of up to 2 MiB between two ranges is bridged only when both lie in one allocation (since 2026-10-19: the hole between two allocations is unmapped, and the load-form kernel read it). Disable when comparing prefetch behavior. | true |
 
 ## Transport and logging
 
@@ -506,9 +533,31 @@ show a problem.
 | `engine.stats_interval_s` | Seconds between periodic throughput and server-state log lines. Shorter intervals give finer visibility and produce more logs. `0` disables these periodic lines. | 10 seconds |
 | `engine.no_eos` | Ignore the model's end-of-sequence token, which normally finishes an answer. Intended for measurements that need to run to the token budget. Leave false for normal serving so answers can finish naturally. | false |
 
-Sampling defaults come from the checkpoint's `generation_config.json` and
-per-request fields. Measurement flags such as `--temperature` can override
-them. See [API compatibility](openai-compatibility.md) for request settings.
+Sampling defaults come from the checkpoint's `generation_config.json`.
+Deployment penalty defaults override those values; process flags override
+the deployment, and explicit request fields override the served defaults.
+Omitted or null request fields inherit the served value. See
+[API compatibility](openai-compatibility.md) for request settings.
+
+| Key | What it controls | Default |
+|---|---|---|
+| `engine.repetition_penalty` | Multiplicative penalty for tokens already in the context, greater than 0 and at most 100. `1` disables it. | Checkpoint value, otherwise 1 |
+| `engine.frequency_penalty` | Subtract this value times a token's context count, from -2 to 2. `0` disables it. | 0 |
+| `engine.presence_penalty` | Subtract this value once for any token present in the context, from -2 to 2. `0` disables it. | 0 |
+
+The corresponding process flags are `--repetition-penalty`,
+`--frequency-penalty` and `--presence-penalty`. `/v1/models` reports all
+three effective defaults. A request can explicitly set `1`, `0`, `0` to
+disable penalties configured by the deployment.
+
+The full host sampler, eager greedy reports and bus sampling fold skip
+context counting and penalty application when the effective repetition
+penalty is 1 and both additive penalties are positive zero.
+Active penalties and negative-zero values retain their
+arithmetic. This needs no separate enable flag. The sampling contract uses
+non-NaN logits, round-to-nearest and gradual underflow; floating-point
+exception flags and traps are not preserved by neutral preparation elision.
+Bias, masks, selection, probability reporting and RNG handling still run.
 
 ## How settings are resolved
 
@@ -563,7 +612,7 @@ the native binary directly.
 
 The native binary accepts these keys in `node_env`: `DGPP_ROCE_DEVICES`,
 `DGPP_ROCE_GID_INDICES`, `HF_HUB_CACHE`, `DGPP_RESIDENT_CACHE_DIR`,
-`DGPP_LOG_LEVEL`, `DGPP_MLOCK`, `DGPP_BUS_TIMELINE`, `DGPP_DSV41_DENSE_GEMV`,
+`DGPP_LOG_LEVEL`, `DGPP_MLOCK`, `DGPP_BUS_TIMELINE`, `DGPP_BUS_TIMELINE_DUMP` (a directory: every rank appends its collectives' stamps to `bus_gens_rank<r>.tsv` there, the cross-rank alignment's input), `DGPP_DSV41_DENSE_GEMV`,
 `DGPP_DENSE_GEMV_ROWS` and `DGPP_DSV41_EAGER_FOLD`. `DGPP_NO_SWAP` is used
 only by the launcher and is not written into the resolved file.
 

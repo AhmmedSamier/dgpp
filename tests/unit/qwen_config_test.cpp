@@ -332,9 +332,11 @@ DGPP_TEST(qwen_config_parses_the_autoround_hybrid) {
 DGPP_TEST(qwen_config_parses_the_landed_checkpoint_when_present) {
   namespace fs = std::filesystem;
   const char* home = std::getenv("HOME");
-  if (!home) return;
+  if (!home) dgpp::test::skip("HOME is unset; checkpoint cache unavailable");
   const fs::path root = fs::path(home) / ".cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next-FP8/snapshots";
-  if (!fs::is_directory(root)) return;  // the gate is optional: a box without the checkpoint
+  if (!fs::is_directory(root))
+    dgpp::test::skip("checkpoint snapshot directory absent: " + root.string());
+  size_t checked = 0;
   for (const auto& snap : fs::directory_iterator(root)) {
     const fs::path cfg = snap.path() / "config.json";
     if (!fs::exists(cfg)) continue;
@@ -343,7 +345,9 @@ DGPP_TEST(qwen_config_parses_the_landed_checkpoint_when_present) {
     const dgpp::QwenTextConfig c = dgpp::QwenTextConfig::from_json_file(cfg.string());
     require(c.num_hidden_layers == 48 && c.num_experts == 512 && c.ple_layer() == 1, "the file's shape");
     require(c.ngram_geometry().padded_rows == 320001536, "the file's n-gram rows");
+    ++checked;
   }
+  if (checked == 0) dgpp::test::skip("no eligible checkpoint config under " + root.string());
 }
 
 DGPP_TEST(architecture_detection_names_the_families) {

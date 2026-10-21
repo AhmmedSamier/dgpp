@@ -36,7 +36,26 @@ This page summarizes the implemented features and remaining work as of
 [serving measurements](docs/benchmarks.md) summarize performance. Performance figures apply to the configurations and
 revisions recorded with them.
 
+## Checkpoint reader
+
+Safetensors metadata is checked before exposing mapped tensor views, including
+header length, integer dimensions/offsets, range order and shape/dtype byte size.
+Native unit tests cover rejected metadata and scalar, empty, padded-header and
+dtype-alias compatibility. Global tensor overlap/coverage validation remains
+outside this reader change.
+Resident-image metadata validation rejects offsets inside the header/table,
+unaligned offsets, overflowing ranges and truncated blobs before restoration.
+Payload verification is enabled by default with an explicit environment opt-out.
+Rejected layers rebuild from their checkpoint, with native metadata/policy tests
+and GPU recovery coverage for both resident loader implementations.
+
 ## Serving support
+
+Host sampling automatically omits neutral penalty preparation using the
+effective request parameters. Deployment defaults and request overrides
+are covered by config, sampler, HTTP and journal regressions, including
+greedy penalties without logprobs. This is a host-work reduction; serving
+throughput gains require deployment measurements.
 
 The mixed `unsloth/Qwen3.8-27B-NVFP4` checkpoint runs at TP 1/2/4
 with the shipped DFlash2 recipes. Its dense FP4 prefill kernel reuses

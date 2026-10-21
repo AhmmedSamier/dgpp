@@ -232,7 +232,7 @@ class ResidentLayerStream {
   void check_resident_footprint_fits() const;
   uint64_t resident_image_key() const;
   ReplicatedDigest compute_replicated_digest() const;
-  void restore_layer_from_image(int layer, LayerBump& bump, LayerResident& out);
+  bool restore_layer_from_image(int layer, LayerBump& bump, LayerResident& out);
   void capture_layer_to_image(int layer, const LayerBump& bump, size_t bytes);
   void build_layer_into(int layer, LayerBump& bump, LayerResident& out);
 };
@@ -474,21 +474,31 @@ void ResidentLayerStream<F>::open_resident_image() {
   if (residency_ != LoaderResidency::Resident) return;
   const std::string& dir = image_dir();
   if (dir.empty()) return;
+  // The checkpoint's weight identity beside the key (ResidentImage::open_for):
+  // the key reads config.json and the shard headers, which a refined
+  // release can re-ship byte for byte.
+  uint64_t payload = 1469598103934665603ull;
+  for (const auto& shard : shards_) payload = fnv_mix(payload, shard->payload_sample_fold());
+  bool replaced = false;
   try {
-    image_ = std::make_unique<ResidentImage>(dir, resident_image_key(), max_layer());
+    image_ = ResidentImage::open_for(dir, resident_image_key(), max_layer(), payload, &replaced);
   } catch (const std::exception& e) {
     DGPP_LOG_WARN("{}: rank {} resident image unavailable ({}) — building from the checkpoint",
                   F::who(), rank_, e.what());
     image_.reset();
     return;
   }
+  if (replaced)
+    DGPP_LOG_WARN("{}: rank {} resident image {} was built from a checkpoint with these shard headers but other "
+                  "weights — discarded; rebuilding it from this checkpoint",
+                  F::who(), rank_, image_->path());
   DGPP_LOG_INFO("{}: rank {} resident image {} — {}/{} layers present, {} I/O", F::who(), rank_,
                 image_->path(), image_->present(), image_->layers(),
                 image_->direct_io() ? "direct" : "buffered");
 }
 
 template <class F>
-void ResidentLayerStream<F>::restore_layer_from_image(int layer, LayerBump& bump,
+bool ResidentLayerStream<F>::restore_layer_from_image(int layer, LayerBump& bump,
                                                       LayerResident& out) {
   bump.stage = staging_;
   const std::vector<Expected> table = F::layer_table(cfg_, layer);
@@ -503,17 +513,14 @@ void ResidentLayerStream<F>::restore_layer_from_image(int layer, LayerBump& bump
   if (bytes != layer_bytes(cfg_, layer, rank_, world_))
     throw std::runtime_error(std::string(F::who()) + ": layout pass drifted from the byte formula on layer " +
                              std::to_string(layer));
-  static const bool verify = [] {
-    const char* v = std::getenv("DGPP_RESIDENT_CACHE_VERIFY");
-    return v && *v && std::string(v) != "0";
-  }();
-  image_->read_layer(layer, staging_, bytes, verify);
+  if (!image_->try_read_layer(layer, staging_, bytes)) return false;
   sync_load_boundary(reader_, stream_);
   bump.upload(stream_);  // stage == staging_: the blob is the mirror's layout
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   F::after_restore(cfg_, layer, tensors_, out);
   out.bytes = bytes;
   ++image_restored_;
+  return true;
 }
 
 template <class F>
@@ -588,9 +595,13 @@ const typename F::LayerResident& ResidentLayerStream<F>::load_layer(int layer) {
     bump->side_mode = side_grants_;
     const CountedBuild counted = count_layer(cfg_, layer, rank_, world_);
     bump->init(counted.bytes - (side_grants_ ? counted.side_bytes : 0));
-    if (image_ && image_->has_layer(layer)) {
-      restore_layer_from_image(layer, *bump, slot);
-    } else {
+    const bool restored =
+        image_ && image_->has_layer(layer) && restore_layer_from_image(layer, *bump, slot);
+    if (!restored) {
+      // The restore layout may have allocated side grants and filled views.
+      // Rebuild from an empty layout after a rejected cache read.
+      bump->reset();
+      slot = LayerResident{};
       sync_load_boundary(reader_, stream_);
       build_layer_into(layer, *bump, slot);
       if (image_) capture_layer_to_image(layer, *bump, slot.bytes);

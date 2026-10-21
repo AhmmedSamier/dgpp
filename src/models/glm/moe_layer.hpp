@@ -312,6 +312,7 @@ class GlmMoeLayer {
   float* d_act_qs_ = nullptr;
   float* d_slot_down_ = nullptr;
   int32_t* d_slot_order_ = nullptr; // [slots] expert-sorted execution order
+  int* d_tile_counter_ = nullptr;   // [2] the fp4 down kernel's stealing counters, zero at rest
   // GlmMoeConfig::shared_mma_aside: the shared expert's own chain.
   uint16_t* d_sh_gate_ = nullptr;   // [decode_slots, inter]
   uint16_t* d_sh_up_ = nullptr;
