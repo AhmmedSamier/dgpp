@@ -326,6 +326,10 @@ Use `./scripts/setup.sh --help` for all options.
 
 ### Send a request
 
+The HTTP server validates request lengths before dispatch; see
+[request limits and HTTP errors](docs/operations.md#large-document-and-agent-requests)
+for accepted length fields and error responses.
+
 Ask the running model a question. This short example requests low reasoning
 effort because reasoning tokens also count toward `max_tokens`:
 

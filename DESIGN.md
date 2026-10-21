@@ -2358,6 +2358,18 @@ the same machine from the journal and its tokenizer.
 
 ## 11. Runtime and API
 
+HTTP request lengths are fully parsed as unsigned decimal integers after trimming
+space/tab padding. Repeated `Content-Length` fields must agree numerically and
+become one canonical field; comma-separated lengths are rejected. Invalid or
+conflicting lengths receive HTTP 400 and close before handler dispatch. Exceptions
+escaping `HttpHandler::handle` retain their diagnostic in server logs and return a
+generic HTTP 500 JSON error. Service-level error responses are unchanged.
+Parser refusals stop further request processing and drain queued responses before
+closing, including earlier pipelined replies under output backpressure. Handler
+exceptions replace only that handler's pending output, preserving earlier replies.
+Input arriving during the drain is discarded without dispatch or buffering so
+unread request bytes do not reset the socket when queued output finishes.
+
 The server separates HTTP processing from model execution. Rank 0 runs
 the text frontend and generation service; every rank runs a scheduler and
 model engine. The HTTP thread owns connections and publishes prepared
