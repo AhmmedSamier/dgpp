@@ -4,10 +4,11 @@
 // result identical at m = 1 and inside an m = 30 batch, fp8 and bf16), the
 // fp32 and bf16 epilogues agreeing bit for bit, and a cold timing line
 // beside the GEMV cores it replaces (informational).
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -21,8 +22,8 @@
 #include "kernels/bf12_gemv.hpp"
 #include "kernels/bf16_gemv.hpp"
 #include "kernels/dense_mma_bf16w.hpp"
-#include "kernels/glm_moe_launch.hpp"
 #include "kernels/fp8_dequant.hpp"
+#include "kernels/glm_moe_launch.hpp"
 #include "kernels/mma_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 
@@ -65,6 +66,9 @@ double max_rel_err(const Problem& p, const std::vector<float>& got, F wv) {
   double worst = 0;
   for (int i = 0; i < p.m; ++i)
     for (int j = 0; j < p.n; ++j) {
+      if (!std::isfinite(got[size_t(i) * p.n + j]))
+        throw std::runtime_error("non-finite output at row " + std::to_string(i) + " column " +
+                                 std::to_string(j));
       double ref = 0, mag = 0;
       for (int c = 0; c < p.k; ++c) {
         const double a = dgpp::bf16_bits_to_float(p.act[size_t(i) * p.k + c]), w = wv(j, c);
@@ -91,6 +95,30 @@ struct Dev {
 std::vector<float> fetch_f(const float* d, size_t n) { std::vector<float> h(n); DGPP_CUDA_OK(cudaMemcpy(h.data(), d, n * 4, cudaMemcpyDeviceToHost)); return h; }
 std::vector<uint16_t> fetch_b(const uint16_t* d, size_t n) { std::vector<uint16_t> h(n); DGPP_CUDA_OK(cudaMemcpy(h.data(), d, n * 2, cudaMemcpyDeviceToHost)); return h; }
 }  // namespace
+
+DGPP_TEST(mma_gemv_oracle_rejects_nonfinite_outputs) {
+  const Problem p{1, 3, 1, 0, 0, {}, {}, {}, {dgpp::float_to_bf16_bits(1.f)}};
+  const auto weight = [](int row, int) { return double(row + 1); };
+  const std::vector<float> correct{1.f, 2.f, 3.f};
+  require(max_rel_err(p, correct, weight) == 0, "exact finite output must match the oracle");
+  require(max_rel_err(p, {1.f, 2.f, 4.f}, weight) > 2e-3,
+          "incorrect finite output must exceed the oracle budget");
+  for (float value :
+       {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity()}) {
+    for (size_t column = 0; column < correct.size(); ++column) {
+      auto got = correct;
+      got[column] = value;
+      bool rejected = false;
+      try {
+        (void)max_rel_err(p, got, weight);
+      } catch (const std::runtime_error& e) {
+        rejected = std::string(e.what()).find("non-finite output") != std::string::npos;
+      }
+      require(rejected, "non-finite output must not pass the oracle comparison");
+    }
+  }
+}
 
 DGPP_TEST(mma_gemv_fp8_matches_oracle_and_is_m_invariant) {
   const Problem p = make(30, 1024, 512, 5, 5, 0x9E3779B97F4A7C15ull);
