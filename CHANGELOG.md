@@ -5,6 +5,40 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **The adaptive prefill controller charges a chunk only for what it adds**
+  (2026-10-22, issue #116 finding 2 and a second field report). The
+  controller timed the whole tick — the decoders' pass included — and
+  divided it by the chunk's tokens, so a small chunk looked dear per token
+  and the limit it produced made the next one dearer still: growth is
+  bounded at twice the last quantum, so a quantum grows only when its pass
+  is under half the allowance, and with decoders live every quantum whose
+  pass ran between 42.5 % and 85 % of the target was an absorbing state
+  that one slow pass could walk the limit down into for good. A one-Spark
+  Qwen3.8-Flash-Next NVFP4 deployment serving five opencode agents read
+  the limit at 128 tokens — one amount per pass shared by its four readers
+  — for whole runs, at twice the idle prompt cost per token, and only fixed
+  1,024/2,048 budgets with both targets off brought its first-token p90
+  from 58–60 s to 12–15 s. The scheduler now times decode-only ticks and
+  the controller learns the decoders' own pass per load range
+  (`PrefillLatencyController::observe_decode`), charges a chunk the pass
+  less that, and sizes the next from the target less that pass; a lone
+  reader is charged nothing and keeps its idle floor. The learned pass is
+  `scheduler.prefill_chunks.decode_pass_ms` / `dgpp_prefill_decode_pass_ms`,
+  and the startup line names the sizing policy (`adaptive: decode-gap
+  target … ms, first-token target … ms` or `fixed budgets (both latency
+  targets 0)`). The docs now say the busy budget and the adaptive limit are
+  one amount per pass shared by every reader on the mixed-prefill families,
+  how to size a prefix arena for agent clients (about three entries per
+  call), what full admission reserves for agent clients that ask for 32K
+  of output, and that the one-node Qwen arena rationale is to be measured
+  (idle prefill and major faults), not assumed. Measured on one Spark with
+  the one-node Qwen NVFP4 template at the field's shape (five slots, MTP
+  depth 3, FP8 K/V): four 39K prompts reading together beside a decoder
+  252–267 s → 158–159 s to their first tokens (limit 128–512 → 512–1024,
+  decode-gap misses 3 → 0); one beside four decoders 44.6 → 39.0–39.5 s;
+  the template as shipped unchanged within noise. Details in
+  [docs/continuous-batching.md](docs/continuous-batching.md).
+
 - **Flint** (`HawkBearPig/flint-FP8-NVFP4`, 2026-10-22): a new family on
   the shared session core, served as shipped on one, two or four Sparks
   (`deploy/cluster_flint_fp8-nvfp4_w{1,2,4}.example.json`). The MiMo

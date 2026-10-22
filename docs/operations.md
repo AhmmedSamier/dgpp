@@ -673,6 +673,12 @@ Larger explicit busy budgets amortize weight streaming and conversion across
 more tokens but can increase the pause between decode steps.
 The budget counts reader tokens. Decoder rows share remaining scratch;
 reader chunks shrink only when the combined rows exceed physical capacity.
+On the mixed-prefill families (every serving executor; see
+[shared execution](continuous-batching.md#current-shared-execution-and-policy))
+the busy budget, and the adaptive limit, is one amount per pass shared by
+every prompt reading in it: four prompts beside decoders under a 1,024-token
+budget get 256 tokens each per pass. Size it for the readers together, not
+per prompt; executors without a shared walk keep a per-reader limit.
 An explicit zero preserves full-prompt admission within a scheduler pass;
 model and snapshot boundaries still split the work. Qwen retains its internal
 4,096-token limit and reports token progress after each completed chunk.
@@ -694,8 +700,10 @@ a 2K engine), or omit both fields to select the automatic values. Explicit
 positive busy/idle values are validated, not silently rounded. A deployment can override
 them at its next start with
 `--knobs "--prefill-budget-tokens 256 --prefill-idle-budget-tokens 4096"`.
-The resolved values are logged at startup, reported in service admission
-metrics and carried in rank 0's warm record to every worker. Changing the
+The startup line names the resolved budgets and the sizing policy —
+`adaptive: decode-gap target 1000 ms, first-token target 3000 ms` or
+`fixed budgets (both latency targets 0)` — and the values are reported in
+service admission metrics and carried in rank 0's warm record to every worker. Changing the
 cluster configuration requires a restart. Existing explicit settings retain
 their values.
 
@@ -753,9 +761,40 @@ entries remain protected. Once no evictable entries remain, genuine exhaustion
 may still end the youngest live request with `finish_reason: length`. It is a memory
 admission tradeoff, not a substitute for a latency target. Adjust the controller
 headroom, growth and recovery only after observing throughput and target misses.
+Agent clients ask for a large output per call — opencode 32,767 tokens — and
+full admission reserves the prompt plus all of it for every live request:
+five sessions hold about 160K tokens of reservations their answers never use,
+and a four-slot 397K-token pool evicted idle sessions' prefixes at four to six
+agents in a field deployment (one Spark, Qwen3.8-Flash-Next NVFP4, 2026-10-21).
+Doubling the pool's tokens with `kv_dtype: "fp8"` removed nearly all of those
+losses there (103/105 and 105/105 on that operator's answer check, 100K needle
+retrieval intact). That operator also read idle prefill 4–11 % slower and
+per-call decode 6–11 % slower beside 0–2 other requests. Measured here on the
+one-node Flash-Next NVFP4 template (2026-10-22, two boots per mode, 6K–104K
+cold prompts, 256 output tokens): decode is the same pass either way, 39.3–40.4
+ms bf16 against 39.5–40.6 ms fp8 at every context, since the sparse decode
+attention reads only the selected tokens; prefill is 14–20 % slower on the
+fp8 pool (0.54–0.64 → 0.65–0.73 ms a token), the default bf16 arithmetic
+widening every code before the math. `engine.prefill_attention: "fp8"` is the
+lever against that where the family supports it (measured on the 27B: 352 →
+320 s at 262K; not yet measured on Flash-Next). On the 27B's dense attention
+the fp8 pool decodes faster at long context (256K: 212 → 156 ms/pass). `admission:
+"grow"` or a smaller client output cap are the alternatives.
 
 The shared controller learns completed-pass cost separately for decoder-load
 ranges, including the prefill, decode and snapshot work before the next yield.
+Since 2026-10-22 it also learns the decoders' own pass, from ticks that only
+step, per decoder-load range, and charges a chunk only for what it adds to
+that pass: the target less the decoders' pass is the room for tokens, and
+`scheduler.prefill_chunks.decode_pass_ms` (`dgpp_prefill_decode_pass_ms`)
+shows the pass it takes out at the last tick's load. Before that it charged
+the whole pass to the chunk, so a small chunk looked dear per token and the
+limit it produced made the next one dearer still: with decoders live, every
+quantum whose pass ran between 42.5 % and 85 % of the target was an absorbing
+state (growth is bounded at twice the last quantum, and a quantum grows only
+when its pass is under half the allowance), and one slow pass walked the limit
+down the ladder for good. A field deployment with five coding agents on one
+Spark read the limit at 128 tokens, 32 per reader, for whole runs.
 By default, the first unmeasured workload starts at 256 tokens, bounded by the
 busy budget and engine geometry. `prefill_initial_tokens` changes this starting
 point while retaining automatic growth. A new decoder-load range borrows the most conservative measured

@@ -196,7 +196,7 @@ the others. Startup checks the combined memory plan before loading the model.
 | `engine.default_max_tokens` | Answer-token budget when a request omits `max_tokens`. Clients can set their own value. Under `full` admission, the prompt plus this budget must fit the context allowance or the request is rejected. Templates generally use much larger defaults to allow long answers and reasoning. | 256 tokens |
 | `engine.queue_limit` | Maximum requests waiting for a slot or memory. Further arrivals receive HTTP 503 `overloaded`. A larger queue absorbs bursts but allows longer waits without adding processing capacity. | 64 |
 | `engine.max_connections` | Maximum open HTTP connections on rank 0, including idle connections and streams. Excess connections receive HTTP 503. Size this separately from active request slots. | 64 |
-| `engine.admission` | When context memory is reserved. `full` reserves the prompt plus requested answer budget before starting. `grow` reserves less initially and expands during generation; if space runs out, the youngest request is stopped. `grow` can fit more work at once, with a risk of interrupting requests. | `full` |
+| `engine.admission` | When context memory is reserved. `full` reserves the prompt plus requested answer budget before starting: an agent client that asks for 32K tokens per call (opencode) pins prompt plus 32K per live session, about 160K tokens for five sessions, whatever the answers use, and that reservation rather than the prompts is what evicts idle sessions' cached prefixes from a pool sized for the prompts. `grow` reserves less initially and expands during generation; if space runs out, the youngest request is stopped. `grow` can fit more work at once, with a risk of interrupting requests. A larger pool (`kv_dtype: "fp8"` doubles the tokens per byte on the families that support it; keep `prefill_attention: "fp8"` with it where the family supports that, or the default bf16 arithmetic widens every code first and prefill slows) or a smaller client output cap are the other ways out. | `full` |
 | `engine.admission_window` | Number of answer tokens reserved at a time under `grow`; must be positive. Larger increments reserve more unused space but need fewer reservation updates. Has no effect with `full`. | 256 tokens |
 | `engine.kv_dtype` | Precision of cached model state. Lower precision saves memory but can change answers; weights are unaffected. GLM-5.3 supports `bf16`, `fp8` and `fp4` for its latent cache; its index cache stays FP8. MiMo and Flint support `bf16` and `fp8`. Qwen3.8-27B supports `fp8` on both releases: the Full layers' K/V as e4m3 codes at the mixed NVFP4 release's shipped cache scales, or at unit scales on the FP8 release, which ships none (the codes are the e4m3 rounding of K and V, the common scale-free fp8 cache; 2026-10-18, measured at the bf16 cache's floor in the [FP8 model card](model_cards/Qwen3.8-27B-FP8.md)); half the Full layers' pool bytes, decode at 256K 16 % faster. Qwen3.8-Flash-Next supports `bf16` and per-token/head scaled `fp8`; GLM-4.7 keeps BF16 caches, and DeepSeek uses its architecture's own formats. | `bf16` |
 
@@ -220,7 +220,7 @@ Its memory budget is separate from the KV token pool.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.prefix_cache_gib` | Memory budget per rank for saved prompt state. A larger cache can retain more reusable prefixes but leaves less memory for other uses. `0` disables it. See [cache sizing](prefix-cache.md). | 1.5 GiB |
+| `engine.prefix_cache_gib` | Memory budget per rank for saved prompt state. A larger cache can retain more reusable prefixes but leaves less memory for other uses. `0` disables it. A chat turn costs about two entries, an agent call about three, and eviction is LRU without time expiry, so an idle agent session survives about slots ÷ 3 other calls. See [cache sizing](prefix-cache.md). | 1.5 GiB |
 | `engine.prefix_min_tokens` | Earliest prompt position at which any snapshot may be saved. Higher values keep short probes and requests from replacing longer cached conversations. Shorter prompts can still reuse matching entries. `0` allows snapshots at every supported cut. | 1024 tokens |
 | `engine.prefix_head_snapshots` | Save an extra snapshot at the first structural prompt boundary, such as the end of the system prompt. This can help a new conversation or a client that shortened its history reuse that prefix. Uses another cache entry and obeys `prefix_min_tokens`. Disabled on DeepSeek's bounded prefill path, which cannot take extra cuts. | true |
 
@@ -236,14 +236,24 @@ give active streams and new arrivals a chance to run sooner.
 By default, the scheduler measures chunk cost and adjusts chunk size against
 two soft latency targets. These targets are not deadlines: long prompts, busy
 slots and memory pressure can make requests miss them. Set both targets to
-`0` to use fixed budgets. See [tuning automatic prefill](optimizing_performance.md#tuning-automatic-prefill)
+`0` to use fixed budgets; the startup line names the policy in force
+(`adaptive: …` or `fixed budgets (both latency targets 0)`). While requests
+decode, the controller takes their own pass out of the allowance and charges
+a chunk only for what it adds (since 2026-10-22; before that a small chunk
+looked dear per token and the limit could settle at 128 tokens beside
+several readers). On the mixed-prefill families, every serving family, the
+busy budget and the adaptive limit are one amount per pass shared by every
+prompt reading in it, not a per-prompt figure. For several concurrent agent
+sessions with long prompts, compare the defaults against fixed budgets
+(`1024` busy, `2048` idle, both targets `0`): the field evidence for that load
+is fixed. See [tuning automatic prefill](optimizing_performance.md#tuning-automatic-prefill)
 for examples and measurement guidance.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.prefill_budget_tokens` | Prompt work allowed while other requests are decoding. `-1` chooses automatically, starting at `prefill_initial_tokens`. A positive value sets an upper limit; adaptation may choose less. `0` disables budgeted interleaving during admission, so a long prompt can delay other work. Chunk sizes also obey the engine's alignment and capacity limits. | -1 (automatic) |
+| `engine.prefill_budget_tokens` | Prompt work allowed while other requests are decoding. `-1` chooses automatically, starting at `prefill_initial_tokens`. A positive value sets an upper limit; adaptation may choose less. `0` disables budgeted interleaving during admission, so a long prompt can delay other work. Chunk sizes also obey the engine's alignment and capacity limits. One amount per pass, shared by every prompt reading in it on the mixed-prefill families: four readers under `1024` get about 256 tokens each per pass. Size it for the readers together. | -1 (automatic) |
 | `engine.prefill_idle_budget_tokens` | Maximum prompt work per chunk when idle. `0` chooses up to 4096 tokens with automatic busy budgeting, or the busy budget when that is explicit. A positive value must be aligned and at least the busy budget. Larger idle chunks can finish a lone prompt sooner but delay a newly arriving request. | 0 (derive from busy policy) |
-| `engine.decode_gap_target_ms` | Soft target for time between a request's generation steps that produce tokens. Lower values favor smoother streaming by limiting competing prefill work, potentially slowing prompt processing. `0` disables this target. | 1000 ms |
+| `engine.decode_gap_target_ms` | Soft target for time between a request's generation steps that produce tokens. Lower values favor smoother streaming by limiting competing prefill work, potentially slowing prompt processing. The decoders' own pass, learned from ticks that only decode, comes out of this allowance before any prompt token does; `scheduler.prefill_chunks.decode_pass_ms` shows it. `0` disables this target. | 1000 ms |
 | `engine.first_token_target_ms` | Soft target from arrival to first token, including queue time. Lower values favor responsiveness to arrivals and may reduce prompt-processing throughput. `0` disables this target. | 3000 ms |
 | `engine.prefill_initial_tokens` | Starting automatic chunk size before timing measurements exist; must be positive. Larger values can improve initial prompt throughput but make the first chunk take longer. Adjusted to alignment, capacity and the idle ceiling. | 256 tokens |
 | `engine.prefill_idle_floor_tokens` | Minimum automatic chunk size after measuring cost, when nothing is decoding or waiting for a free slot. Keeps a lone long prompt from being split into inefficient tiny chunks. Higher values can delay new arrivals by one larger chunk. Rounded down to alignment and capped by the idle ceiling; `0` uses the minimum alignment. | 1024 tokens |

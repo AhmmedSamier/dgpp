@@ -3376,11 +3376,25 @@ int main(int argc, char** argv) {
           knobs.admission = dgpp::serve::resolve_prefill_policy(
               knobs.admission, *graph_engine->engine(), prefill_early_admission_override);
           peer_policy = knobs.admission;
-          DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt), {} with nothing decoding{}",
-                        rank, knobs.admission.prefill_budget_tokens,
-                        knobs.admission.prefill_idle_budget_tokens > 0 ? knobs.admission.prefill_idle_budget_tokens
-                                                                       : knobs.admission.prefill_budget_tokens,
-                        graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "");
+          {
+            // Name the sizing policy outright: a field operator with both
+            // targets at zero had to infer fixed budgeting from the
+            // metrics (2026-10-21).
+            const auto& adm = knobs.admission;
+            const bool adaptive = adm.prefill_budget_tokens > 0 &&
+                                  (adm.decode_gap_target_ms > 0 || adm.first_token_target_ms > 0);
+            const std::string sizing =
+                adm.prefill_budget_tokens <= 0 ? std::string()
+                : adaptive ? "; adaptive: decode-gap target " + std::to_string(adm.decode_gap_target_ms) +
+                                 " ms, first-token target " + std::to_string(adm.first_token_target_ms) +
+                                 " ms (0 = off), explicit budgets are caps"
+                           : "; fixed budgets (both latency targets 0)";
+            DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt), {} with nothing decoding{}{}",
+                          rank, adm.prefill_budget_tokens,
+                          adm.prefill_idle_budget_tokens > 0 ? adm.prefill_idle_budget_tokens : adm.prefill_budget_tokens,
+                          graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "",
+                          sizing);
+          }
           graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           graph_engine->set_block_verify(mtp_verify == "block");
           graph_engine->set_decode_pdl(decode_pdl);

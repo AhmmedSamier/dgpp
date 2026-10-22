@@ -239,9 +239,12 @@ margin, because a snapshot slot is only ever spent on a prompt above
 `engine.prefix_min_tokens` (1024 by default) and an idle GiB buys nothing. The
 one-node Qwen templates are the exception: their n-gram table is mmap'ed, and
 the memory they leave free is the page cache that keeps fresh-text prefill at
-full speed, so they stay at 3 GiB (27 snapshots). The
-[sizing guide](../docs/prefix-cache.md) lists representative capacities and the
-entry policy's keys.
+full speed, so they stay at 3 GiB (27 snapshots). That is a chat-shaped
+default: a field deployment serving five coding agents on one Spark needed
+111 slots (12 GiB) to keep idle sessions' prefixes through ten-minute pauses,
+at 4–7 % idle prefill. The [sizing guide](../docs/prefix-cache.md) lists
+representative capacities, the agent-call arithmetic and the entry policy's
+keys.
 
 ## The 512K YaRN templates (`engine.rope_scaling`)
 
