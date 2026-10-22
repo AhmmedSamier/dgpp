@@ -101,6 +101,27 @@ uint64_t fnv1a64(const char* data, size_t n) {
                            ": " + what);
 }
 
+// Structural safeguards, not an all-allocation budget or CPU deadline.
+constexpr size_t kSourceBytes = 1024 * 1024;
+constexpr size_t kExpressionTokens = 512;
+constexpr size_t kParseDepth = 64;
+constexpr size_t kRenderDepth = 256;
+constexpr size_t kRenderSteps = 10000000;
+constexpr size_t kStringBytes = 16 * 1024 * 1024;
+constexpr size_t kEmittedBytes = 64 * 1024 * 1024;
+constexpr size_t kRangeElements = 262144;
+
+struct DepthGuard {
+  size_t& depth;
+  DepthGuard(size_t& d, size_t limit, size_t line, const char* reason) : depth(d) {
+    if (depth == limit) fail(line, reason);
+    ++depth;
+  }
+  ~DepthGuard() { --depth; }
+  DepthGuard(const DepthGuard&) = delete;
+  DepthGuard& operator=(const DepthGuard&) = delete;
+};
+
 bool checked_add(int64_t a, int64_t b, int64_t* result) {
   if ((b > 0 && a > std::numeric_limits<int64_t>::max() - b) ||
       (b < 0 && a < std::numeric_limits<int64_t>::min() - b))
@@ -310,6 +331,9 @@ std::vector<ETok> lex_expr(std::string_view s, size_t line) {
       ++i;
       continue;
     }
+    // Bound left-associated ASTs before construction as well as recursive
+    // syntax: parse-depth guards alone do not bound AST destruction depth.
+    if (out.size() == kExpressionTokens) fail(line, "resource limit: expression tokens");
     if (c == '\'' || c == '"') {
       std::string str;
       ++i;
@@ -455,6 +479,7 @@ class ExprParser {
   }
 
   ExprPtr ternary() {
+    DepthGuard guard(depth_, kParseDepth, line_, "resource limit: parse depth");
     ExprPtr a = or_();
     if (accept_kw("if")) {
       ExprPtr cond = or_();
@@ -494,6 +519,7 @@ class ExprParser {
   }
 
   ExprPtr not_() {
+    DepthGuard guard(depth_, kParseDepth, line_, "resource limit: parse depth");
     if (accept_kw("not")) {
       ExprPtr e = make(Expr::Tag::Not);
       e->kids.push_back(not_());
@@ -766,6 +792,7 @@ class ExprParser {
   std::vector<ETok> toks_;
   size_t pos_ = 0;
   size_t line_;
+  size_t depth_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -780,6 +807,7 @@ class StmtParser {
   // end). The terminator's keyword is reported through `ended`.
   std::vector<StmtPtr> parse_statements(const char* const* terminators,
                                         size_t n_term, std::string* ended) {
+    DepthGuard guard(depth_, kParseDepth, last_line_, "resource limit: parse depth");
     std::vector<StmtPtr> out;
     for (;;) {
       if (pos_ >= toks_.size()) {
@@ -1013,6 +1041,7 @@ class StmtParser {
   const std::vector<Tok>& toks_;
   size_t pos_ = 0;
   size_t last_line_ = 1;
+  size_t depth_ = 0;
 };
 
 }  // namespace
@@ -1354,10 +1383,35 @@ struct Ctx {
 };
 
 struct Renderer {
+  // Owned by this renderer, outside Ctx: macro frame replacement never resets
+  // these counters. Each render() creates its own Renderer, including on error.
+  size_t depth_ = 0, steps_ = 0, emitted_ = 0;
+  void step() {
+    if (steps_ == kRenderSteps) fail(ctx_.line, "resource limit: render steps");
+    ++steps_;
+  }
+  void check_string(size_t size, size_t extra = 0) {
+    if (size > kStringBytes || extra > kStringBytes - size)
+      fail(ctx_.line, "resource limit: string bytes");
+  }
+  void append(std::string& out, std::string_view text) {
+    check_string(out.size(), text.size());
+    out.append(text);
+  }
+  void emit(std::string& out, std::string_view text) {
+    // Counts final output, block captures and macro buffers, including output
+    // later discarded or emitted again. Never refunded when a buffer is freed.
+    if (text.size() > kEmittedBytes - emitted_) fail(ctx_.line, "resource limit: emitted bytes");
+    emitted_ += text.size();
+    append(out, text);
+  }
+
   // A macro call renders its body into a fresh buffer with a stack of
   // just the parameter frame: macros close over the root frame only
   // (this template's macros reference nothing else across scopes).
   Value call_macro(const MacroDef& def, const std::vector<Value>& args) {
+    DepthGuard guard(depth_, kRenderDepth, ctx_.line, "resource limit: render depth");
+    step();
     if (args.size() > def.params.size())
       fail(ctx_.line, "macro '" + def.name + "': expected at most " +
                      std::to_string(def.params.size()) +
@@ -1493,6 +1547,7 @@ struct Renderer {
         const size_t boundaries = utf8_length(s) + 1;
         if (to.size() > (out.max_size() - s.size()) / boundaries)
           fail(ctx_.line, "replace result is too large");
+        check_string(s.size(), boundaries * to.size());
         out.reserve(s.size() + boundaries * to.size());
         out += to;
         for (size_t i = 0; i < s.size();) {
@@ -1512,11 +1567,11 @@ struct Renderer {
       for (;;) {
         const size_t hit = s.find(from, start);
         if (hit == std::string::npos) break;
-        out.append(s, start, hit - start);
-        out += to;
+        append(out, std::string_view(s).substr(start, hit - start));
+        append(out, to);
         start = hit + from.size();
       }
-      out.append(s, start, s.size() - start);
+      append(out, std::string_view(s).substr(start));
       return Value::string_value(std::move(out));
     }
     if (name == "length") {
@@ -1562,6 +1617,8 @@ struct Renderer {
   }
 
   Value eval(const Expr& e) {
+    DepthGuard guard(depth_, kRenderDepth, ctx_.line, "resource limit: render depth");
+    step();
     switch (e.tag) {
       case Expr::Tag::Const:
         return e.value;
@@ -1645,6 +1702,15 @@ struct Renderer {
           const int64_t step = args.size() == 3 ? args[2].as_int(0) : 1;
           if (step == 0) fail(ctx_.line, "range: step must not be zero");
           std::vector<Value> out;
+          const bool nonempty = step > 0 ? a < b : a > b;
+          // Unsigned arithmetic covers the full int64 distance and INT64_MIN
+          // stride. Reject before reserve or materializing the first element.
+          const uint64_t distance =
+              step > 0 ? uint64_t(b) - uint64_t(a) : uint64_t(a) - uint64_t(b);
+          const uint64_t stride = step > 0 ? uint64_t(step) : uint64_t(0) - uint64_t(step);
+          const uint64_t count = nonempty ? 1 + (distance - 1) / stride : 0;
+          if (count > kRangeElements) fail(ctx_.line, "resource limit: range elements");
+          out.reserve(static_cast<size_t>(count));
           for (int64_t k = a; step > 0 ? k < b : k > b;) {
             out.push_back(Value::integer(k));
             // Overflow means the next value has passed the finite stop bound.
@@ -1696,13 +1762,16 @@ struct Renderer {
         const Value a = eval(*e.kids[0]);
         const Value b = eval(*e.kids[1]);
         if (e.name == "~") {
+          if (a.kind() == Value::Kind::String) check_string(a.as_string().size());
+          if (b.kind() == Value::Kind::String) check_string(b.as_string().size());
           std::string out = a.to_output_string();
-          out += b.to_output_string();
+          append(out, b.to_output_string());
           return Value::string_value(std::move(out));
         }
         // '+' with two strings concatenates (Python semantics); otherwise
         // both operands must be numbers.
         if (a.kind() == Value::Kind::String && b.kind() == Value::Kind::String) {
+          check_string(a.as_string().size(), b.as_string().size());
           std::string out = a.as_string();
           out += b.as_string();
           return Value::string_value(std::move(out));
@@ -1827,20 +1896,26 @@ struct Renderer {
   }
 
   Flow exec(const std::vector<StmtPtr>& stmts, std::string* out) {
+    DepthGuard guard(depth_, kRenderDepth, ctx_.line, "resource limit: render depth");
     for (const auto& s : stmts) {
       ctx_.line = s->line;
+      step();
       switch (s->tag) {
         case Stmt::Tag::Text:
-          if (!s->text.empty()) *out += s->text;
+          emit(*out, s->text);
           break;
         case Stmt::Tag::Output:
-          *out += eval(*s->expr).to_output_string();
+          // Check a string before to_output_string() would copy it.
+          if (Value value = eval(*s->expr); value.kind() == Value::Kind::String)
+            emit(*out, value.as_string());
+          else
+            emit(*out, value.to_output_string());
           break;
         case Stmt::Tag::Set:
           if (!s->expr) {  // the block form: the body's render is the value
             std::string captured;
             exec(s->body, &captured);
-            ctx_.set(s->target, Value::string_value(captured));
+            ctx_.set(s->target, Value::string_value(std::move(captured)));
           } else if (s->target_attr.empty()) {
             ctx_.set(s->target, eval(*s->expr));
           } else {
@@ -1880,6 +1955,7 @@ struct Renderer {
             fail(s->line, "for: cannot iterate a non-list");
           const bool tuple = s->names.size() == 2;
           for (size_t idx = 0; idx < iter.as_list().size(); ++idx) {
+            step();
             ctx_.stack.emplace_back();
             Frame& frame = *ctx_.stack.rbegin();
             if (tuple) {
@@ -2029,6 +2105,7 @@ ChatTemplate::ChatTemplate(ChatTemplate&&) noexcept = default;
 ChatTemplate& ChatTemplate::operator=(ChatTemplate&&) noexcept = default;
 
 ChatTemplate ChatTemplate::compile(std::string source) {
+  if (source.size() > kSourceBytes) fail(1, "resource limit: source bytes");
   if (source.empty())
     throw std::runtime_error("chat-template: empty source");
   const std::vector<Tok> toks = lex(source);
@@ -2056,7 +2133,13 @@ ChatTemplate ChatTemplate::load(const std::string& chat_template_path) {
   std::string data;
   char buf[65536];
   size_t n;
-  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) data.append(buf, n);
+  while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) {
+    if (n > kSourceBytes - data.size()) {
+      std::fclose(f);
+      fail(1, "resource limit: source bytes");
+    }
+    data.append(buf, n);
+  }
   std::fclose(f);
   return compile(std::move(data));
 }

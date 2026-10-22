@@ -2125,6 +2125,16 @@ state is per call, so the parsed template can be shared. Golden tests
 cover rendered bytes and encoded IDs for text, reasoning and tool calls
 in each supported family.
 
+Compilation limits source size, expression tokens and recursive parser entries.
+Each render limits evaluator/macro depth and interpreter dispatch steps. Macro
+buffers and block captures share a cumulative emitted-byte counter; output,
+concatenation and replacement builders check result size before growth. Range
+cardinality is checked before allocation. The defaults are documented in
+`src/text/chat_template.hpp`; exhaustion uses the existing line-numbered error
+path. These selective guards do not bound all helper work, implicit value copies,
+collections, allocations or elapsed time. Shared-object cycles and a broader
+allocation policy remain separate work.
+
 ### Sampling semantics
 
 The model exposes FP32 logits for its vocabulary slice. Greedy selection

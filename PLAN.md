@@ -58,6 +58,14 @@ and GPU recovery coverage for both resident loader implementations.
 
 ## Serving support
 
+Native templates have source, expression-token and parser-depth limits, plus
+per-render depth, dispatch, emitted-byte and selected string/range growth limits.
+Local optimized and sanitizer checks cover refusal boundaries, repeat renders
+and valid family output compatibility. Full target-build and checkpoint-ID
+validation remain outstanding. Shared-object cycle prevention and cumulative
+allocation/helper-work accounting remain deferred; these guards do not provide
+complete resource containment.
+
 Host sampling automatically omits neutral penalty preparation using the
 effective request parameters. Deployment defaults and request overrides
 are covered by config, sampler, HTTP and journal regressions, including
