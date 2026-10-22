@@ -54,7 +54,11 @@ three-stage byte-level BPE (number runs, CJK runs, the o200k case-class
 pattern); the prompt renderer is the checkpoint's `chat_template.jinja`;
 tool calls are emitted and constrained in the
 `<tool_call>NAME<arg_key>…</arg_key><arg_value>…</arg_value></tool_call>`
-format the template writes; the model opens its own `<think>` block.
+format the template writes. The generation prompt ends at `<|assistant|>`
+and the model opens its own `<think>` block: the family declares this to
+the service (a prompt's tokens never decide it), so the parser splits the
+block, the usage counts it and constrained decoding admits it before the
+answer.
 
 ## Measured
 

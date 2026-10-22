@@ -17,10 +17,18 @@
 // fp8 cache dequantized — once per QUERY ROW, and the scores and the PV
 // products run on scalar fp32 FMAs: an O(T²) re-read plus O(T²) scalar
 // work that the 32K prefill shows. Here a block owns a TILE of kQueryRows
-// consecutive rows x the kv head's hpk query heads (64 query vectors: 4
-// rows x 16 heads on a global layer, 8 x 8 on a sliding-window layer),
-// stages each 32-token K/V tile once for all of them, and runs the
-// arithmetic on the tensor cores:
+// consecutive rows x the kv head's hpk query heads (128 query vectors: 8
+// rows x 16 heads on a MiMo global layer, 16 x 8 on its sliding-window
+// layers and on Flint's), stages each 32-token K/V tile once for all of
+// them, and runs the arithmetic on the tensor cores. The query vectors
+// per block set the kernel's arithmetic intensity on the K/V bytes
+// (every vector does 512 FLOP per 512-byte key/value pair: the intensity
+// in FLOP per byte IS the vector count): at 64 the tiles streamed from
+// DRAM capped Flint's 32K prefill near 15 TF (2026-10-22, the campaign's
+// first leg: 0.43 ms per token at 32K, the 14 full-attention layers'
+// tiles past the L2); 128 doubles the bound at the same per-warp code
+// (eight warps, each still its own 16-vector m-tile).
+//
 //
 //   S = Q K^T   mma.m16n8k16 bf16 x bf16 -> fp32 (the bf16 queries and
 //               cached keys, exact products, fp32 accumulation), x scale
@@ -40,9 +48,9 @@
 // boundaries) loops over the runs of one request, the other rows inert
 // (every key masked: their statistics and accumulators do not move).
 //
-// Warp w of the four owns query vectors [16 w, 16 w + 16) (mma rows): on
-// a global layer one row's 16 heads, on a sliding-window layer two rows'
-// eight heads each. Fragments: the C layout puts rows g = lane / 4 and
+// Warp w of the eight owns query vectors [16 w, 16 w + 16) (mma rows): on
+// a MiMo global layer one row's 16 heads, on an 8-heads-per-kv layer two
+// rows' eight heads each. Fragments: the C layout puts rows g = lane / 4 and
 // g + 8 in each lane, columns 2 (lane % 4) + {0, 1} of each n-tile — so
 // the row statistics reduce over the four lanes of a row, and the S
 // fragments re-pack directly as the A operand of PV (the FA2 register
@@ -55,9 +63,10 @@ namespace sink_prefill {
 
 constexpr int DV = kSinkAttnVDim;
 constexpr int kTile = kSinkAttnTile;
-constexpr int kWarps = 4;
+constexpr int kWarps = 8;
 constexpr int kThreads = kWarps * 32;
-constexpr int kQueryVecs = kWarps * 16;  // 64 query vectors per block
+constexpr int kQueryVecs = kWarps * 16;  // 128 query vectors per block
+static_assert(kQueryVecs == kSinkAttnPrefillQueryVecs, "the header's constant is this kernel's");
 constexpr int kVtStride = kTile + 8;     // 40 bf16 = 20 words: (20 g + t) mod 32 distinct for g < 8, t < 4
 constexpr int kNTilesS = kTile / 8;      // 4 n-tiles of 8 keys
 constexpr int kNTilesO = DV / 8;         // 16 n-tiles of 8 v dims
@@ -369,7 +378,7 @@ void launch(const SinkAttnPrefillArgs& a, cudaStream_t stream) {
     throw std::invalid_argument("sink_attn_prefill: heads");
   const int hpk = a.local_heads / a.kv_heads;
   if (kQueryVecs % hpk != 0 || hpk > kQueryVecs)
-    throw std::invalid_argument("sink_attn_prefill: the query heads per kv head must divide 64");
+    throw std::invalid_argument("sink_attn_prefill: the query heads per kv head must divide 128");
   if (a.block_tokens <= 0 || a.block_tokens % kTile != 0)
     throw std::invalid_argument("sink_attn_prefill: block_tokens must be a multiple of the 32-token tile");
   if (a.window < 0) throw std::invalid_argument("sink_attn_prefill: window");

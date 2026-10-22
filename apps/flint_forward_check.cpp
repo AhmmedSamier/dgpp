@@ -6,7 +6,7 @@
 // (--decode-steps) with the re-forward of prompt + transcript.
 //
 //   flint_forward_check --model ORG/NAME | --checkpoint-dir DIR
-//                      --ids 1,2,3,... | --text "..." [--topk K] [--layers N]
+//                      --ids 1,2,3,... | --ids-file FILE | --text "..." [--topk K] [--layers N]
 //                      [--decode-steps N] [--dump-states FILE]
 //                      [--world W --rank R --peer HOST --port N] [--resident]
 //                      [--image-dir DIR|off] [--lat-slot-bytes N]
@@ -60,6 +60,13 @@ int main(int argc, char** argv) {
       if (a == "--model") model_id = next(i);
       else if (a == "--checkpoint-dir") ckpt = next(i);
       else if (a == "--ids") ids_text = next(i);
+      else if (a == "--ids-file") {  // the ids as a comma-separated file (a long prompt exceeds the argument limit)
+        std::ifstream f(next(i));
+        if (!f) throw std::runtime_error("cannot read the ids file");
+        std::stringstream ss;
+        ss << f.rdbuf();
+        ids_text = ss.str();
+      }
       else if (a == "--text") text = next(i);              // tokenized with the checkpoint's tokenizer
       else if (a == "--decode-steps") decode_steps = std::stoi(next(i));  // greedy steps after the forward, audited
       else if (a == "--topk") topk = std::stoi(next(i));

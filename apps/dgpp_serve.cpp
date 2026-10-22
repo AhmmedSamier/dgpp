@@ -307,6 +307,12 @@ struct ServeFamily {
   // requests — but a single request can never pass it, so the launcher
   // says so out loud.
   virtual int64_t position_limit() const { return 0; }
+  // Whether the family's chat template leaves the reasoning block to the
+  // model: its generation prompt neither opens <think> nor closes a block,
+  // and the model opens its own (MiMo-V2.6, Flint). The declaration goes
+  // to the frontend's markers and the grammar vocabulary
+  // (ChatMarkers::model_opens_thinking); a prompt's tokens never decide it.
+  virtual bool model_opens_thinking() const { return false; }
   // The decode rows the family serves in one fixed batch at most (2026-09-10,
   // engine/decode_outputs.hpp): the session-core families take the derived
   // shape up to kDecodeRowsMax; GLM-5.3-Flash takes it up to 32 since
@@ -893,6 +899,9 @@ struct MimoFamily final : ServeFamily {
                                   " is not implemented for the MiMo-V2 K/V cache (bf16 or fp8)");
   }
   const char* name() const override { return "mimo_v2"; }
+  // The template's generation prompt ends in "assistant\n" (its
+  // enable_thinking=false form in "<think></think>"): the model opens <think>.
+  bool model_opens_thinking() const override { return true; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
   int64_t block_tokens() const override { return dgpp::MimoModel::kv_block_tokens_static(); }
@@ -964,8 +973,14 @@ struct FlintFamily final : ServeFamily {
                                   " is not implemented for the Flint K/V cache (bf16 or fp8)");
   }
   const char* name() const override { return "flint"; }
+  // The template's generation prompt ends at "<|assistant|>\n" and reads
+  // no thinking switch: the model opens its own <think>.
+  bool model_opens_thinking() const override { return true; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
+  // The checkpoint's positional ceiling (262144): a larger pool seats more
+  // requests, a single request never passes it.
+  int64_t position_limit() const override { return cfg.max_position_embeddings; }
   int64_t block_tokens() const override { return dgpp::FlintModel::kv_block_tokens_static(); }
   int prefill_chunk_tokens() const override { return dgpp::FlintModel::prefill_chunk_tokens(); }
   std::string pool_check(int64_t) const override { return ""; }
@@ -1255,6 +1270,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
                  bool no_eos, double boot_s,
                  dgpp::serve::JournalWriter* journal,
                  dgpp::serve::OpStreamObserver* oplog, const std::string& family_name,
+                 bool model_opens_thinking,
                  const std::atomic<uint64_t>* collective_progress = nullptr) {
   const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
       (fs::path(ckpt) / "tokenizer.json").string(), k.tokenizer_word_cache_entries);
@@ -1294,7 +1310,10 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
         vision_frontend = std::make_unique<dgpp::serve::QwenVisionFrontend>(&tok, &*tpl, ids);
     }
     frontend = vision_frontend ? std::move(vision_frontend)
-                               : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);
+                               : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl, model_opens_thinking);
+    if (model_opens_thinking)
+      DGPP_LOG_INFO("serve: the {} template leaves the reasoning block to the model (the family's declaration)",
+                    family_name);
     if (engine->supports_images())
       DGPP_LOG_INFO("serve: image inputs enabled ({} visual tokens per image max)",
                     dgpp::kMaxImageTokens);
@@ -3168,7 +3187,8 @@ int main(int argc, char** argv) {
       dgpp::text::GrammarVocab v = dgpp::text::GrammarVocab::from_tokenizer(
           tok, generation_eos, static_cast<int>(family->vocab_size()),
           std::string(family->name()) == "deepseek_v4" ? dgpp::text::DsmlDialect::kV4
-                                                       : dgpp::text::DsmlDialect::kV41);
+                                                       : dgpp::text::DsmlDialect::kV41,
+          family->model_opens_thinking());
       DGPP_LOG_INFO(
           "serve: grammar vocabulary built ({} ids, tool markers {}, "
           "call-turn EOS {})",
@@ -3536,7 +3556,7 @@ int main(int argc, char** argv) {
         open_ops_file(&oplog, "serve_rank0.ops");
         const int rc = serve_openai(engine_ptr(), family->vocab_size(), generation_eos, ckpt,
                                     model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog,
-                                    family->name(), &bus->completion_epoch());
+                                    family->name(), family->model_opens_thinking(), &bus->completion_epoch());
         engine_release();
         cudaFreeHost(pick_scratch);
         bus->stop();
@@ -3581,7 +3601,7 @@ int main(int argc, char** argv) {
         knobs.admission, *engine, prefill_early_admission_override);
     const int rc = serve_openai(engine.get(), family->vocab_size(), generation_eos, ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
-                                /*oplog=*/nullptr, family->name());
+                                /*oplog=*/nullptr, family->name(), family->model_opens_thinking());
     engine.reset();
     family->destroy_model();
     return rc;

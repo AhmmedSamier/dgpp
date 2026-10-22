@@ -295,3 +295,52 @@ is" decodes " Paris. The capital of Italy is Rome. The capital of Canada
 is Ottawa. The capital of Australia is Canberra." with 24 of 25 decode
 rows agreeing with the re-forward's argmax (the one divergence a near tie
 between "." and " is").
+
+**2026-10-22 — G8 in progress (the campaign).** Two defects the first
+one-node leg exposed, fixed before its rows: the prefill probe's
+`--no-think` asked an always-on template to switch thinking off (HTTP 400:
+the probe now retries without the switch and records `thinking:
+always_on`); the family declared no positional ceiling, so the server
+advertised the 512K pool as the request limit (now
+`max_position_embeddings`, 262144 — the pool seats concurrency). The
+one-node image capture failed on a full disk (the partial image removed;
+the campaign runs with `DGPP_RESIDENT_CACHE=off`, which touches boot time
+only). First readings (release `4709d8d6`, one node, eight slots, 512K
+BF16 pool): decode 55.3–56.4 tok/s at C1 (18 ms/step), 96.6–98.1 at C2,
+140.6–142.4 at C4, 191.9–197.2 at C8; cold prefill 0.225 / 0.51 / 2.07 /
+13.9 s at ~512 / 2K / 8K / 32K tokens (0.44 / 0.25 / 0.26 / 0.43 ms per
+token — the 14 full-attention layers' quadratic term past 8K). The T=1
+step streams about 3.4 GB (the 12-bit projections and head, the fp8 and
+NVFP4 experts, the BF16 shared experts): 14.6 ms at the 233.6 GB/s read
+ceiling, so the step sits at ~81 % of the DRAM floor; the levers left are
+the shared expert's BF16 tail (12.6 MB per layer, read raw) and the
+launch count per layer.
+
+The quality leg of that run then exposed a third defect, fixed before the
+rows are re-measured: schema extraction scored 93/100 (every other family
+scores 100) because the service treated the model's own `<think>` as
+content — the model-opened block was a MiMo-dialect coupling, so under
+the JSON grammar Flint's opener was refused at the first position and the
+outputs came out garbled, and the usage counted no reasoning tokens.
+Whether the model opens its own `<think>` is now a family declaration
+(`ServeFamily::model_opens_thinking`, carried by the frontend's markers
+and the grammar vocabulary — MiMo-V2.6 and Flint state it; a prompt's
+tokens never select it), and the prompt-tail rule only checks that the
+template settled nothing itself (no `<think>` opened, no block closed).
+Pinned by a unit test over every family's generation-prompt shape with
+and without the declaration, a sweep of the cached checkpoints' real
+templates, and the GLM JSON grammar gate driving Flint's documents behind
+the model's own block (and refusing the opener without the declaration).
+The campaign's rows are re-measured on the fixed binary.
+
+Prefill attention tiling (the lever the 32K row pointed at): the
+query-tiled kernel stages each 32-token K/V tile for 128 query vectors
+per block instead of 64 (`kSinkAttnPrefillQueryVecs`, both head
+geometries), doubling the FLOP per cache byte. On the 32K prompt
+(`flint_forward_check --ids-file`, nsys kernel sums, one launch per
+layer) the kernel's 49 launches take 5.16 s against 6.44 s before — 24.8
+vs 19.9 TF on the 1.28e14 attention FLOP — and the forward's kernel total
+10.04 s against 11.32 s; the attention tests and the forward chains are
+unchanged (bitwise). MiMo-V2.6 shares the kernel: on an 8K prompt
+(`mimo_forward_check`, 48 launches) its attention takes 0.621 s against
+0.820 s. Kept.

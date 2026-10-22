@@ -189,7 +189,7 @@ void FlintAttentionLayer::enqueue(const uint16_t* x, int tokens, const FlintAttn
     a.counters = counters_;
     a.out = o_;
     sink_attn_fused(kQk, a, stream);
-  } else if (!rows.decode && 64 % hpk == 0) {
+  } else if (!rows.decode && kSinkAttnPrefillQueryVecs % hpk == 0) {
     // Prefill rows: every row's K/V appended first, then the query-tiled
     // tensor-core attention.
     finish();

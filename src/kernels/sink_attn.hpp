@@ -58,6 +58,10 @@ constexpr int kSinkAttnVDim = 128;
 constexpr int kSinkAttnTile = 32;
 // Rows the fused decode launch's batch table holds.
 constexpr int kSinkAttnFusedMaxRows = 64;
+// Query vectors (rows x query heads of one kv head) a prefill block stages
+// each K/V tile for: the kernel's arithmetic intensity on the cache bytes.
+// The query heads per kv head must divide it.
+constexpr int kSinkAttnPrefillQueryVecs = 128;
 
 // Whether the kernels are compiled for this qk width (192 or 128).
 bool sink_attn_supported(int qk_dim);
@@ -152,7 +156,7 @@ void sink_attn_fused(int qk_dim, const SinkAttnFusedArgs& a, cudaStream_t stream
 
 // The query-tiled prefill attention: q the finish's bf16 rows (local_heads
 // x qk_dim, stride q_stride); out rows local_heads x 128. The query heads
-// per kv head must divide 64.
+// per kv head must divide kSinkAttnPrefillQueryVecs.
 struct SinkAttnPrefillArgs {
   const uint16_t* q = nullptr;
   int64_t q_stride = 0;

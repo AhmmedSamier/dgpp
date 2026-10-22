@@ -21,7 +21,18 @@ project procedures and design guidance live in `docs/`.
   tokenizer's three-stage scanner learned the o200k main pattern over the
   case classes (Ll and Lu/Lt tables); the chat-template engine block
   `set … endset` and the `\x` / `\u` string escapes; a positive
-  reasoning effort on a template without a control is a no-op. Every
+  reasoning effort on a template without a control is a no-op. Whether
+  the model opens its own `<think>` became a family declaration
+  (`ServeFamily::model_opens_thinking`, carried by the frontend's markers
+  and the grammar vocabulary: MiMo-V2.6 and Flint) in place of the MiMo
+  dialect coupling, so the Flint parser splits and counts the model's
+  block and constrained decoding admits it before the answer; no other
+  family's prompts reach the rule (their templates open or close the
+  block themselves). The sink-attention prefill kernel stages each K/V
+  tile for 128 query vectors per block (64 before; both geometries): the
+  32K Flint prompt's attention 6.44 → 5.16 s (19.9 → 24.8 TF), MiMo's 8K
+  prompt's 0.820 → 0.621 s, bitwise.
+  Every
   layer within 7 bf16 ulps of the numpy reference teacher-forced, the
   final hidden bitwise; the fixture ladder (loader at worlds 1/2/4, the
   session surface, loopback TP and engines) and the real checkpoint's
