@@ -238,6 +238,55 @@ struct SmallCase {
       return;
     }
 
+    if (host_w.nvfp4 && !host_w.fp4_matrix.empty()) {
+      // The per-projection form (docs/flint_plan.md D2): both tables, each
+      // routed matrix uploaded into its own; the shared triple fp8.
+      require(!host_w.shared_nvfp4, "mixed case: the shared triple is fp8");
+      expert_mats_fp4.assign(static_cast<size_t>(E) * 3, dgpp::GlmFp4Matrix{});
+      expert_mats.assign(static_cast<size_t>(E + 1) * 3, GlmQuantMatrix{});
+      DGPP_CUDA_OK(cudaMallocManaged(&d_fp4_globals, static_cast<size_t>(E) * 3 * 4));
+      for (int m = 0; m < (E + 1) * 3; ++m) {
+        if (host_w.fp4_of(m, E)) {
+          const dgpp::GlmFp4MatrixHost v = dgpp::glm_moe_host_view_fp4(host_w, cfg, m);
+          uint8_t* pk = nullptr;
+          uint8_t* sc = nullptr;
+          const size_t pn = static_cast<size_t>(v.rows) * v.cols / 2;
+          const size_t sn = static_cast<size_t>(v.rows) * v.cols / v.scale_group;
+          DGPP_CUDA_OK(cudaMallocManaged(&pk, pn));
+          DGPP_CUDA_OK(cudaMallocManaged(&sc, sn));
+          std::memcpy(pk, v.payload, pn);
+          std::memcpy(sc, v.scales, sn);
+          d_fp4_globals[m] = v.global_scale;
+          d_fp4_bytes.push_back(pk);
+          d_fp4_bytes.push_back(sc);
+          expert_mats_fp4[static_cast<size_t>(m)] =
+              dgpp::GlmFp4Matrix{pk, sc, d_fp4_globals + m, v.rows, v.cols, v.scale_group};
+          continue;
+        }
+        auto view = dgpp::glm_moe_host_view(host_w, cfg, m);
+        uint8_t* p = nullptr;
+        float* s = nullptr;
+        const size_t pn = static_cast<size_t>(view.rows) * view.cols;
+        const size_t sn = ((view.rows + 127) / 128) * ((view.cols + 127) / 128);
+        DGPP_CUDA_OK(cudaMallocManaged(&p, pn));
+        DGPP_CUDA_OK(cudaMallocManaged(&s, sn * 4));
+        std::memcpy(p, view.payload, pn);
+        std::memcpy(s, view.scales, sn * 4);
+        d_payloads.push_back(p);
+        d_scales.push_back(s);
+        expert_mats[static_cast<size_t>(m)] = GlmQuantMatrix{p, s, nullptr, view.rows, view.cols};
+      }
+      dev_w.router_gate = d_gate_w;
+      dev_w.router_bias = d_bias;
+      dev_w.experts = expert_mats.data();
+      dev_w.experts_fp4 = expert_mats_fp4.data();
+      dev_w.routed_fp4_mask = 0;
+      for (int m = 0; m < 3; ++m)
+        if (host_w.fp4_matrix[static_cast<size_t>(m)]) dev_w.routed_fp4_mask |= static_cast<uint8_t>(1u << m);
+      for (int m = 0; m < 3; ++m) dev_w.shared[m] = expert_mats[static_cast<size_t>(E) * 3 + m];
+      DGPP_CUDA_OK(cudaMallocManaged(&d_out, static_cast<size_t>(tokens) * cfg.hidden * 2));
+      return;
+    }
     if (host_w.nvfp4) {
       // Routed experts as NVFP4 triples (payload, per-row scales, and one
       // gathered global-scale array, the loader's layout); the shared
@@ -361,7 +410,8 @@ const char* const kM346Forms[8] = {"444", "334", "446", "333", "666", "443", "33
 SmallCase make_small_case(int E, int H, int I, int K, int tokens,
                           uint64_t seed, bool nvfp4 = false, bool shared_nvfp4 = false,
                           int packq_bits = 0, int fp4_group = 16, int packq_scale_fmt = 0,
-                          int routed_input_transform = 0, const char* const* m346_forms = nullptr) {
+                          int routed_input_transform = 0, const char* const* m346_forms = nullptr,
+                          int routed_fp4_mask = -1) {
   SmallCase c;
   c.cfg.hidden = H;
   c.cfg.inter = I;
@@ -388,6 +438,14 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
   c.host_w.nvfp4 = nvfp4;
   c.host_w.shared_nvfp4 = nvfp4 && shared_nvfp4;
   c.host_w.fp4_group = fp4_group;
+  // The per-projection form (routed_fp4_mask >= 0, bit w = projection w
+  // NVFP4): every expert the same mix, the shared triple fp8.
+  if (nvfp4 && routed_fp4_mask >= 0) {
+    c.host_w.fp4_matrix.assign(static_cast<size_t>(E) * 3, 0);
+    for (int e = 0; e < E; ++e)
+      for (int m = 0; m < 3; ++m)
+        c.host_w.fp4_matrix[static_cast<size_t>(e) * 3 + m] = static_cast<uint8_t>((routed_fp4_mask >> m) & 1);
+  }
   // Packed-int (packq_bits 4 or 8): the routed experts at that width, the
   // shared triple at int8 (the checkpoint's shape), release-like scales.
   c.host_w.packq = packq_bits != 0;
@@ -463,7 +521,7 @@ SmallCase make_small_case(int E, int H, int I, int K, int tokens,
       }
       continue;
     }
-    if (nvfp4 && (m < E * 3 || c.host_w.shared_nvfp4)) {
+    if (c.host_w.fp4_of(m, E)) {
       std::vector<uint8_t> packed(static_cast<size_t>(rows) * cols / 2);
       for (auto& b : packed) b = static_cast<uint8_t>(rng.next() & 0xFF);
       std::vector<uint8_t> sc(static_cast<size_t>(rows) * cols / fp4_group);
@@ -2288,6 +2346,83 @@ DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_nvfp4) {
     c.free_all();
     std::printf("[ OK ] nvfp4 decode slot path E=%d H=%d I=%d K=%d M=%d: bitwise\n",
                 cs.E, cs.H, cs.I, cs.K, cs.M);
+  }
+}
+
+// The per-projection form (2026-10-22, docs/flint_plan.md D2 — Flint's
+// layer 12: gate fp8 / up NVFP4 / down fp8; layer 37: gate and up NVFP4
+// over an fp8 down): the fp8 and fp4 tables both bound with the mask.
+// GIVEN each true mix, WHEN the host path, the decode slot path (the mixed
+// gate/up kernel, or the uniform pair kernel with the other format's
+// down) and the prefill entry (per-launch formats on the grouped chain)
+// run the same rows, THEN the host path sits within the expert budget of
+// the oracle and the other two are bitwise it.
+DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_mixed) {
+  struct Case {
+    int E, H, I, K, M, mask;
+  };
+  const Case cases[] = {
+      {8, 512, 256, 2, 1, 0b010},    // layer 12's form, one row
+      {8, 512, 256, 2, 3, 0b010},    // multi-row
+      {8, 512, 256, 2, 3, 0b011},    // layer 37's form
+      {8, 512, 256, 2, 2, 0b001},    // gate fp4 / up fp8
+      {8, 512, 256, 2, 2, 0b100},    // fp8 pair, fp4 down
+      {16, 1024, 512, 4, 2, 0b110},  // up + down fp4, K=4
+      {16, 1024, 512, 4, 2, 0b101},
+  };
+  for (const Case& cs : cases) {
+    SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0xF8F4 + cs.E + cs.M + 16 * cs.mask,
+                                  /*nvfp4=*/true, false, 0, 16, 0, 0, nullptr, cs.mask);
+    c.alloc();
+    require(c.dev_w.mixed() && c.dev_w.routed_fp4_mask == cs.mask, "mixed case: both tables bound");
+    GlmMoeLayer layer(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M);
+    std::vector<uint16_t> host(static_cast<size_t>(cs.M) * c.cfg.hidden);
+    layer.enqueue(c.d_hidden, c.d_out, cs.M, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(host.data(), c.d_out, host.size() * 2);
+    std::vector<uint16_t> oracle;
+    dgpp::glm_moe_ref_forward(c.d_hidden, c.host_w, c.cfg, c.tokens, oracle);
+    require_within_expert_budget(host, oracle, "mixed host path vs oracle");
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    layer.enqueue_decode(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> fused(host.size(), 0x7F7F);
+    std::memcpy(fused.data(), c.d_out, fused.size() * 2);
+    require(std::memcmp(host.data(), fused.data(), host.size() * 2) == 0,
+            "mixed decode slot path must be bitwise-identical to enqueue");
+    // The prefill entry (device segmentation, the tensor-core cores per
+    // launch) against the host path on the same cores (the fp8 pin's form:
+    // the fp8 tensor-core kernel is not bitwise the GEMV core; the fp4 one
+    // is), and within budget of the oracle.
+    GlmMoeLayer hm(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M);
+    std::vector<uint16_t> host_mma(host.size(), 0x7F7F);
+    hm.enqueue(c.d_hidden, c.d_out, cs.M, nullptr, dgpp::MoeExpertKernel::kMma);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::memcpy(host_mma.data(), c.d_out, host_mma.size() * 2);
+    require_within_expert_budget(host_mma, oracle, "mixed host path (mma) vs oracle");
+    GlmMoeLayer cold(c.dev_w, c.cfg, std::max(cs.M, 1), /*decode_slots=*/cs.M);
+    DGPP_CUDA_OK(cudaMemset(c.d_out, 0x7F, host.size() * 2));
+    cold.enqueue_prefill(c.d_hidden, c.d_out, cs.M, nullptr, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    std::vector<uint16_t> pre(host.size(), 0x7F7F);
+    std::memcpy(pre.data(), c.d_out, pre.size() * 2);
+    require(std::memcmp(host_mma.data(), pre.data(), host.size() * 2) == 0,
+            "mixed prefill path must be bitwise-identical to the host path on the same cores");
+    // The constructor refuses a mask naming no mix on two bound tables.
+    for (int bad : {0, 7}) {
+      GlmMoeWeights w2 = c.dev_w;
+      w2.routed_fp4_mask = static_cast<uint8_t>(bad);
+      bool threw = false;
+      try {
+        GlmMoeLayer bad_layer(w2, c.cfg, 1, 1);
+      } catch (const std::invalid_argument&) {
+        threw = true;
+      }
+      require(threw, "two bound tables need a true per-projection mix");
+    }
+    c.free_all();
+    std::printf("[ OK ] mixed decode slot path E=%d H=%d I=%d K=%d M=%d mask=%d: bitwise\n",
+                cs.E, cs.H, cs.I, cs.K, cs.M, cs.mask);
   }
 }
 

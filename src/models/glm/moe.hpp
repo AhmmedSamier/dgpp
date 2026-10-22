@@ -154,7 +154,19 @@ struct GlmMoeWeights {
   // GLM-5.3 (the composed hybrid); NVFP4 for GLM-4.7.
   const GlmQuantMatrix* experts = nullptr;
   const GlmFp4Matrix* experts_fp4 = nullptr;
-  bool nvfp4() const { return experts_fp4 != nullptr; }
+  // The uniform NVFP4 / MXFP4 table (every routed matrix in experts_fp4).
+  bool nvfp4() const { return experts_fp4 != nullptr && experts == nullptr; }
+  // The per-projection form (2026-10-22, docs/flint_plan.md D2): BOTH
+  // tables bound and `routed_fp4_mask` bit w (0 gate, 1 up, 2 down)
+  // naming projection w NVFP4 — read from experts_fp4[e * 3 + w] — else
+  // fp8 (experts[e * 3 + w]); the other table's entry stays unset. The
+  // slot kernels run each phase on its format (a mixed gate/up pair on
+  // the mixed kernel), the grouped chain picks per launch.
+  uint8_t routed_fp4_mask = 0;
+  bool mixed() const { return experts_fp4 != nullptr && experts != nullptr; }
+  bool fp4_of(int which) const {
+    return experts_fp4 != nullptr && (experts == nullptr || ((routed_fp4_mask >> which) & 1u));
+  }
   // W4A4 activation scales (the checkpoint's max input_scale over the layer's
   // experts, gate/up and down; 0 = quantize with a dynamic per-row scale).
   float act_scale_w13 = 0.0f, act_scale_w2 = 0.0f;

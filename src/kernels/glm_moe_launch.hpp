@@ -392,6 +392,23 @@ void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,
                               cudaStream_t stream, int shared_view_base = -1,
                               int fp4_group = 16, int sh_rs = 7, int sh_cs = 7,
                               int* tile_counter = nullptr);
+// The per-projection form's gate/up launch (2026-10-22, docs/flint_plan.md
+// D2): the two projections in different formats — one fp8 (`payload` /
+// `scales`, a 128-row block grid or the re-blocked slice grid), one NVFP4
+// / MXFP4 (`fp4_scales` / `fp4_global`) — `gate_fp4` naming which is
+// which. The fp8 matrix's rows run the fp8 core (row_dots, the fp8 slot
+// kernel's per-row arithmetic), the fp4 matrix's the fp4 core (the fp4
+// slot kernel's), the SwiGLU on the pair with the same rounding points:
+// each dot bitwise its uniform kernel's. The shared slot (n_shared > 0:
+// an fp8 expert on the launch-arg matrices at k_shared, its scale grid
+// sh_rs / sh_cs) runs the fp8 core on both, as the fp4 kernel's does.
+void launch_moe_slot_gate_up_swiglu_mixed(const uint16_t* x, size_t x_stride, const int32_t* ids,
+                                          const int32_t* order, const MoeExpertView* views, int n_routed,
+                                          int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
+                                          const float* sh_gate_scales, const uint8_t* sh_up_payload,
+                                          const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
+                                          int top_k, float limit, bool gate_fp4, int fp4_group, cudaStream_t stream,
+                                          int sh_rs = 7, int sh_cs = 7);
 // tile_counter (2026-10-19, required): two device ints the caller zeroes
 // once at allocation. The kernel's blocks steal (slot, row tile) units
 // from the first and the last block out resets both, so consecutive

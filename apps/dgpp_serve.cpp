@@ -99,6 +99,8 @@
 #include "models/glm_dsa/model.hpp"
 #include "models/mimo/config.hpp"
 #include "models/mimo/forward.hpp"
+#include "models/flint/config.hpp"
+#include "models/flint/forward.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_grammar.hpp"
@@ -943,6 +945,84 @@ struct MimoFamily final : ServeFamily {
   }
 };
 
+// Flint (FlintForCausalLM, the fp8 / NVFP4 mixed export as shipped;
+// docs/flint_plan.md): the paged K/V pool (64-token blocks, bf16 or fp8
+// rows at 128 / 128, every layer's rows — the sliding-window layers read
+// theirs through the window), no recurrent state (snapshots at any
+// position), no draft head (engine.mtp is refused), the resident fabric
+// model / the streaming world-1 one.
+struct FlintFamily final : ServeFamily {
+  dgpp::FlintTextConfig cfg;
+  std::string ckpt;
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
+  std::unique_ptr<dgpp::FlintModel> model;
+  FlintFamily(const std::string& checkpoint, dgpp::LatentFormat fmt)
+      : cfg(dgpp::FlintTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint), kv_format(fmt) {
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") + dgpp::latent_format_name(kv_format) +
+                                  " is not implemented for the Flint K/V cache (bf16 or fp8)");
+  }
+  const char* name() const override { return "flint"; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
+  int64_t block_tokens() const override { return dgpp::FlintModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::FlintModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
+  int decode_rows_cap() const override { return dgpp::FlintModel::decode_rows_cap(); }
+  // The widest fold the decode graph records: a block output [rows, hidden].
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  static void refuse_mtp(bool mtp) {
+    if (mtp)
+      throw std::invalid_argument("engine.mtp: the Flint family has no draft head (set \"mtp\": false; the plain world)");
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    refuse_mtp(mtp);
+    return dgpp::FlintModel::plan_memory(
+        cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+        fabric ? dgpp::FlintResidency::Resident : dgpp::FlintResidency::Streaming, slots,
+        /*mtp=*/false, decode_rows, kv_format, /*serving_logits=*/true);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    refuse_mtp(mtp);
+    return dgpp::FlintModel::session_snapshot_bytes(cfg, world_, false);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    refuse_mtp(mtp);
+    dgpp::FlintLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::FlintModel>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::FlintResidency::Resident : dgpp::FlintResidency::Streaming, reducer,
+        fabric ? rank : 0, fabric ? world_ : 1, slots, /*mtp=*/false, decode_rows, kv_format,
+        /*serving_logits=*/true);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches, int lookup_tail = 0) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::FlintModel>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches, lookup_tail);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::FlintModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
 // Qwen3.8-27B dense family (FP8 text-only, bf16 K/V pool, the MTP draft layer).
 // engine.dense_weights = fp8 requantizes its BF16 lm head to block FP8 and
 // engine.prefill_fp8_per_tensor selects the per-tensor prefill recipe; both
@@ -1074,6 +1154,7 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
         "(deepseek_v41) indexer's budget; this checkpoint's family has no configurable selection budget");
   if (arch == dgpp::ModelArchitecture::DeepseekV4) return std::make_unique<Dsv4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
+  if (arch == dgpp::ModelArchitecture::Flint) return std::make_unique<FlintFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen3_5)
@@ -2883,10 +2964,10 @@ int main(int argc, char** argv) {
       return 2;
     }
     if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
-        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" &&
-        std::string(family->name()) != "qwen4_exp" && kv_dtype != "bf16")
-      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 K/V cache and the "
-                    "Qwen3.5 / Qwen3.8-Flash-Next K/V pools only; the {} caches stay bf16",
+        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "flint" &&
+        std::string(family->name()) != "qwen3_5" && std::string(family->name()) != "qwen4_exp" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 and Flint K/V caches and "
+                    "the Qwen3.5 / Qwen3.8-Flash-Next K/V pools only; the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",

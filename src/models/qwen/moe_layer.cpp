@@ -38,9 +38,10 @@ GlmMoeConfig QwenMoeLayer::routed_config(int hidden, int inter, int n_experts,
 GlmMoeWeights QwenMoeLayer::routed_view(const QwenMoeWeights& w) {
   GlmMoeWeights g;
   g.router_gate = w.router;
-  g.router_bias = nullptr;
+  g.router_bias = w.router_bias;
   g.experts = w.experts;
   g.experts_fp4 = w.experts_fp4;
+  g.routed_fp4_mask = w.routed_fp4_mask;
   g.experts_packed = w.experts_packed;
   g.act_scale_w13 = w.act_scale_w13;
   g.act_scales_dev = w.act_scales_dev;
@@ -79,10 +80,14 @@ QwenMoeLayer::QwenMoeLayer(const QwenMoeWeights& weights, const GlmMoeConfig& cf
     DGPP_CUDA_OK(cudaEventCreateWithFlags(&shared_fork_, cudaEventDisableTiming));
     DGPP_CUDA_OK(cudaEventCreateWithFlags(&shared_join_, cudaEventDisableTiming));
   }
-  if (cfg_.n_shared_experts != 0 || cfg_.router_mode != MoeRouterMode::SoftmaxTopk)
+  // The routed config: routed_config()'s (the softmax router) or Flint's
+  // (the sigmoid router with its zero bias, FlintTextConfig::moe_config);
+  // the shared expert never in the chain.
+  if (cfg_.n_shared_experts != 0 ||
+      (cfg_.router_mode != MoeRouterMode::SoftmaxTopk && cfg_.router_mode != MoeRouterMode::SigmoidBias))
     throw std::invalid_argument(
         "QwenMoeLayer: the routed config must be routed_config()'s (softmax "
-        "router, no shared expert in the chain)");
+        "router, no shared expert in the chain) or a sigmoid router's");
   check_weights();
   const size_t M = static_cast<size_t>(max_tokens_);
   const size_t H = static_cast<size_t>(cfg_.hidden);
@@ -126,10 +131,14 @@ void QwenMoeLayer::check_weights() const {
   const bool shared_ok = w_.shared_fp8 ? (w_.shared_fp8[0].payload && w_.shared_fp8[1].payload && w_.shared_fp8[2].payload)
                                        : (w_.shared_gate_proj && w_.shared_up_proj && w_.shared_down_proj);
   const int forms = (w_.experts != nullptr) + (w_.experts_fp4 != nullptr) + (w_.experts_packed != nullptr);
-  if (!w_.router || !w_.shared_gate || !shared_ok || forms == 0)
+  // shared_gate null: the ungated shared expert at weight 1 (Flint).
+  if (!w_.router || !shared_ok || forms == 0)
     throw std::invalid_argument("QwenMoeLayer: null weight pointer");
-  if (forms != 1)
-    throw std::invalid_argument("QwenMoeLayer: exactly one routed expert form (fp8, nvfp4, packed) may be bound");
+  const bool mixed = forms == 2 && w_.experts && w_.experts_fp4 && w_.routed_fp4_mask != 0;
+  if (forms != 1 && !mixed)
+    throw std::invalid_argument(
+        "QwenMoeLayer: exactly one routed expert form (fp8, nvfp4, packed) may be bound, or the fp8 and NVFP4 "
+        "tables with a per-projection mask");
   if (w_.shared_inter <= 0 || w_.shared_inter % 8 != 0)
     throw std::invalid_argument("QwenMoeLayer: shared_inter must be a positive multiple of 8");
   if (cfg_.hidden % 8 != 0)

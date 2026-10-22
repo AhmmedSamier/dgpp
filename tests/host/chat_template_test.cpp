@@ -72,6 +72,12 @@ bool corpus_is_mimo(const std::string& golden_path) {
 bool corpus_is_qwen(const std::string& golden_path) {
   return corpus_model(golden_path).find("Qwen") != std::string::npos || corpus_is_mimo(golden_path);
 }
+// The Flint corpus (2026-10-22): the GLM marker family, but the generation
+// prompt ends at <|assistant|> and the model opens its own <think> block —
+// the parser and the grammar start outside reasoning.
+bool corpus_is_flint(const std::string& golden_path) {
+  return corpus_model(golden_path).find("flint") != std::string::npos;
+}
 std::string read_text_file(const std::string& path) {
   std::ifstream f(path);
   if (!f) throw std::runtime_error("cannot open " + path);
@@ -516,7 +522,7 @@ DGPP_TEST(glm_tool_call_render_encode_parse_roundTrip) {
       std::vector<int64_t> ids = tok.encode(turn);
       ids.push_back(observation[0]);
       dgpp::text::ToolCallParser::Options opts;
-      opts.start_in_reasoning = true;
+      opts.start_in_reasoning = !corpus_is_flint(kGoldenPath);
       dgpp::text::ToolCallParser parser(
           markers,
           [&](const std::vector<int64_t>& v) { return tok.decode(v, true); },
@@ -1076,12 +1082,12 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       turn.erase(0, std::string("<|assistant|>").size());
       std::vector<int64_t> ids = tok.encode(turn);
       ids.push_back(vocab.call_turn_eos());
-      opt_out_turns += check_golden_key_closure(vocab, tok, tools, *tcs, turn, ids, true, name);
+      opt_out_turns += check_golden_key_closure(vocab, tok, tools, *tcs, turn, ids, !corpus_is_flint(kGoldenPath), name);
       // Required (parallel): every turn is accepted; the grammar ends the
       // turn only on EOS.
       dgpp::text::GrammarState g(
           &vocab, golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
-          /*prompt_opens_thinking=*/true);
+          /*prompt_opens_thinking=*/!corpus_is_flint(kGoldenPath));
       for (size_t j = 0; j < ids.size(); ++j) {
         require(g.allows(ids[j]),
                 name + ": id " + std::to_string(ids[j]) + " (" +
@@ -1099,7 +1105,7 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
           (ffn ? *ffn : first).at("name").as_string());
       dgpp::text::GrammarState single(
           &vocab,
-          golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, false, ""), true);
+          golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, false, ""), !corpus_is_flint(kGoldenPath));
       int calls_seen = 0;
       bool refused_second = false;
       for (size_t j = 0; j < ids.size(); ++j) {
@@ -1117,16 +1123,18 @@ DGPP_TEST(glm_tool_grammar_accepts_the_golden_turns_over_the_real_tokenizer) {
       // A stray EOS before the call is refused while the call is owed.
       dgpp::text::GrammarState owed(
           &vocab, golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kRequired, true, ""),
-          true);
+          !corpus_is_flint(kGoldenPath));
       require(!owed.allows(vocab.call_turn_eos()) && !owed.allows(154827),
               name + ": EOS refused while a call is owed");
       // A name outside the tools: refused at its first byte.
       dgpp::text::GrammarState wrong(
           &vocab,
           golden_tool_spec(tools, *tcs, dgpp::text::GrammarSpec::Mode::kNamed, true, first_name),
-          true);
-      owed.advance(vocab.markers().think_close.id);
-      wrong.advance(vocab.markers().think_close.id);
+          !corpus_is_flint(kGoldenPath));
+      if (!corpus_is_flint(kGoldenPath)) {  // the GLM prompt opened <think>; Flint's grammars start at the top
+        owed.advance(vocab.markers().think_close.id);
+        wrong.advance(vocab.markers().think_close.id);
+      }
       wrong.advance(vocab.markers().tool_call_open.id);
       const std::vector<int64_t> zebra = tok.encode("zebra_tool");
       require(!zebra.empty() && !wrong.allows(zebra[0]),

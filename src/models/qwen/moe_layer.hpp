@@ -28,7 +28,7 @@ namespace dgpp {
 // Device-visible views (the loader's QwenMoeResident wires them).
 struct QwenMoeWeights {
   const uint16_t* router = nullptr;            // bf16 [n_experts, hidden]
-  const uint16_t* shared_gate = nullptr;       // bf16 [hidden] (shared_expert_gate)
+  const uint16_t* shared_gate = nullptr;       // bf16 [hidden] (shared_expert_gate); null: weight 1 (Flint's ungated shared expert)
   const uint16_t* shared_gate_proj = nullptr;  // bf16 [S, hidden]
   const uint16_t* shared_up_proj = nullptr;    // bf16 [S, hidden]
   const uint16_t* shared_down_proj = nullptr;  // bf16 [hidden, S]
@@ -37,6 +37,12 @@ struct QwenMoeWeights {
   const GlmQuantMatrix* experts = nullptr;     // [n_experts * 3] gate, up, down (FP8 block form)
   const GlmFp4Matrix* experts_fp4 = nullptr;   // the NVFP4 form instead
   const GlmPackedMatrix* experts_packed = nullptr;  // the packed-int form (the AutoRound hybrid); exactly one of the three is set
+  // The per-projection routed form (2026-10-22, Flint): `experts` and
+  // `experts_fp4` both bound, the mask naming the NVFP4 projections
+  // (models/glm/moe.hpp). The sigmoid router's bias (SigmoidBias mode,
+  // Flint: a zero vector); null under SoftmaxTopk.
+  uint8_t routed_fp4_mask = 0;
+  const float* router_bias = nullptr;
   float act_scale_w13 = 0.0f, act_scale_w2 = 0.0f;  // W4A4 activation scales (0: dynamic)
   const float* act_scales_dev = nullptr;             // [2] on the device, from the layer image
   bool experts_weight_only = false;                  // W4A16_NVFP4 (the QAD export's draft experts): no W4A4

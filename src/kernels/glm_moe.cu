@@ -1910,6 +1910,112 @@ __global__ void moe_slot_gate_up_swiglu_fp4_kernel(
   }
 }
 
+// The per-projection form's gate/up pair (2026-10-22, docs/flint_plan.md
+// D2 — Flint's layer 12: gate fp8 / up NVFP4 / down fp8; its layer 37 is a
+// uniform fp4 pair over an fp8 down and takes the fp4 kernel above then
+// launch_moe_slot_down): routed-only tables where one of the pair is fp8
+// and the other NVFP4, `kGateFp4` naming which. A block runs the fp4
+// geometry (Geom<K>::rows_per_block rows, the fp4 projection's first pass
+// issued before the activations are staged, as the fp4 kernel's); each
+// warp's rows take the fp8 core one row at a time (fp8_gemv::row_dots<1>,
+// the fp8 slot kernel's per-row arithmetic — bitwise that kernel's dot)
+// into a per-row stash, then the fp4 core over the same rows
+// (warp_row_dots_issued, bitwise the fp4 kernel's), and the SwiGLU on
+// each owned row from the pair with the uniform kernels' rounding points.
+// The shared slot (j == top_k; n_shared 0: none), an fp8 expert on the
+// launch-arg matrices, runs the fp8 core on both projections as the fp4
+// kernel's shared branch does.
+template <int K, bool kGateFp4>
+__global__ void moe_slot_gate_up_swiglu_mixed_kernel(
+    const uint16_t* __restrict__ x, size_t x_stride, const int32_t* __restrict__ ids,
+    const int32_t* __restrict__ order, const MoeExpertView* __restrict__ views, int n_routed, int n_shared,
+    int k_shared, const uint8_t* __restrict__ sh_gate_payload, const float* __restrict__ sh_gate_scales,
+    const uint8_t* __restrict__ sh_up_payload, const float* __restrict__ sh_up_scales, uint16_t* __restrict__ act,
+    int act_stride, int slots, int top_k, float limit, int sh_rs, int sh_cs) {
+  dgpp_pdl_wait();
+  using G = fp4_gemv::Geom<K>;
+  constexpr int kGroup = fp4_gemv::kGroup;
+  extern __shared__ __align__(16) uint16_t sx[];
+  __shared__ float s_dot8[G::rows_per_block];
+  const int n0 = blockIdx.x * G::rows_per_block;
+  if (static_cast<int>(blockIdx.y) >= slots) return;
+  const int slot = logical_slot(order);
+  const int t = slot / (top_k + 1);
+  const int j = slot - t * (top_k + 1);
+  const bool shared = j == top_k;
+  const int n = shared ? n_shared : n_routed;
+  if (n0 >= n) return;
+  const int warp = threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  uint16_t* act_row = act + static_cast<size_t>(slot) * act_stride;
+  if (shared) {
+    const int k = k_shared;
+    fp8_gemv::stage_activations<1>(x + static_cast<size_t>(t) * x_stride, x_stride, k, sx);
+    __syncthreads();
+    const int scale_cols = (k + (1 << sh_cs) - 1) >> sh_cs;
+#pragma unroll 1
+    for (int i = 0; i < G::rows_per_warp; ++i) {
+      const int row = n0 + warp * G::rows_per_warp + i;
+      if (row >= n) break;
+      const size_t scale_row = static_cast<size_t>(row >> sh_rs) * scale_cols;
+      float g_acc[1], u_acc[1];
+      fp8_gemv::row_dots<1>(sh_gate_payload + static_cast<size_t>(row) * k, sh_gate_scales + scale_row, sx, k, lane,
+                            g_acc, sh_cs);
+      fp8_gemv::row_dots<1>(sh_up_payload + static_cast<size_t>(row) * k, sh_up_scales + scale_row, sx, k, lane,
+                            u_acc, sh_cs);
+      if (lane != 0) continue;
+      float g = bf16_bits_to_float(float_to_bf16_bits(g_acc[0]));
+      float u = bf16_bits_to_float(float_to_bf16_bits(u_acc[0]));
+      if (g > limit) g = limit;
+      u = fminf(fmaxf(u, -limit), limit);
+      const uint16_t tt = float_to_bf16_bits(g * sigmoidf_acc(g));
+      act_row[row] = float_to_bf16_bits(bf16_bits_to_float(tt) * u);
+    }
+    return;
+  }
+  const int base = ids[static_cast<size_t>(t) * top_k + j] * 3;
+  const MoeExpertView v4 = views[static_cast<size_t>(base) + (kGateFp4 ? 0 : 1)];
+  const MoeExpertView v8 = views[static_cast<size_t>(base) + (kGateFp4 ? 1 : 0)];
+  fp4_gemv::PassLoads<G::pass_chunks(0)> L0;
+  fp4_gemv::issue_pass<K, 0, G::pass_chunks(0), kGroup, kFp4SlotStreaming>(v4.payload, v4.fp4_scales, n0, n, L0);
+  fp8_gemv::stage_activations<1>(x + static_cast<size_t>(t) * x_stride, x_stride, K, sx);
+  __syncthreads();
+  // The fp8 projection's rows, one per pass; lane 0 stashes the dot.
+  {
+    const int scale_cols = (K + (1 << v8.scale_shift_cols) - 1) >> v8.scale_shift_cols;
+#pragma unroll 1
+    for (int i = 0; i < G::rows_per_warp; ++i) {
+      const int row = n0 + warp * G::rows_per_warp + i;
+      if (row >= n) break;
+      const size_t scale_row = static_cast<size_t>(row >> v8.scale_shift_rows) * scale_cols;
+      float d[1];
+      fp8_gemv::row_dots<1>(v8.payload + static_cast<size_t>(row) * K, v8.scales + scale_row, sx, K, lane, d,
+                            v8.scale_shift_cols);
+      if (lane == 0) s_dot8[row - n0] = d[0];
+    }
+  }
+  __syncwarp();  // the stash is the warp's own rows
+  float acc[fp4_gemv::kSteps][1];
+  fp4_gemv::warp_row_dots_issued<K, 1, kGroup, kFp4SlotStreaming>(L0, v4.payload, v4.fp4_scales, sx, n0, n, acc);
+  const float g4 = *v4.fp4_global;
+#pragma unroll
+  for (int st = 0; st < fp4_gemv::kSteps; ++st) {
+    bool mine = false;
+    const int row = fp4_gemv::owned_row<K>(n0, st, mine);
+    if (!mine || row >= n) continue;
+    // Each dot rounded to bf16 where its uniform kernel rounds it (the fp4
+    // one divided by its global first), then the swiglu, op for op.
+    const float d4 = bf16_bits_to_float(float_to_bf16_bits(__fdiv_rn(acc[st][0], g4)));
+    const float d8 = bf16_bits_to_float(float_to_bf16_bits(s_dot8[row - n0]));
+    float g = kGateFp4 ? d4 : d8;
+    float u = kGateFp4 ? d8 : d4;
+    if (g > limit) g = limit;
+    u = fminf(fmaxf(u, -limit), limit);
+    const uint16_t tt = float_to_bf16_bits(g * sigmoidf_acc(g));
+    act_row[row] = float_to_bf16_bits(bf16_bits_to_float(tt) * u);
+  }
+}
+
 template <int K, bool kSharedFp4, int kGroup = fp4_gemv::kGroup>
 __global__ void moe_slot_down_fp4_kernel(
     const uint16_t* __restrict__ act, size_t act_stride,
@@ -4714,6 +4820,48 @@ void launch_moe_slot_gate_up_swiglu_fp4(
     fp4_gemv::dispatch_k_mx(k_routed, [&](auto kc) { go(kc, std::integral_constant<int, fp4_gemv::kMxGroup>{}); });
   else
     fp4_gemv::dispatch_k(k_routed, [&](auto kc) { go(kc, std::integral_constant<int, fp4_gemv::kGroup>{}); });
+}
+
+void launch_moe_slot_gate_up_swiglu_mixed(const uint16_t* x, size_t x_stride, const int32_t* ids,
+                                          const int32_t* order, const MoeExpertView* views, int n_routed,
+                                          int k_routed, int n_shared, int k_shared, const uint8_t* sh_gate_payload,
+                                          const float* sh_gate_scales, const uint8_t* sh_up_payload,
+                                          const float* sh_up_scales, uint16_t* act, int act_stride, int slots,
+                                          int top_k, float limit, bool gate_fp4, int fp4_group, cudaStream_t stream,
+                                          int sh_rs, int sh_cs) {
+  if (slots <= 0) return;
+  // The NVFP4 + fp8 mix only (the Flint export); an MXFP4 mix has no
+  // checkpoint and no instantiation.
+  if (fp4_group != fp4_gemv::kGroup)
+    throw std::invalid_argument("moe_slot_gate_up_mixed: the per-projection form mixes fp8 with NVFP4 (group 16)");
+  check_fp4_slot_args(x, ids, views, act, n_routed, k_routed, n_shared, k_shared, /*shared_view_base=*/-1,
+                      "moe_slot_gate_up_mixed", fp4_group);
+  if (k_routed % fp8_gemv::kChunkBytes != 0)
+    throw std::invalid_argument("moe_slot_gate_up_mixed: k must be a multiple of 16 (the fp8 core)");
+  if (n_shared > 0 &&
+      (!sh_gate_payload || !sh_gate_scales || !sh_up_payload || !sh_up_scales ||
+       !fp8_gemv::shape_ok(sh_gate_payload, 1, k_shared) || !fp8_gemv::shape_ok(sh_up_payload, 1, k_shared)))
+    throw std::invalid_argument("moe_slot_gate_up_mixed: shared payloads must be 16B-aligned with k % 16 == 0");
+  if (act_stride < n_routed || act_stride < n_shared)
+    throw std::invalid_argument("moe_slot_gate_up_mixed: act_stride below n");
+  const int max_n = n_routed > n_shared ? n_routed : n_shared;
+  const int max_k = k_routed > k_shared ? k_routed : k_shared;
+  fp4_gemv::dispatch_k(k_routed, [&](auto kc) {
+    constexpr int K = decltype(kc)::value;
+    constexpr int rpb = fp4_gemv::Geom<K>::rows_per_block;
+    const dim3 grid((max_n + rpb - 1) / rpb, static_cast<unsigned>(slots));
+    if (gate_fp4)
+      moe_slot_gate_up_swiglu_mixed_kernel<K, true>
+          <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(1, max_k), stream>>>(
+              x, x_stride, ids, order, views, n_routed, n_shared, k_shared, sh_gate_payload, sh_gate_scales,
+              sh_up_payload, sh_up_scales, act, act_stride, slots, top_k, limit, sh_rs, sh_cs);
+    else
+      moe_slot_gate_up_swiglu_mixed_kernel<K, false>
+          <<<grid, fp8_gemv::kThreads, fp8_gemv::smem_bytes(1, max_k), stream>>>(
+              x, x_stride, ids, order, views, n_routed, n_shared, k_shared, sh_gate_payload, sh_gate_scales,
+              sh_up_payload, sh_up_scales, act, act_stride, slots, top_k, limit, sh_rs, sh_cs);
+    DGPP_CUDA_OK(cudaGetLastError());
+  });
 }
 
 void launch_moe_slot_down_fp4(const uint16_t* act, size_t act_stride,

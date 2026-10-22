@@ -5,6 +5,30 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **Flint** (`HawkBearPig/flint-FP8-NVFP4`, 2026-10-22): a new family on
+  the shared session core, served as shipped on one, two or four Sparks
+  (`deploy/cluster_flint_fp8-nvfp4_w{1,2,4}.example.json`). The MiMo
+  attention kernels became the sink-attention family (`kernels/sink_attn`)
+  instantiated per head geometry — MiMo's 192/64 unchanged, Flint's
+  128-wide heads with the per-head q / k RMSNorm, RoPE over the whole head
+  or none, and the 513 window. The MoE executor takes the export's
+  per-projection expert formats: a layer binds the fp8 and NVFP4 tables
+  together with a mask, the grouped chain picks the core per launch and
+  the decode slot path runs a mixed gate/up kernel whose fp8 and fp4 dots
+  are each bitwise their uniform kernel's. `QwenMoeLayer` serves the
+  ungated BF16 shared expert (a null gate is weight 1) behind a sigmoid
+  router; the fused add + norm gained its one-rounding form. The
+  tokenizer's three-stage scanner learned the o200k main pattern over the
+  case classes (Ll and Lu/Lt tables); the chat-template engine block
+  `set … endset` and the `\x` / `\u` string escapes; a positive
+  reasoning effort on a template without a control is a no-op. Every
+  layer within 7 bf16 ulps of the numpy reference teacher-forced, the
+  final hidden bitwise; the fixture ladder (loader at worlds 1/2/4, the
+  session surface, loopback TP and engines) and the real checkpoint's
+  tokenizer / template goldens pass. See [docs/flint_plan.md](docs/flint_plan.md)
+  and the [model card](docs/model_cards/Flint-FP8-NVFP4.md); the
+  campaign rows are in [docs/benchmarks.md](docs/benchmarks.md).
+
 - **FP4-Local Qwen3.8-Flash-Next export** (`nvidia/Qwen3.8-Flash-Next-FP4-Local`).
   Load CSF-wrapped NVFP4 expert scales losslessly, discover nested shards
   through their index, and validate quantized vision matrices before widening

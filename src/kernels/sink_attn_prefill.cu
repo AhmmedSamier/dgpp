@@ -1,16 +1,18 @@
 #include <cmath>
 #include "kernels/pdl.cuh"
 #include <stdexcept>
+#include <string>
 
 #include <cuda_bf16.h>
 
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "kernels/latent_format.hpp"
-#include "kernels/mimo_attn.hpp"
+#include "kernels/sink_attn.hpp"
 
 // The query-tiled prefill attention (2026-09-22, docs/mimo_v26_flash_plan.md
-// §7.2). The split-KV kernel runs one block per (query row, kv head) over
+// §7.2; a template over the qk width since 2026-10-22, docs/flint_plan.md
+// D3). The split-KV kernel runs one block per (query row, kv head) over
 // the row's whole visible range: every K/V tile is staged — and under the
 // fp8 cache dequantized — once per QUERY ROW, and the scores and the PV
 // products run on scalar fp32 FMAs: an O(T²) re-read plus O(T²) scalar
@@ -49,24 +51,29 @@
 // so the B fragments of PV are 32-bit loads too. Both strides are
 // bank-conflict-free for the fragment access pattern (see the constants).
 namespace dgpp {
-namespace {
+namespace sink_prefill {
 
-constexpr int DK = kMimoQkDim;
-constexpr int DV = kMimoVDim;
-constexpr int kTile = kMimoAttnTile;
+constexpr int DV = kSinkAttnVDim;
+constexpr int kTile = kSinkAttnTile;
 constexpr int kWarps = 4;
 constexpr int kThreads = kWarps * 32;
 constexpr int kQueryVecs = kWarps * 16;  // 64 query vectors per block
-constexpr int kQStride = DK + 8;         // 200 bf16 = 100 words: (100 g + t) mod 32 distinct for g < 8, t < 4
-constexpr int kKStride = DK + 8;         // the K tile's rows, the same argument
 constexpr int kVtStride = kTile + 8;     // 40 bf16 = 20 words: (20 g + t) mod 32 distinct for g < 8, t < 4
 constexpr int kNTilesS = kTile / 8;      // 4 n-tiles of 8 keys
-constexpr int kKStepsS = DK / 16;        // 12 k-steps over the qk dims
 constexpr int kNTilesO = DV / 8;         // 16 n-tiles of 8 v dims
 constexpr int kKStepsO = kTile / 16;     // 2 k-steps over the tile's keys
 
-static_assert(DK % 16 == 0 && DV % 8 == 0 && kTile % 16 == 0, "the mma tiling");
-static_assert((kQStride * 2) % 16 == 0 && (kKStride * 2) % 16 == 0, "16-byte tile rows");
+// The qk-width-dependent strides: DK + 8 bf16 per staged Q / K row — at
+// 192 200 bf16 = 100 words, at 128 136 = 68 words: (words g + t) mod 32
+// distinct for g < 8, t < 4 either way — and DK / 16 k-steps of S.
+template <int DK>
+struct PGeo {
+  static constexpr int kQStride = DK + 8;
+  static constexpr int kKStride = DK + 8;
+  static constexpr int kKStepsS = DK / 16;
+  static_assert(DK % 16 == 0 && DV % 8 == 0 && kTile % 16 == 0, "the mma tiling");
+  static_assert((kQStride * 2) % 16 == 0 && (kKStride * 2) % 16 == 0, "16-byte tile rows");
+};
 
 __device__ __forceinline__ void mma_bf16_16816(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
   asm volatile(
@@ -95,8 +102,11 @@ __device__ __forceinline__ void decode_fp8_piece(const uint4 codes, float scale,
   }
 }
 
-template <bool kFp8>
-__global__ void __launch_bounds__(kThreads) attn_prefill_kernel(MimoAttnPrefillArgs a) {
+template <int DK, bool kFp8>
+__global__ void __launch_bounds__(kThreads) attn_prefill_kernel(SinkAttnPrefillArgs a) {
+  constexpr int kQStride = PGeo<DK>::kQStride;
+  constexpr int kKStride = PGeo<DK>::kKStride;
+  constexpr int kKStepsS = PGeo<DK>::kKStepsS;
   dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t smem[];
   uint16_t* qt = smem;                        // [kQueryVecs][kQStride]
@@ -342,48 +352,65 @@ __global__ void __launch_bounds__(kThreads) attn_prefill_kernel(MimoAttnPrefillA
   }
 }
 
-}  // namespace
-
-size_t mimo_attn_prefill_smem_bytes() {
-  return static_cast<size_t>(kQueryVecs) * kQStride * 2 + static_cast<size_t>(kTile) * kKStride * 2 +
+template <int DK>
+size_t smem_bytes() {
+  return static_cast<size_t>(kQueryVecs) * PGeo<DK>::kQStride * 2 + static_cast<size_t>(kTile) * PGeo<DK>::kKStride * 2 +
          static_cast<size_t>(DV) * kVtStride * 2;
 }
 
-int mimo_attn_prefill_rows_per_block(int local_heads, int kv_heads) {
-  const int hpk = local_heads / kv_heads;
-  return kQueryVecs / hpk;
-}
-
-void mimo_attn_prefill(const MimoAttnPrefillArgs& a, cudaStream_t stream) {
+template <int DK>
+void launch(const SinkAttnPrefillArgs& a, cudaStream_t stream) {
   if (a.rows <= 0) return;
   if (!a.q || !a.k_cache || !a.v_cache || !a.req_ids || !a.pos || !a.block_tables || !a.out)
-    throw std::invalid_argument("mimo_attn_prefill: null pointer");
+    throw std::invalid_argument("sink_attn_prefill: null pointer");
   if ((a.k_scale == nullptr) != (a.v_scale == nullptr))
-    throw std::invalid_argument("mimo_attn_prefill: the fp8 cache's K and V scale planes come together");
+    throw std::invalid_argument("sink_attn_prefill: the fp8 cache's K and V scale planes come together");
   if (a.local_heads <= 0 || a.kv_heads <= 0 || a.local_heads % a.kv_heads != 0)
-    throw std::invalid_argument("mimo_attn_prefill: heads");
+    throw std::invalid_argument("sink_attn_prefill: heads");
   const int hpk = a.local_heads / a.kv_heads;
   if (kQueryVecs % hpk != 0 || hpk > kQueryVecs)
-    throw std::invalid_argument("mimo_attn_prefill: the query heads per kv head must divide 64");
+    throw std::invalid_argument("sink_attn_prefill: the query heads per kv head must divide 64");
   if (a.block_tokens <= 0 || a.block_tokens % kTile != 0)
-    throw std::invalid_argument("mimo_attn_prefill: block_tokens must be a multiple of the 32-token tile");
-  if (a.window < 0) throw std::invalid_argument("mimo_attn_prefill: window");
-  if ((a.q_stride * 2) % 16 != 0) throw std::invalid_argument("mimo_attn_prefill: q rows must be 16-byte aligned");
-  const size_t smem = mimo_attn_prefill_smem_bytes();
+    throw std::invalid_argument("sink_attn_prefill: block_tokens must be a multiple of the 32-token tile");
+  if (a.window < 0) throw std::invalid_argument("sink_attn_prefill: window");
+  if ((a.q_stride * 2) % 16 != 0) throw std::invalid_argument("sink_attn_prefill: q rows must be 16-byte aligned");
+  const size_t smem = smem_bytes<DK>();
   static const bool attr_ok = [smem] {
-    return cudaFuncSetAttribute(attn_prefill_kernel<false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+    return cudaFuncSetAttribute(attn_prefill_kernel<DK, false>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                 static_cast<int>(smem)) == cudaSuccess &&
-           cudaFuncSetAttribute(attn_prefill_kernel<true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+           cudaFuncSetAttribute(attn_prefill_kernel<DK, true>, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                 static_cast<int>(smem)) == cudaSuccess;
   }();
-  if (!attr_ok) throw std::runtime_error("mimo_attn_prefill: the shared-memory opt-in was refused");
+  if (!attr_ok) throw std::runtime_error("sink_attn_prefill: the shared-memory opt-in was refused");
   const int rpb = kQueryVecs / hpk;
   const dim3 grid(static_cast<unsigned>((a.rows + rpb - 1) / rpb), static_cast<unsigned>(a.kv_heads));
   if (a.k_scale != nullptr)
-    attn_prefill_kernel<true><<<grid, kThreads, smem, stream>>>(a);
+    attn_prefill_kernel<DK, true><<<grid, kThreads, smem, stream>>>(a);
   else
-    attn_prefill_kernel<false><<<grid, kThreads, smem, stream>>>(a);
+    attn_prefill_kernel<DK, false><<<grid, kThreads, smem, stream>>>(a);
   DGPP_CUDA_OK(cudaGetLastError());
+}
+
+}  // namespace sink_prefill
+
+size_t sink_attn_prefill_smem_bytes(int qk_dim) {
+  if (qk_dim == 192) return sink_prefill::smem_bytes<192>();
+  if (qk_dim == 128) return sink_prefill::smem_bytes<128>();
+  throw std::invalid_argument("sink_attn_prefill: qk width " + std::to_string(qk_dim) + " is not compiled (192 or 128)");
+}
+
+int sink_attn_prefill_rows_per_block(int local_heads, int kv_heads) {
+  const int hpk = local_heads / kv_heads;
+  return sink_prefill::kQueryVecs / hpk;
+}
+
+void sink_attn_prefill(int qk_dim, const SinkAttnPrefillArgs& a, cudaStream_t stream) {
+  if (qk_dim == 192)
+    sink_prefill::launch<192>(a, stream);
+  else if (qk_dim == 128)
+    sink_prefill::launch<128>(a, stream);
+  else
+    throw std::invalid_argument("sink_attn_prefill: qk width " + std::to_string(qk_dim) + " is not compiled (192 or 128)");
 }
 
 }  // namespace dgpp

@@ -37,6 +37,7 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
 | DeepSeek-V4.1-Flash-1017 | [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json) (the V4.1-Flash engine path on the re-trained weights; the indexer budget is a deployment key, `engine.index_topk`, shipped at the checkpoint's 512 with 2048 measured; [card](docs/model_cards/DeepSeek-V4.1-Flash-1017.md)) |
 | MiMo-V2.6-Flash | [XiaomiMiMo/MiMo-V2.6-Flash-RL](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL) | 2, 4 | [Two nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) |
+| Flint | [HawkBearPig/flint-FP8-NVFP4](https://huggingface.co/HawkBearPig/flint-FP8-NVFP4) | 1, 2, 4 | [One node](deploy/cluster_flint_fp8-nvfp4_w1.example.json), [two nodes](deploy/cluster_flint_fp8-nvfp4_w2.example.json) and [four nodes](deploy/cluster_flint_fp8-nvfp4_w4.example.json) |
 | DeepSeek-V4-Flash | [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | 2, 4 | [Two nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w4.example.json) |
 | Qwen3.8-27B | [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8) | 1, 2, 4 | [One node](deploy/cluster_qwen3.8-27b_fp8_w1.example.json) , [two nodes](deploy/cluster_qwen3.8-27b_fp8_w2.example.json) and [four nodes](deploy/cluster_qwen3.8-27b_fp8_w4.example.json) (the DFlash2 block drafter on every world) |
 | Qwen3.8-27B NVFP4 | [unsloth/Qwen3.8-27B-NVFP4](https://huggingface.co/unsloth/Qwen3.8-27B-NVFP4) | 1, 2, 4 | [One node](deploy/cluster_qwen3.8-27b_nvfp4_w1.example.json) , [two nodes](deploy/cluster_qwen3.8-27b_nvfp4_w2.example.json) and [four nodes](deploy/cluster_qwen3.8-27b_nvfp4_w4.example.json) (the mixed release: NVFP4 MLPs, channel-FP8 attention and head; [card](docs/model_cards/Qwen3.8-27B-NVFP4.md)) |
@@ -90,6 +91,20 @@ vectors). See the [model card](docs/model_cards/MiMo-V2.6-Flash.md) and
 [plan](docs/mimo_v26_flash_plan.md). Native blocks 0/1/2 MTP3 and prefill
 work reductions are opt-in; see [MiMo operations](docs/operations.md#mimo-native-mtp-and-prefill-options)
 for settings, memory implications and measured workload tradeoffs.
+
+Flint is served as shipped — the routed experts in the export's
+per-projection FP8 / NVFP4 formats (FP8 block-128 layers, NVFP4 layers,
+and two layers that mix the two across `gate_proj` / `up_proj` /
+`down_proj`), every other tensor BF16 (the projections, the dense and
+shared MLPs and the head resident in their lossless 12-bit form under
+`engine.bf16_weights: "bf12"`) — with its hybrid sliding-window (513,
+sink-biased, RoPE over the whole head) / full-attention (no RoPE)
+GQA, the per-head q / k norms, the ungated BF16 shared expert and the
+checkpoint's own chat template and `<tool_call>` format. The family has
+no draft head: the templates keep `engine.mtp` off. The K/V cache is
+BF16 (`--kv-dtype fp8` selects the fp8 row form). See the
+[model card](docs/model_cards/Flint-FP8-NVFP4.md) and
+[plan](docs/flint_plan.md).
 
 DeepSeek-V4-Flash (the 0731 release) is served as shipped — MXFP4 routed
 experts, FP8 block-128 attention projections and shared expert, BF16

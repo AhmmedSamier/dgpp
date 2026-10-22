@@ -210,9 +210,9 @@ add_library(dgpp_kernels STATIC
   src/kernels/qsa_prefill.cu
   src/kernels/full_attn.cu
   src/kernels/glm4_attn.cu
-  src/kernels/mimo_attn.cu
+  src/kernels/sink_attn.cu
   src/kernels/mimo_mtp_history.cu
-  src/kernels/mimo_attn_prefill.cu
+  src/kernels/sink_attn_prefill.cu
   src/kernels/add_rmsnorm.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt CUDA::cuda_driver dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
@@ -317,6 +317,16 @@ target_include_directories(dgpp_models_mimo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(dgpp_models_mimo PUBLIC dgpp_loaders dgpp_common)
 dgpp_set_common(dgpp_models_mimo)
 
+# Flint (2026-10-22, docs/flint_plan.md): the host-side config, binding
+# table and attention oracle.
+add_library(dgpp_models_flint STATIC
+  src/models/flint/config.cpp
+  src/models/flint/binding.cpp
+  src/models/flint/attn_reference.cpp)
+target_include_directories(dgpp_models_flint PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_flint PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_flint)
+
 # The MiMo resident loader (loaders/resident_stream.hpp + the family's builders).
 add_library(dgpp_models_mimo_loader STATIC
   src/models/mimo/loader.cpp)
@@ -324,16 +334,42 @@ target_include_directories(dgpp_models_mimo_loader PUBLIC ${CMAKE_CURRENT_SOURCE
 target_link_libraries(dgpp_models_mimo_loader PUBLIC dgpp_models_mimo dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_mimo_loader)
 
+# The Flint loader (docs/flint_plan.md §2): the shared resident stream over
+# the family's bindings and TP geometry.
+add_library(dgpp_models_flint_loader STATIC
+  src/models/flint/loader.cpp)
+target_include_directories(dgpp_models_flint_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_flint_loader PUBLIC dgpp_models_flint dgpp_loaders CUDA::cudart dgpp_device_ranges)
+dgpp_set_common(dgpp_models_flint_loader)
+
 # The MiMo layer objects and model (the paged K/V pool first; the layers
 # and the model follow).
+# The paged K/V pool the MiMo and Flint families share (bf16 or fp8 rows
+# per (token, kv head) at the family's head widths).
+add_library(dgpp_models_mimo_kv STATIC
+  src/models/mimo/kv_pool.cpp)
+target_include_directories(dgpp_models_mimo_kv PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_mimo_kv PUBLIC dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_mimo_kv)
+
 add_library(dgpp_models_mimo_layers STATIC
-  src/models/mimo/kv_pool.cpp
   src/models/mimo/layers.cpp
   src/models/mimo/forward.cpp)
 target_include_directories(dgpp_models_mimo_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_mimo_layers
-  PUBLIC dgpp_models_mimo dgpp_models_mimo_loader dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
+  PUBLIC dgpp_models_mimo dgpp_models_mimo_loader dgpp_models_mimo_kv dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_mimo_layers)
+
+# The Flint layers and model (docs/flint_plan.md §3): the sink-attention
+# kernels at qk 128, the BF16 dense MLP, QwenMoeLayer's routed chain and
+# shared-expert tail, the MiMo paged pool at 128 / 128.
+add_library(dgpp_models_flint_layers STATIC
+  src/models/flint/layers.cpp
+  src/models/flint/forward.cpp)
+target_include_directories(dgpp_models_flint_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_flint_layers
+  PUBLIC dgpp_models_flint dgpp_models_flint_loader dgpp_models_mimo_kv dgpp_models_qwen_moe dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_flint_layers)
 
 # The full GLM-5.3 model on the session core (docs/glm53_plan.md G5).
 add_library(dgpp_models_glm_dsa_layers STATIC
@@ -454,9 +490,16 @@ target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loade
 dgpp_set_common(dgpp_models_qwen_loader)
 
 # The Qwen layers (Q3): the MoE on the shared MoE layer, with its oracle.
-add_library(dgpp_models_qwen_layers STATIC
+# The Qwen MoE layer (the routed chain + the BF16 / fp8 shared-expert
+# tail), on its own so the Flint family links it without the Qwen stack.
+add_library(dgpp_models_qwen_moe STATIC
   src/models/qwen/moe_layer.cpp
-  src/models/qwen/moe_reference.cpp
+  src/models/qwen/moe_reference.cpp)
+target_include_directories(dgpp_models_qwen_moe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_qwen_moe PUBLIC dgpp_models_qwen dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_qwen_moe)
+
+add_library(dgpp_models_qwen_layers STATIC
   src/models/qwen/layers.cpp
   src/models/qwen/kv_pool.cpp
   src/models/qwen/forward.cpp
@@ -464,7 +507,7 @@ add_library(dgpp_models_qwen_layers STATIC
   src/models/qwen/model35_kernels.cu)
 target_include_directories(dgpp_models_qwen_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_qwen_layers
-  PUBLIC dgpp_models_qwen dgpp_models_qwen_loader dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
+  PUBLIC dgpp_models_qwen dgpp_models_qwen_loader dgpp_models_qwen_moe dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_qwen_layers)
 
 # The Qwen forward (Q4): fixture -> smoke; the python reference chain follows.
@@ -826,6 +869,7 @@ if(DGPP_ENABLE_IBV)
   add_executable(dgpp_serve_app apps/dgpp_serve.cpp)
   target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers dgpp_models_glm_dsa_layers
                                              dgpp_models_dsv41_layers dgpp_models_dsv4_layers dgpp_models_mimo_layers
+                                             dgpp_models_flint_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)
@@ -922,6 +966,8 @@ add_executable(unit_tests
   tests/unit/dsv4_binding_test.cpp
   tests/unit/mimo_config_test.cpp
   tests/unit/mimo_binding_test.cpp
+  tests/unit/flint_config_test.cpp
+  tests/unit/flint_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   tests/unit/verify_schedule_test.cpp
   tests/unit/lookup_draft_test.cpp
@@ -930,7 +976,7 @@ target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_models_qwen dgpp_models_qwen_loader
                                         dgpp_models_glm4
-                                        dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo
+                                        dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo dgpp_models_flint
                                         dgpp_rope_scaling
                                         dgpp_net dgpp_serve Threads::Threads)
 target_compile_definitions(unit_tests PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
@@ -1014,6 +1060,9 @@ set_tests_properties(glm_dsa_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME mimo_tokenizer_test
   COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mimo_tokenizer_goldens.jsonl)
 set_tests_properties(mimo_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME flint_tokenizer_test
+  COMMAND tokenizer_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/flint_tokenizer_goldens.jsonl)
+set_tests_properties(flint_tokenizer_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 3b: the chat-template differential gate (host). Skips with rc 2
 # when the model cache is absent, same as above.
@@ -1036,6 +1085,9 @@ set_tests_properties(glm_dsa_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME mimo_chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/mimo_chat_template_goldens.jsonl)
 set_tests_properties(mimo_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+add_test(NAME flint_chat_template_test
+  COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/flint_chat_template_goldens.jsonl)
+set_tests_properties(flint_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # M6 Stage 4: the serving capstone — HTTP/SSE over epoll + the OpenAI
 # generation service (host-only; the engine adapters live in the apps,
@@ -1543,6 +1595,12 @@ target_link_libraries(mimo_attn_test PRIVATE dgpp_models_mimo dgpp_kernels CUDA:
 dgpp_set_common(mimo_attn_test)
 add_test(NAME mimo_attn_test COMMAND mimo_attn_test)
 
+add_executable(flint_attn_test tests/cuda/flint_attn_test.cu)
+target_include_directories(flint_attn_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(flint_attn_test PRIVATE dgpp_models_flint dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_attn_test)
+add_test(NAME flint_attn_test COMMAND flint_attn_test)
+
 add_executable(add_rmsnorm_test tests/cuda/add_rmsnorm_test.cu)
 target_include_directories(add_rmsnorm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(add_rmsnorm_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
@@ -1617,6 +1675,43 @@ add_test(NAME mimo_forward_test
   COMMAND mimo_forward_test --checkpoint-dir ${MIMO_FORWARD_FIXTURE}
           --dump-file ${CMAKE_CURRENT_BINARY_DIR}/mimo_teacher_ref.mdump)
 set_tests_properties(mimo_forward_test PROPERTIES DEPENDS mimo_forward_generate_teacher)
+
+# The Flint loader (docs/flint_plan.md G2) and forward (G5): fixture ->
+# smoke; the python reference end to end (relaxed) -> teacher-forced (strict).
+add_executable(flint_loader_test tests/cuda/flint_loader_test.cpp)
+target_include_directories(flint_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(flint_loader_test PRIVATE dgpp_models_flint_loader dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_loader_test)
+add_test(NAME flint_loader_test COMMAND flint_loader_test)
+
+add_executable(flint_forward_test tests/cuda/flint_forward_test.cpp)
+target_include_directories(flint_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(flint_forward_test PRIVATE dgpp_models_flint_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_forward_test)
+set(FLINT_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/flint_forward_fixture)
+add_test(NAME flint_forward_fixture COMMAND flint_forward_test --write-fixture ${FLINT_FORWARD_FIXTURE})
+add_test(NAME flint_forward_smoke COMMAND flint_forward_test --smoke ${FLINT_FORWARD_FIXTURE})
+set_tests_properties(flint_forward_smoke PROPERTIES DEPENDS flint_forward_fixture)
+add_test(NAME flint_forward_generate
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/flint_reference_dump.py
+          gen-pure --checkpoint-dir ${FLINT_FORWARD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/flint_pure_ref.fdump)
+set_tests_properties(flint_forward_generate PROPERTIES DEPENDS flint_forward_fixture)
+add_test(NAME flint_forward_test_e2e
+  COMMAND ${CMAKE_COMMAND} -E env DGPP_FLINT_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/flint_engine_states.bin
+          $<TARGET_FILE:flint_forward_test> --checkpoint-dir ${FLINT_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/flint_pure_ref.fdump --relaxed)
+set_tests_properties(flint_forward_test_e2e PROPERTIES DEPENDS flint_forward_generate)
+add_test(NAME flint_forward_generate_teacher
+  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/flint_reference_dump.py
+          gen-pure --checkpoint-dir ${FLINT_FORWARD_FIXTURE}
+          --out ${CMAKE_CURRENT_BINARY_DIR}/flint_teacher_ref.fdump
+          --teacher ${CMAKE_CURRENT_BINARY_DIR}/flint_engine_states.bin)
+set_tests_properties(flint_forward_generate_teacher PROPERTIES DEPENDS flint_forward_test_e2e)
+add_test(NAME flint_forward_test
+  COMMAND flint_forward_test --checkpoint-dir ${FLINT_FORWARD_FIXTURE}
+          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/flint_teacher_ref.fdump)
+set_tests_properties(flint_forward_test PROPERTIES DEPENDS flint_forward_generate_teacher)
 
 # The full GLM-5.3 forward (docs/glm53_plan.md G5): fixture -> smoke; the
 # python reference -> the dump parity.
@@ -1790,6 +1885,28 @@ if(TEST mimo_forward_fixture)
   set_tests_properties(mimo_decode_test PROPERTIES DEPENDS mimo_forward_fixture)
 endif()
 
+# The Flint session surface (docs/flint_plan.md G4), the TP forwards on
+# loopback worlds 2 and 4 (G5; ports 29964, 29965) and the engines on a
+# loopback world of 2 (G6; port 29969).
+add_executable(flint_decode_test tests/cuda/flint_decode_test.cpp)
+target_include_directories(flint_decode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(flint_decode_test PRIVATE dgpp_models_flint_layers dgpp_models_glm_loader CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_decode_test)
+add_test(NAME flint_decode_test COMMAND flint_decode_test --fixture ${FLINT_FORWARD_FIXTURE})
+if(TEST flint_forward_fixture)
+  set_tests_properties(flint_decode_test PROPERTIES DEPENDS flint_forward_fixture)
+endif()
+add_executable(flint_tp_test tests/cuda/flint_tp_test.cpp)
+target_include_directories(flint_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(flint_tp_test PRIVATE dgpp_models_flint_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_tp_test)
+add_test(NAME flint_tp_test COMMAND flint_tp_test)
+add_executable(flint_engine_test tests/cuda/flint_engine_test.cpp)
+target_include_directories(flint_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(flint_engine_test PRIVATE dgpp_models_flint_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_engine_test)
+add_test(NAME flint_engine_test COMMAND flint_engine_test)
+
 # The MiMo TP forwards: loopback worlds 2 and 4 vs world 1 (ports 29962, 29963).
 add_executable(mimo_tp_test tests/cuda/mimo_tp_test.cpp)
 target_include_directories(mimo_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -1817,6 +1934,10 @@ dgpp_set_common(glm4_load_check)
 add_executable(mimo_load_check apps/mimo_load_check.cpp)
 target_link_libraries(mimo_load_check PRIVATE dgpp_models_mimo_loader dgpp_loaders CUDA::cudart Threads::Threads)
 dgpp_set_common(mimo_load_check)
+
+add_executable(flint_load_check apps/flint_load_check.cpp)
+target_link_libraries(flint_load_check PRIVATE dgpp_models_flint_loader dgpp_loaders CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_load_check)
 
 add_executable(glm_dsa_loader_test tests/cuda/glm_dsa_loader_test.cpp)
 target_include_directories(glm_dsa_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -1904,6 +2025,10 @@ dgpp_set_common(glm4_forward_check)
 add_executable(mimo_forward_check apps/mimo_forward_check.cpp)
 target_link_libraries(mimo_forward_check PRIVATE dgpp_models_mimo_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(mimo_forward_check)
+
+add_executable(flint_forward_check apps/flint_forward_check.cpp)
+target_link_libraries(flint_forward_check PRIVATE dgpp_models_flint_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(flint_forward_check)
 
 add_executable(qwen_load_check apps/qwen_load_check.cpp)
 target_link_libraries(qwen_load_check PRIVATE dgpp_models_qwen_loader dgpp_loaders CUDA::cudart Threads::Threads)
@@ -2458,18 +2583,20 @@ if(TARGET dgpp_serve_app)
 endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
-  dsv4_tokenizer_test dsv4_prompt_test glm_dsa_tokenizer_test mimo_tokenizer_test
-  glm_dsa_chat_template_test mimo_chat_template_test
+  dsv4_tokenizer_test dsv4_prompt_test glm_dsa_tokenizer_test mimo_tokenizer_test flint_tokenizer_test
+  glm_dsa_chat_template_test mimo_chat_template_test flint_chat_template_test
   PROPERTIES LABELS "host;checkpoint")
 foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
     glm4_forward_generate mimo_forward_fixture mimo_forward_generate mimo_forward_generate_teacher
+    flint_forward_fixture flint_forward_generate flint_forward_generate_teacher
     glm_forward_fixture glm_forward_generate dsa_dump_generate kda_dump_generate)
   set_tests_properties(${_test} PROPERTIES LABELS "fixture")
 endforeach()
 if(DGPP_ENABLE_IBV)
   set_tests_properties(bus_test bus_selftest glm_tp_test glm4_tp_test glm4_engine_test
     qwen_tp_test qwen_engine_test qwen_engine_fp8_head_4 qwen_engine_fp8_head_256 dsv41_tp_test dsv41_engine_test
-    dsv4_tp_test dsv4_engine_test mimo_tp_test mimo_engine_test PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
+    dsv4_tp_test dsv4_engine_test mimo_tp_test mimo_engine_test flint_tp_test flint_engine_test
+    PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
   set_tests_properties(nic_regress_selftest PROPERTIES LABELS "gpu;rdma" RUN_SERIAL TRUE)
 endif()
 set_tests_properties(qwen_engine_row_independent qwen_engine_bf12

@@ -135,6 +135,7 @@ its node.
 | `cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash as shipped, four nodes, six request slots, DSpark depth 4 with the scheduled verify depth, the bounded prefill, 128K context |
 | `cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json` | DeepSeek-V4.1-Flash-1017 (the refined weights, the same architecture) as shipped, the V4.1-Flash shape; the indexer budget is a key (`engine.index_topk`, the checkpoint's 512 as shipped, 2048 priced in the card) |
 | `cluster_mimo-v2.6-flash_mxfp4-fp8_w{4,2}.example.json` | MiMo-V2.6-Flash as shipped (MXFP4 experts, fp8 dense, the BF16 matrices in their 12-bit form), four nodes with a 128K BF16 K/V pool or two nodes with a 256K K/V pool in the fp8 row form (`kv_dtype`), four request slots, MTP depth 1 |
+| `cluster_flint_fp8-nvfp4_w{1,2,4}.example.json` | Flint as shipped (the routed experts in the export's per-projection FP8 / NVFP4 formats, every BF16 matrix the GEMM interface serves in its 12-bit form), one, two or four nodes, a 512K BF16 K/V pool, eight request slots, no draft head (`mtp` off) |
 
 One template per model, quant and world (2026-09-14): the modes a template
 does not name are knobs — `--no-mtp` for the plain T=1 world, `--mtp-depth N`,
@@ -161,7 +162,7 @@ Qwen3.8-Flash-Next's FP8 checkpoint (where both values keep both forms resident)
 `--bf16-weights checkpoint` turns it off. Resident images are shared by all
 three values: switching never rebuilds them.
 
-`kv_dtype` affects GLM-5.3's latent cache, MiMo's K/V cache and, on the
+`kv_dtype` affects GLM-5.3's latent cache, MiMo's and Flint's K/V caches and, on the
 Qwen3.8-27B NVFP4 mixed release, the Qwen3.5 K/V cache (`fp8`: the
 release's shipped per-layer `k_scale` / `v_scale`; `prefill_attention`
 then picks the attention's arithmetic over it, bf16 or fp8). Qwen3.8-Flash-Next
