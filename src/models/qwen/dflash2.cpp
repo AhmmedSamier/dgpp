@@ -216,6 +216,28 @@ void DFlash2Config::validate_against(const Qwen35TextConfig& target) const {
     reject("max_position_embeddings", "the draft must not exceed the target's");
 }
 
+void DFlash2Config::validate_against(const QwenTextConfig& target) const {
+  if (hidden_size != target.hidden_size)
+    reject("hidden_size", "the draft must share the target's width (fc and the shared head)");
+  if (vocab_size != target.vocab_size)
+    reject("vocab_size", "the draft shares the target's embeddings and lm head");
+  if (mask_token_id < 0 || mask_token_id >= target.vocab_size)
+    reject("dflash_config.mask_token_id", "outside the target vocabulary");
+  if (drafts() > kSpecRows - 1)
+    reject("dflash_config.block_size", "the draft depth exceeds the speculative row budget");
+  for (size_t i = 0; i < target_layer_ids.size(); ++i) {
+    if (target_layer_ids[i] < 0 || target_layer_ids[i] >= target.num_hidden_layers)
+      reject("dflash_config.target_layer_ids",
+             "layer " + std::to_string(target_layer_ids[i]) + " does not exist in the target");
+    if (i && target_layer_ids[i] == target_layer_ids[i - 1])
+      reject("dflash_config.target_layer_ids", "duplicate tap layer");
+  }
+  if (sliding_window <= block_size)
+    reject("sliding_window", "the window must cover the whole query block");
+  if (max_position_embeddings > target.context_limit())
+    reject("max_position_embeddings", "the draft must not exceed the target's");
+}
+
 DFlash2Weights::~DFlash2Weights() {
   cudaFree(arena);
   cudaFree(fp8_arena);

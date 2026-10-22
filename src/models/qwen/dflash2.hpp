@@ -20,6 +20,7 @@
 #include <cuda_runtime.h>
 
 #include "loaders/minijson.hpp"
+#include "models/qwen/config.hpp"
 #include "models/qwen/config35.hpp"
 
 namespace dgpp {
@@ -74,6 +75,9 @@ struct DFlash2Config {
   // §7 step 2 — widths, vocab and the tap indices). Throws with a message
   // naming the field.
   void validate_against(const Qwen35TextConfig& target) const;
+  // The Qwen3.8-Flash-Next target (qwen4_exp, 2026-10-20 port): the same
+  // checks; the position bound takes the YaRN-scaled context ceiling.
+  void validate_against(const QwenTextConfig& target) const;
 };
 
 // One draft layer's device weights (BF16, arena-resident; at world > 1 the

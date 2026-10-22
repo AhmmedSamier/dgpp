@@ -145,3 +145,37 @@ DGPP_TEST(dflash2_config_cross_checks_the_target) {
                            "\"block_size\": " + std::to_string(dgpp::kSpecRows + 1)));
   require(refusal_against(big, target_like()).empty() == false, "an over-deep block must be refused");
 }
+
+// The Qwen3.8-Flash-Next target overload (the 2026-10-20 drafter port):
+// the qwen4_exp geometry of incoai/Qwen3.8-Flash-Next-DFlash2.
+DGPP_TEST(dflash2_config_cross_checks_the_flash_next_target) {
+  std::string text = patched("\"hidden_size\": 5120", "\"hidden_size\": 2560");
+  const size_t at = text.find("\"target_layer_ids\": [5, 19, 33, 47, 61]");
+  require(at != std::string::npos, "patch anchor missing: target_layer_ids");
+  text.replace(at, std::string("\"target_layer_ids\": [5, 19, 33, 47, 61]").size(),
+               "\"target_layer_ids\": [5, 15, 25, 35, 45]");
+  const auto c = parse(text);
+  dgpp::QwenTextConfig t;
+  t.hidden_size = 2560;
+  t.vocab_size = 248320;
+  t.num_hidden_layers = 48;
+  t.max_position_embeddings = 262144;
+  const auto against = [](const dgpp::DFlash2Config& d, const dgpp::QwenTextConfig& x) {
+    try {
+      d.validate_against(x);
+    } catch (const std::runtime_error& e) {
+      return std::string(e.what());
+    }
+    return std::string();
+  };
+  require(against(c, t).empty(), "the Flash-Next pair must pass");
+  auto wide = t;
+  wide.hidden_size = 2048;
+  require(!against(c, wide).empty(), "width mismatch must be refused");
+  auto short_stack = t;
+  short_stack.num_hidden_layers = 45;
+  require(!against(c, short_stack).empty(), "a tap past the target stack must be refused");
+  auto small_ctx = t;
+  small_ctx.max_position_embeddings = 65536;
+  require(!against(c, small_ctx).empty(), "a draft past the target's context must be refused");
+}

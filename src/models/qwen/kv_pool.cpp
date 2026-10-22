@@ -23,6 +23,9 @@ void validate(const QwenKvPoolShape& s) {
     throw std::invalid_argument("QwenKvPool: native FP8 attention requires engine.kv_dtype fp8");
   if ((s.fp8_prefill_attention || s.fp8_decode_attention) && s.dim != 256)
     throw std::invalid_argument("QwenKvPool: native FP8 attention requires head dimension 256");
+  if (s.draft_layers < 0 || s.draft_kv_heads < 0 || s.draft_dim < 0 ||
+      (s.draft_layers > 0 && (s.draft_kv_heads <= 0 || s.draft_dim <= 0)))
+    throw std::invalid_argument("QwenKvPool: draft planes need draft_layers with positive geometry");
 }
 }  // namespace
 
@@ -33,6 +36,8 @@ QwenKvPool::~QwenKvPool() {
   cudaFree(v_scale_);
   cudaFree(idx_base_);
   cudaFree(ring_base_);
+  cudaFree(dk_base_);
+  cudaFree(dv_base_);
 }
 
 size_t QwenKvPool::cache_bytes(const QwenKvPoolShape& s) {
@@ -43,7 +48,12 @@ size_t QwenKvPool::cache_bytes(const QwenKvPoolShape& s) {
   const size_t idx = static_cast<size_t>(s.token_slots / s.kpool) * s.idx_dim * 2;
   const size_t ring = static_cast<size_t>(s.max_requests) * s.kpool * s.idx_dim * 2;
   const size_t table = PagedBlockTable::table_bytes(s.max_requests, s.token_slots / s.block_tokens);
-  return L * (2 * kvb + scale + idx + ring) + table;
+  // The drafter's planes: k and v, bf16, per draft layer.
+  const size_t draft = s.draft_layers > 0
+                           ? 2 * static_cast<size_t>(s.draft_layers) * s.token_slots *
+                                 s.draft_kv_heads * s.draft_dim * 2
+                           : 0;
+  return L * (2 * kvb + scale + idx + ring) + draft + table;
 }
 
 void QwenKvPool::init(const QwenKvPoolShape& shape) {
@@ -60,6 +70,11 @@ void QwenKvPool::init(const QwenKvPoolShape& shape) {
   }
   alloc(reinterpret_cast<void**>(&idx_base_), L * layer_idx_elems() * 2);
   alloc(reinterpret_cast<void**>(&ring_base_), L * layer_ring_elems() * 2);
+  if (shape_.draft_layers > 0) {
+    const size_t DL = static_cast<size_t>(shape_.draft_layers);
+    alloc(reinterpret_cast<void**>(&dk_base_), DL * layer_draft_bytes());
+    alloc(reinterpret_cast<void**>(&dv_base_), DL * layer_draft_bytes());
+  }
   table_.init(shape_.max_requests, shape_.block_tokens, shape_.token_slots / shape_.block_tokens);
   initialized_ = true;
   reset_all(nullptr);
@@ -94,6 +109,16 @@ QwenQsaCache QwenKvPool::view(int layer) const {
   return c;
 }
 
+QwenFullAttnCache QwenKvPool::draft_view(int l) const {
+  if (!initialized_) throw std::logic_error("QwenKvPool: draft_view before init");
+  if (l < 0 || l >= shape_.draft_layers)
+    throw std::out_of_range("QwenKvPool: draft layer " + std::to_string(l));
+  QwenFullAttnCache c;
+  c.k_cache = dk_base_ + static_cast<size_t>(l) * layer_draft_bytes() / 2;
+  c.v_cache = dv_base_ + static_cast<size_t>(l) * layer_draft_bytes() / 2;
+  return c;
+}
+
 uint16_t* QwenKvPool::ring(int layer, int req) const {
   check_req(req, "ring");
   if (layer < 0 || layer >= shape_.layers)
@@ -124,6 +149,11 @@ void QwenKvPool::reset_all(cudaStream_t stream) {
   }
   DGPP_CUDA_OK(cudaMemsetAsync(idx_base_, 0, L * layer_idx_elems() * 2, stream));
   DGPP_CUDA_OK(cudaMemsetAsync(ring_base_, 0, L * layer_ring_elems() * 2, stream));
+  if (shape_.draft_layers > 0) {
+    const size_t DL = static_cast<size_t>(shape_.draft_layers);
+    DGPP_CUDA_OK(cudaMemsetAsync(dk_base_, 0, DL * layer_draft_bytes(), stream));
+    DGPP_CUDA_OK(cudaMemsetAsync(dv_base_, 0, DL * layer_draft_bytes(), stream));
+  }
   table_.reset_all(stream);
 }
 
@@ -155,6 +185,23 @@ void QwenKvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t stre
     DGPP_CUDA_OK(cudaMemcpyAsync(c.index_cache + static_cast<size_t>(dst) * idx_blk,
                                  c.index_cache + static_cast<size_t>(src) * idx_blk, idx_blk * 2,
                                  cudaMemcpyDeviceToDevice, stream));
+  }
+  if (shape_.draft_layers > 0) {
+    const size_t dkv_blk_bytes = static_cast<size_t>(shape_.block_tokens) * shape_.draft_kv_heads *
+                                 shape_.draft_dim * 2;
+    for (int l = 0; l < shape_.draft_layers; ++l) {
+      const QwenFullAttnCache c = draft_view(l);
+      DGPP_CUDA_OK(cudaMemcpyAsync(reinterpret_cast<uint8_t*>(c.k_cache) +
+                                       static_cast<size_t>(dst) * dkv_blk_bytes,
+                                   reinterpret_cast<uint8_t*>(c.k_cache) +
+                                       static_cast<size_t>(src) * dkv_blk_bytes,
+                                   dkv_blk_bytes, cudaMemcpyDeviceToDevice, stream));
+      DGPP_CUDA_OK(cudaMemcpyAsync(reinterpret_cast<uint8_t*>(c.v_cache) +
+                                       static_cast<size_t>(dst) * dkv_blk_bytes,
+                                   reinterpret_cast<uint8_t*>(c.v_cache) +
+                                       static_cast<size_t>(src) * dkv_blk_bytes,
+                                   dkv_blk_bytes, cudaMemcpyDeviceToDevice, stream));
+    }
   }
 }
 
