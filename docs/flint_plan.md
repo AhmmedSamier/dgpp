@@ -344,3 +344,44 @@ vs 19.9 TF on the 1.28e14 attention FLOP — and the forward's kernel total
 unchanged (bitwise). MiMo-V2.6 shares the kernel: on an 8K prompt
 (`mimo_forward_check`, 48 launches) its attention takes 0.621 s against
 0.820 s. Kept.
+
+**2026-10-22 — G8: the campaign on `b3f9b538` (binary `15ac3372bb2e3230`).**
+One node, the template as shipped (eight slots, 512K BF16 pool, the
+262,144 positional ceiling), every row from one `serve_campaign.py run`
+with the resident image cache off: decode 56.2–58.0 tok/s at C1 (17.4
+ms/step), 99.9–101.2 at C2, 146.2–148.0 at C4, 197.8–204.0 at C8; cold
+prefill 0.484 / 1.951 / 12.077 s at 2K / 8K / 32K (the 32K probe 13.9 s
+before the attention tiling); context decode 57.6 / 47.5 / 39.6 / 29.4 /
+19.4 tok/s at 0 / 32K / 64K / 128K / 256K with cold prefill 11.7 / 36.4 /
+133.2 / 503.1 s at 32K / 64K / 128K / 256K (45.5 / 175.5 / 663.8 s before
+the tiling); quality 137/164 HumanEval, 255/300 GSM8K, 94/100 extraction
+under the standard caps with 73 responses at the cap, of which 65
+completed at the 8,192 retry and 60 passed (the eval's retry column,
+added this day — docs/benchmarks.md "Quality and correctness" has the
+reading of each miss); API checks 10/10 with reasoning tokens reported;
+operation streams matched, zero swap.
+Two nodes, the template as shipped (eight slots, 512K BF16 pool, the
+same ceiling): decode 104.3–105.2 tok/s at C1 (9.5 ms/step), 175.1–177.5
+at C2, 253.7–258.0 at C4, 342.5–352.5 at C8; cold prefill 0.413 / 1.570
+/ 8.661 s at 2K / 8K / 32K; context decode 104.4 / 83.8 / 70.6 / 54.4 /
+37.3 tok/s at 0 / 32K / 64K / 128K / 256K with cold prefill 8.5 / 24.4 /
+78.2 / 276.2 s at 32K / 64K / 128K / 256K; quality 133/164, 257/300,
+96/100 with 77 responses at the cap, 63 completed at the retry and 55
+passing; API checks all OK; operation streams matched, zero swap.
+Four nodes, the template as shipped: decode 154.8–158.9 tok/s at C1 (6.4
+ms/step), 256.2–260.8 at C2, 393.9–399.7 at C4, 524.8–542.9 at C8; cold
+prefill 0.358 / 1.297 / 6.468 s at 2K / 8K / 32K; context decode 154.4 /
+127.1 / 110.3 / 89.5 / 64.9 tok/s at 0 / 32K / 64K / 128K / 256K with
+cold prefill 6.3 / 16.5 / 47.7 / 153.8 s at 32K / 64K / 128K / 256K;
+quality 137/164, 255/300, 100/100 with 72 responses at the cap, 59
+completed at the retry and 53 passing; API checks all OK; operation
+streams matched, zero swap. The per-task scores move by a few items
+between the legs in both directions (HumanEval 137 / 133 / 137, GSM8K
+255 / 257 / 255, extraction 94 / 96 / 100 at one / two / four nodes —
+the two "Oona" records pass at four nodes): the tensor-parallel split
+changes the reduction order of every projection, and the long-thinking
+items near a greedy tie resolve differently — the same mechanism as the
+solo-versus-batched transcript difference, which every leg shows. The
+one-to-two-node step is 1.8× at C1 and 1.7× at C8, the two-to-four 1.5×
+at both: the per-rank expert bytes halve each time while the collective
+and the replicated attention do not. The benchmarks doc carries the rows.

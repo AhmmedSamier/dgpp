@@ -31,14 +31,24 @@ project procedures and design guidance live in `docs/`.
   block themselves). The sink-attention prefill kernel stages each K/V
   tile for 128 query vectors per block (64 before; both geometries): the
   32K Flint prompt's attention 6.44 → 5.16 s (19.9 → 24.8 TF), MiMo's 8K
-  prompt's 0.820 → 0.621 s, bitwise.
-  Every
-  layer within 7 bf16 ulps of the numpy reference teacher-forced, the
-  final hidden bitwise; the fixture ladder (loader at worlds 1/2/4, the
-  session surface, loopback TP and engines) and the real checkpoint's
-  tokenizer / template goldens pass. See [docs/flint_plan.md](docs/flint_plan.md)
+  prompt's 0.820 → 0.621 s, bitwise. Every layer within 7 bf16 ulps of
+  the numpy reference teacher-forced, the final hidden bitwise; the
+  fixture ladder (loader at worlds 1/2/4, the session surface, loopback
+  TP and engines) and the real checkpoint's tokenizer / template goldens
+  pass. See [docs/flint_plan.md](docs/flint_plan.md)
   and the [model card](docs/model_cards/Flint-FP8-NVFP4.md); the
   campaign rows are in [docs/benchmarks.md](docs/benchmarks.md).
+
+- **Eval retry beyond the token cap** (2026-10-22): `scripts/serve_eval.py`
+  asks every response the server cut at the standard cap (2,048 tokens;
+  512 for extraction) once more at `--retry-max-tokens` (8,192), keeps the
+  retry's reply, tokens and verdict under `retry` in the item's record and
+  counts, per task, the retried items that completed and those that then
+  passed. The standard-cap score is unchanged by it; the quality table in
+  [docs/benchmarks.md](docs/benchmarks.md) gained the "Completed at the
+  8,192 retry (passed)" column (`serve_campaign.py rows`), so a model that
+  reaches the right answer only with more tokens is reported rather than
+  hidden among the failures.
 
 - **FP4-Local Qwen3.8-Flash-Next export** (`nvidia/Qwen3.8-Flash-Next-FP4-Local`).
   Load CSF-wrapped NVFP4 expert scales losslessly, discover nested shards

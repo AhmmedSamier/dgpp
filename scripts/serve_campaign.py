@@ -28,7 +28,8 @@ definition of record):
   context      serve_context_matrix at 0 / 32K / 64K / 128K / 256K / 512K: cold
                prefill per bucket, decode ms a pass and tok/s from three requests.
   quality      serve_eval on the 300-item HumanEval / GSM8K / extraction set at
-               the deployment's slot count.
+               the deployment's slot count; responses cut at the standard cap
+               are asked once more at the 8,192 retry cap (recorded, not scored).
   api          serve_api_check: stop, n, logit_bias, usage.
   transcripts  serve_load C1, five classes x 3 greedy transcripts in the shipped
                mode, and the isolation check (prompt 0 alone, then beside
@@ -411,7 +412,10 @@ def summarize(d):
                                           for n, b in c["buckets"].items()))
     if (d / "eval.log").exists():
         e = eval_cells(d)
-        print("  quality: " + ", ".join(f"{k} {x['passed']}/{x['n']} (trunc {x['truncated']})" for k, x in e.items()))
+        print("  quality: " + ", ".join(
+            f"{k} {x['passed']}/{x['n']} (cap {x['truncated']}" +
+            (f", retried {x['retry_completed']} completed / {x['retry_passed']} pass" if x.get('retried') else "") + ")"
+            for k, x in e.items()))
     if (d / "api.log").exists():
         print("  api checks: %d/%d" % api_cells(d))
     if (d / "transcripts_default.json").exists():
@@ -457,8 +461,14 @@ def rows(d, label, nodes, options):
         out.append(("context-prefill", f"{head} " + " | ".join(f"{b[n]['prefill']:.3f}" if b[n] else "Limit" for n in BUCKETS) + " |"))
     if (d / "eval.log").exists():
         ev = eval_cells(d)
+        # The last column: of the responses at the standard cap, how many
+        # completed when asked once more at the larger cap, and how many of
+        # those passed (serve_eval.py --retry-max-tokens; "—" before 2026-10-22).
+        retried = sum(x.get("retried", 0) for x in ev.values())
+        beyond = (f"{sum(x['retry_completed'] for x in ev.values())} ({sum(x['retry_passed'] for x in ev.values())} pass)"
+                  if retried else ("0" if sum(x['truncated'] for x in ev.values()) == 0 else "—"))
         out.append(("quality", f"{head} {ev['humaneval']['passed']}/{ev['humaneval']['n']} | {ev['gsm8k']['passed']}/{ev['gsm8k']['n']} | "
-                    f"{ev['extract']['passed']}/{ev['extract']['n']} | {sum(x['truncated'] for x in ev.values())} |"))
+                    f"{ev['extract']['passed']}/{ev['extract']['n']} | {sum(x['truncated'] for x in ev.values())} | {beyond} |"))
     if (d / "transcripts_default.json").exists() and (d / "api.log").exists():
         t = transcript_cells(d)
         ok, total = api_cells(d)
