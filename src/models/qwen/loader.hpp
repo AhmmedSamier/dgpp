@@ -106,6 +106,10 @@ struct QwenFullAttnResident {
   const uint16_t* q_norm = nullptr;  // BF16 [d]
   const uint16_t* k_norm = nullptr;  // BF16 [d]
   GlmQuantMatrix q_proj_fp8, k_proj_fp8, v_proj_fp8, o_proj_fp8;  // dense_weights fp8
+  // The mixed release's FP8 kv_cache_scheme scalars widened to F32 [2] in
+  // the layer image (k_scale, v_scale): the fp8 K/V storage form's scales
+  // (engine.kv_dtype = fp8). Null when the release ships none.
+  const float* kv_scales = nullptr;
   int local_heads = 0;      // query heads on this rank
   int head_begin = 0;       // first global query head
   int local_kv_heads = 0;   // kv heads on this rank
@@ -399,5 +403,13 @@ class QwenLayerStream : public ResidentLayerStream<QwenLoaderFamily> {
   std::unique_ptr<QwenNgramTableMmap> mmap_table_;
   void* table_device_ = nullptr;
 };
+
+// ModelOpt NVFP4 CSF sidecar expansion (loader.cpp): `fixed` is the
+// [rows/16, 16*(1+cols/2)] uint8 stream and `exc` the exception words;
+// returns the plain [rows, cols] E4M3 plane. Throws std::runtime_error on
+// any geometry or content violation.
+std::vector<uint8_t> qwen_csf_scales_expand(const uint8_t* fixed, size_t fixed_bytes,
+                                            const uint32_t* exc, size_t exc_count, int64_t rows,
+                                            int64_t cols);
 
 }  // namespace dgpp

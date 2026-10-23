@@ -4,7 +4,7 @@
   "release": "",
   "engine": {
     "max_concurrency": 6,
-    "kv_capacity": 131072,
+    "kv_capacity": 1048576,
     "bf16_weights": "bf12",
     "prefill": "bounded",
     "default_max_tokens": 32768,
@@ -15,6 +15,7 @@
     "mtp_depth": 4,
     "mtp_schedule": true,
     "mtp_schedule_lambda": 0.045,
+    "mtp_verify": "block",
     "prefix_cache_gib": 14,
     "admission": "full",
     "admission_window": 256,

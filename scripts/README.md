@@ -56,6 +56,10 @@ budgets. It records exact request hashes and output counts, correlates the long
 response with native prefill progress, and rejects unrelated traffic. Output
 hashes are evidence for separate numerical review, not a quality score; SSE
 update gaps are client observations, not per-token kernel timings.
+Add `--metrics-interval 0.25` to retain sampled adaptive chunk limits, native
+prefill progress, active/queued load, KV occupancy and latency-target misses.
+Use the same interval in compared runs; polling adds work and snapshots can
+span several engine passes. See the [MiMo investigation procedure](../docs/continuous-batching.md#mixed-prefill-controller-investigation).
 
 ## Build, configuration, and deployment
 
@@ -128,13 +132,14 @@ affect the results.
 | [serve_api_check.py](serve_api_check.py) | Checks stop strings, multiple choices, logit bias, and usage details in streamed and non-streamed responses; fails if a check fails. | Verify request-field behavior after a server change. |
 | [vision_api_check.py](vision_api_check.py) | Generates PNG inputs and checks colors, multiple images, streaming, choices, chunk boundaries and concurrent requests. | Verify a GLM-5.3-Flash image deployment on idle test hardware. |
 | [serve_bench.py](serve_bench.py) | Times a streaming chat request and reports time to first token, decode pace, wall time, and usage. Can obtain its default endpoint from site settings. | Take a quick client-side latency reading. |
-| [serve_load.py](serve_load.py) | Sends fixed-concurrency streaming request phases and reports per-request timing and aggregate throughput. Supports prompt-class sweeps. | Measure serving throughput as concurrency or workload changes. |
-| [timed_load.py](timed_load.py) | Adds engine decode rates to `serve_load.py`, reconciling published counters with completed requests under a deadline. | Measure engine-call time on an otherwise idle server; uses the same CLI and also accounts for warmup and isolation requests. |
+| [serve_load.py](serve_load.py) | Sends fixed-concurrency streaming request phases and reports per-request timing and the wall aggregate throughput (prefill and queueing included — a client-side service rate, not the decode rate). Supports prompt-class sweeps and the transcript-isolation check. | Measure serving throughput as concurrency or workload changes. |
+| [timed_load.py](timed_load.py) | `serve_load.py` plus the engine's decode-only rate per phase (tokens generated over decode-step time, prefill and queueing excluded — the throughput figure the benchmarks report), reconciling the published counters with the completed requests under a deadline; prints the per-class decode table first and the wall table after it. | Measure engine-call time on an otherwise idle server; uses the same CLI and also accounts for warmup and isolation requests. |
 | [serve_context_matrix.py](serve_context_matrix.py) | Measures cold prefill, decode ms/pass and engine tok/s at a minimal baseline and 32K/64K/128K/256K/512K context buckets; retains actual prompt counts and skips buckets above the deployment limit. | Measure context scaling on an idle server with the tools venv; supply the checkpoint ID, a unique cold-run tag and a JSON output path. |
 | [serve_mtp_classes.py](serve_mtp_classes.py) | Sends the five class prompts greedily and reads each request's retired line from rank 0's log: pass time, tokens per pass and draft acceptance as the engine counted them. | Compare MTP acceptance per prompt type through the service. |
 | [serve_greedy_transcript.py](serve_greedy_transcript.py) | Saves fixed greedy prompts and replies to JSON, with optional exact comparison against a reference file. | Check whether plain/MTP modes or deployment changes preserve API-level output. |
 | [mtp_depth_check.py](mtp_depth_check.py) | Writes separate prose, code, and JSON completions and prints acceptance information from a rank-0 log. | Collect outputs from separate MTP-depth launches for a directory diff. |
 | [serve_eval.py](serve_eval.py) | Scores HumanEval, GSM8K, and synthetic structured extraction, saving per-item results and summaries. | Compare task accuracy between deployments. HumanEval executes generated code; GSM8K and HumanEval require local datasets. |
+| [humaneval_program.py](humaneval_program.py) | Assembles supplied problem context, complete-function or body-only answers, and HumanEval tests. | Shared program construction for live evaluation and rechecking saved answers; preserves helpers and imports. |
 | [serve_prefill_probe.py](serve_prefill_probe.py) | Calibrates approximate prompt lengths, defeats prefix reuse with unique prefixes, and measures prefill metric deltas and first-token latency. | Isolate prefill cost through HTTP; requires `DGPP_DATA_DIR/gsm8k_test.jsonl`, or `--data FILE`. |
 | [serve_prefill_interference.py](serve_prefill_interference.py) | Runs a long prefill beside an active decode stream and reports the decode client's update-gap distribution. | Measure how budgeted prefill affects an overlapping request on an otherwise idle server. |
 | [serve_admission_bench.py](serve_admission_bench.py) | Measures isolated and mixed prefill/decode, sustained arrivals and cancellation with fixed work, request hashes and native prefill overlap checks. | Compare fresh baseline/candidate processes in alternating order before accepting an admission-policy change. |
@@ -152,6 +157,7 @@ the test. They are not passive checks against an existing production service.
 
 | File | What it does | When to use it |
 | --- | --- | --- |
+| [serve_campaign.py](serve_campaign.py) | Every tracked benchmark for one deployment template in one command: boots it on the bench port, runs the serving sweep (decode-only and wall rates by concurrency), the cold-prefill probe, the context matrix, the 300-item quality set, the API check and the transcript and isolation checks, a second boot without the drafter for the plain transcripts, and a boot per extra decode mode; records the revision, the binary hash, every rank's swap and the op-stream match; `summarize` and `rows` print the cells and the doc's table rows. | Re-measure a deployment's rows for [docs/benchmarks.md](../docs/benchmarks.md); the method of record is that doc's "Workload and timing" section. |
 | [serve_admission_check.sh](serve_admission_check.sh) | Runs the same request batch under full-reservation and grow-on-demand admission with a tight KV pool, then prints outcomes, counters, and op-stream hashes. | Compare admission policies and inspect their cross-rank decisions. |
 | [serve_tools_check.sh](serve_tools_check.sh) | Starts the service, exercises tool choices, follow-up turns, reasoning, streaming, and structured JSON responses, then stops and summarizes it. | Inspect tool-calling and structured-output behavior end to end. |
 | [vision_prefix_cache_check.py](vision_prefix_cache_check.py) | Checks image prefix reuse, continuation, streaming and pixel isolation against an idle GLM server. | Validate image-aware prefix caching through HTTP. |

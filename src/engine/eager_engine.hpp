@@ -160,6 +160,10 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
       if constexpr (Model::kResumablePrefill) return model_->session_snapshot_align();
     return 0;
   }
+  int64_t prefill_wave_rows() const override {
+    if constexpr (requires { model_->prefill_wave_rows(); }) return model_->prefill_wave_rows();
+    return 0;
+  }
   int64_t prefill_chunk_limit() const override {
     return prefill_chunk_alignment() ? model_->max_tokens() : 0;
   }
@@ -904,8 +908,7 @@ inline DecodeSample make_w1_sample(int64_t vocab) {
       // The greedy decision with logprobs, penalties or a mask: penalties,
       // the mask, the raw normalizer, the canonical argmax under it.
       std::vector<float> v(out.logits.begin(), out.logits.begin() + vocab);
-      sample::apply_penalties(v.data(), static_cast<int>(vocab), 0, p,
-                                  sample::count_context(context));
+      sample::apply_context_penalties(v.data(), static_cast<int>(vocab), 0, p, context);
       sample::apply_bias(v.data(), static_cast<int>(vocab), 0, bias);
       sample::apply_mask(v.data(), static_cast<int>(vocab), 0, words,
                              static_cast<int>(vocab));

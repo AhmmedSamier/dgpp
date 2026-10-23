@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 namespace dgpp::serve {
 
@@ -10,6 +11,9 @@ namespace dgpp::serve {
 inline constexpr int64_t kDefaultHttpMaxBodyBytes = 256ll * 1024 * 1024;
 
 inline constexpr int kDefaultSsePingInterval = 30;
+inline constexpr bool valid_stream_flush(std::string_view mode) {
+  return mode == "pass" || mode == "wake";
+}
 inline constexpr int64_t kMaxSsePingInterval = 2147483647;
 inline constexpr bool valid_sse_ping_interval(int64_t seconds) {
   return seconds == -1 || (seconds >= 1 && seconds <= kMaxSsePingInterval);

@@ -30,6 +30,88 @@ draft layer is never FP4: its `.*` target loses to the `re:^mtp.*` ignore.
 `prefill_fp8_per_tensor` and `dense_weights: fp8` are FP8-release levers
 and are refused under this quantization (they would requantize the mixed
 weights); the head is already fp8-channel resident, so it needs no lever.
+`engine.prefill_activations: "native"` (2026-10-15) serves the release's own
+activation recipe on prefill rows: the MLP inputs quantized to NVFP4 per row
+with the shipped `input_global_scale` (gate/up share one, down its own) and
+the products on the block-scaled fp4 tensor cores, and its channel-FP8
+projections and late-layer MLPs from per-token e4m3 activations on the e4m3
+tensor cores; decode rows keep bf16 activations. The templates enable it: on one Spark a 262K cold prefill went
+451 -> 316 s and an 11.5K prompt 11.4 -> 5.7 s, with HumanEval 158/164 (159 on
+the bf16 chain), GSM8K 295/300 (296) and schema extraction 100/100 (100) at
+the same seed over 300 items. Its TMA-staged W4A4 form (2026-10-16) read the
+last k-step's scale words before they had landed in some launches until
+2026-10-17; with the drain fixed the template's temperature-0 transcripts
+reproduce exactly across repetitions, plain decode against the drafter and
+solo against seven co-tenants, as the FP8 release's always did.
+
+`engine.kv_dtype: "fp8"` (2026-10-16) serves the release's own FP8
+`kv_cache_scheme`: every Full layer ships a `k_scale` and a `v_scale`
+(static per-tensor symmetric e4m3; k 0.027–0.051, v 0.019–0.254), and the
+Full layers' K/V planes hold e4m3 codes of K / k_scale and V / v_scale —
+half the pool (a 262K context: 21.00 -> 13.00 GiB of K/V on one Spark, the
+DFlash2 planes staying bf16; the memory plan 51.49 -> 43.49 GiB). The
+attention math is the bf16 chain on the widened codes (exact; k_scale
+rides the softmax scale, v_scale the output), so the key changes which
+K/V the model attends over (the release's quantized cache) and nothing
+else; the kernel gate is bitwise against the bf16 kernels on widened
+planes. The NVFP4 templates set it (the release's own cache recipe; `bf16`
+restores the wider cache) together with `engine.prefill_attention: "fp8"`
+below. Since 2026-10-17 the templates size that pool to the node: on one
+Spark 1,048,576 tokens (four full contexts) with a 16 GiB prefix arena
+(99.6 GiB planned with the image tower; a world-1 boot ends 6–8 GiB below its plan at listening,
+so the recipe leaves that room), on two and four Sparks 2,097,152 tokens (one full
+context per slot, full admission) with 32 GiB arenas (105 and 74 GiB a
+rank), the YaRN templates 1,130,496 and 1,048,576 tokens with 16 and 20 GiB
+arenas; until then every template carried 262,144 tokens and 1.5 GiB.
+With the attention math kept in bf16 on one Spark the 262K cold prefill reads 352 s against
+316 in bf16 (the tile widening until the e4m3 attention lands)
+and decode at 262K 156 ms a pass against 188, with every
+decode batch of request-grouped rows (the verify blocks) through the block
+form that stages each K/V tile once per group (bf16 decode at 262K
+212 -> 188 ms a pass from that alone). Retrieval and
+task accuracy across the two formats (2026-10-16, one boot each, the same
+seed): the 300-item HumanEval / GSM8K / schema-extraction set reads 159/164,
+292/300 and 100/100 in fp8 against 160/164, 292/300 and 100/100 in bf16;
+five needles per document at 32K and 128K over two seeds retrieve 20/20 in
+both formats, as do five needles at 258K (5/5 each, plus 5/5 controls); and a teacher-forced probe (128 positions of a fixed
+continuation on 31K- and 115K-token documents, the top-5 logprobs at every
+position) puts fp8's next-token argmax at 126/127 and 119/128 of bf16's with
+a mean KL of 0.015 and 0.039 nats and the reference token never outside
+fp8's top-5 — the same size as the within-format floor, a second bf16
+boot against the first reading 124/127 and 122/128 with a mean KL of 0.020
+and 0.037 (every pairing's median KL is below 0.005 nats).
+
+`engine.prefill_attention: "fp8"` (2026-10-16) keeps that pool and runs the
+prefill attention on the fp8 tensor cores, whose `mma.m16n8k32.e4m3`
+issues at twice the bf16 rate on the GB10 (188 against 94 TFLOP/s at the
+kernel's occupancy): Q is quantized per row to e4m3 (amax / 448, the row's
+scale folded into the softmax multiplier with k_scale), S = Q8 K8^T, the
+probabilities are rounded to e4m3 against the row's running maximum
+(scaled by 2^8 so the maximum is the code 256 and the flush floor sits at
+2^-17 of it), O += P8 V8, the denominator sums the unrounded
+probabilities, the output takes v_scale. Nothing is transposed in memory:
+P's accumulator layout is matched to V by a transposed ldmatrix over dim
+pairs and one byte permute per fragment. Decode rows keep the storage
+form's exact widened walk. The kernel reads 112 TFLOP/s at a 262K context
+against the bf16 tile form's 73 and the storage form's 60 (scratch bench,
+4032 rows); in situ on one Spark the 262K cold prefill reads 242 s against
+316 s in bf16 and 352 s in `fp8` — the per-key attention cost, from the
+server's own prefill rate curve, 3.8 us per token per 1K of context
+against 5.9 (bf16) and 7.0 (`fp8`), the GEMM/GDN floor 0.38 ms per token
+in every mode — with decode at 262K unchanged at 155–156 ms a pass. Its
+gate is the recipe itself (`full_attn_test` holds a host model of exactly
+that arithmetic to 9e-6 relative rms on a 1990-row prefill; the same data
+sits 4.7 % from the bf16 chain, the mode's deviation by design on random
+operands) and the retrieval / accuracy suite: against the bf16 cache (one
+boot each, the same seed) the 300-item set reads 158/164, 293/300 and
+100/100 (bf16 160, 292, 100; the fp8 pool under bf16 arithmetic 159, 292,
+100); five needles per document at 32K and 128K over two seeds 20/20 and
+at 258K 5/5, with every control found (the 258K cold prefill 239 s against
+345 s under bf16 arithmetic); the teacher-forced probe puts its next-token
+argmax at 123/127 and 119/126 of the bf16 cache's with a median KL of 0.001
+and 0.003 nats (means 0.014 and 0.049, the latter from one position at 2.7
+nats; the bf16 boot-to-boot floor reads 124/127, 122/128, means 0.020 and
+0.037) and the reference token never outside its top-5.
 
 ## Gates
 

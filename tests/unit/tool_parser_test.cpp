@@ -237,6 +237,176 @@ Run drive_dsml(const std::string& text, ToolCallParser::Options opts = {}, DsmlD
   return run;
 }
 
+// The prompt-tail rules (ChatMarkers::prompt_opens_thinking /
+// prompt_leaves_thinking_to_model) over every generation-prompt shape the
+// families render (2026-10-22, the Flint rule). Whether the model opens
+// its own <think> is the family's declaration (model_opens_thinking,
+// ServeFamily states it): without it no tail ever leaves the choice to
+// the model; with it only a tail the template left unsettled does — the
+// GLM shapes end inside <think> or with a closed block, Qwen's open the
+// block or close it, MiMo's "assistant\n" and Flint's "<|assistant|>\n"
+// carry neither. The tokens never select the family.
+DGPP_TEST(tool_parser_prompt_tail_leaves_thinking_to_the_model_by_the_family_declaration) {
+  constexpr int64_t kAssistant = 900, kImStart = 901, kNewline = 902, kWord = 903, kText = 904,
+                    kNewline2 = 905;  // the "\n\n" id (Qwen's 271)
+  auto glm = [&](bool declares) {
+    ChatMarkers m = fake_markers();
+    m.role_markers = {ChatMarker{kAssistant, "<|assistant|>"}};
+    m.newline = ChatMarker{kNewline, "\n"};
+    m.newline_ids = {kNewline, kNewline2};
+    m.model_opens_thinking = declares;
+    return m;
+  };
+  auto qwen = [&](bool declares) {
+    ChatMarkers m = qwen_markers();
+    m.role_markers = {ChatMarker{kImStart, "<|im_start|>"}};
+    m.newline = ChatMarker{kNewline, "\n"};
+    m.newline_ids = {kNewline, kNewline2};
+    m.model_opens_thinking = declares;
+    return m;
+  };
+  struct Case {
+    const char* what;
+    std::vector<int64_t> tail;
+    bool opens;     // prompt_opens_thinking
+    bool unsettled; // leaves_thinking_to_model under the declaration
+  };
+  const Case glm_cases[] = {
+      {"GLM-5.3-Flash thinking: <|assistant|><think>", {kText, kAssistant, kThinkOpen}, true, false},
+      {"GLM with a newline after <think>", {kText, kAssistant, kThinkOpen, kNewline}, true, false},
+      {"GLM-4.7 enable_thinking false: <think></think>", {kText, kAssistant, kThinkOpen, kThinkClose}, false, false},
+      {"GLM closed block then newlines", {kText, kAssistant, kThinkOpen, kThinkClose, kNewline, kNewline}, false, false},
+      {"Flint: the prompt ends at <|assistant|>", {kText, kAssistant}, false, true},
+      {"Flint: <|assistant|> then its newline", {kText, kAssistant, kNewline}, false, true},
+  };
+  const Case qwen_cases[] = {
+      {"Qwen thinking: assistant then <think>\n", {kImStart, kWord, kNewline, kThinkOpen, kNewline}, true, false},
+      {"Qwen enable_thinking false: closed block", {kImStart, kWord, kNewline, kThinkOpen, kThinkClose, kNewline, kNewline}, false, false},
+      {"Qwen3.8 enable_thinking false: <think>\n\n</think>\n\n with the pair as one id",
+       {kImStart, kWord, kNewline, kThinkOpen, kNewline2, kThinkClose, kNewline2}, false, false},
+      {"MiMo: the bare assistant header", {kImStart, kWord, kNewline}, false, true},
+      {"MiMo enable_thinking false: <think></think>", {kImStart, kWord, kNewline, kThinkOpen, kThinkClose}, false, false},
+  };
+  const auto check = [&](const ChatMarkers& declared, const ChatMarkers& silent, const Case& c) {
+    require(declared.prompt_opens_thinking(c.tail) == c.opens, std::string(c.what) + ": opens_thinking");
+    require(declared.prompt_leaves_thinking_to_model(c.tail) == c.unsettled,
+            std::string(c.what) + ": leaves_thinking_to_model under the family's declaration");
+    // No declaration (GLM, Qwen, DeepSeek): the same tail never leaves the choice.
+    require(!silent.prompt_leaves_thinking_to_model(c.tail), std::string(c.what) + ": never without the declaration");
+    require(silent.prompt_opens_thinking(c.tail) == c.opens, std::string(c.what) + ": opens_thinking is the template's");
+  };
+  for (const Case& c : glm_cases) check(glm(true), glm(false), c);
+  for (const Case& c : qwen_cases) check(qwen(true), qwen(false), c);
+  // The declaration without the reasoning markers: never.
+  ChatMarkers plain = glm(true);
+  plain.think_open = ChatMarker{};
+  plain.think_close = ChatMarker{};
+  require(!plain.prompt_leaves_thinking_to_model({kText, kAssistant}), "no think markers: never");
+  require(!ChatMarkers{}.prompt_leaves_thinking_to_model({kText, kAssistant}), "default markers: never");
+}
+
+DGPP_TEST(tool_parser_incremental_text_has_linear_decode_work) {
+  const std::string reasoning = std::string(2048, 'r') + "é📭";
+  for (const auto& markers : {fake_markers(), qwen_markers(), dsml_markers(),
+                              dsml_markers(DsmlDialect::kV4)}) {
+    const bool dsml = markers.dsml.available();
+    const std::string content = std::string(2048, 'c') + " 中\n\nx < y\n" +
+                               (dsml ? "｜DSML｜ tail\n<" : "tail\n<");
+    auto ids = dsml_ids_of(reasoning + "</think>" + content);
+    ids.insert(ids.begin() + 1, kEos);  // an empty decode inside reasoning
+    ids.push_back(kEos);               // an empty decode after a held suffix
+    for (const bool track : {false, true}) {
+      ToolCallParser::Options opts;
+      opts.track_tokens = track;
+      size_t decoded_ids = 0;
+      ToolCallParser parser(markers, [&](const std::vector<int64_t>& input) {
+        decoded_ids += input.size();
+        require(decoded_ids <= ids.size(), "text decoding must process at most one id per input token");
+        return fake_decode(input);
+      }, weather_schemas(), opts);
+      std::vector<Event> events;
+      for (const auto id : ids) parser.feed(id, &events);
+      parser.finish(&events);
+      std::string got_reasoning, got_content;
+      int closed = 0;
+      for (const auto& ev : events) {
+        require(ev.kind != Kind::kToolCall, "literal text does not open a call");
+        if (ev.kind == Kind::kReasoningClosed) { ++closed; continue; }
+        (ev.kind == Kind::kReasoning ? got_reasoning : got_content) += ev.text;
+        if (!track) {
+          require(ev.tokens.empty(), "token attribution is opt-in");
+          continue;
+        }
+        size_t end = 0;
+        for (const auto& span : ev.tokens) {
+          require(span.begin == end && span.end <= ev.text.size() && span.token < ids.size(),
+                  "ordered, complete byte attribution");
+          const auto bytes = ids[span.token] == kDsml ? std::string("｜DSML｜")
+                                                     : fake_decode({ids[span.token]});
+          require(bytes == ev.text.substr(span.begin, span.end - span.begin),
+                  "each delta retains the source token's bytes");
+          end = span.end;
+        }
+        require(end == ev.text.size(), "no unattributed delta bytes");
+      }
+      require(got_reasoning == reasoning && got_content == content && closed == 1,
+              "long text, split UTF-8, skipped tokens and DSML tails retain exact bytes");
+    }
+  }
+}
+
+DGPP_TEST(tool_parser_incremental_dsml_preserves_partial_token_spans) {
+  // Tokens can contain both visible text and a held block prefix. Include
+  // UTF-8 split between tokens and a skipped token between its two halves.
+  const std::map<int64_t, std::string> pieces = {
+      {2001, "é📭\n\n<"}, {2002, "tail\n"}, {2003, " calls>broken"},
+      {2004, "\xE4\xB8"}, {2005, "\xAD\n\n"}};
+  const auto decode = [&](const std::vector<int64_t>& ids) {
+    std::string out;
+    for (const auto id : ids) {
+      const auto it = pieces.find(id);
+      out += it == pieces.end() ? fake_decode({id}) : it->second;
+    }
+    return out;
+  };
+  for (const auto dialect : {DsmlDialect::kV41, DsmlDialect::kV4}) {
+    for (const auto& ids : {std::vector<int64_t>{2001, kEos, 2002},
+                           std::vector<int64_t>{2004, kEos, 2005, kDsml, 2002},
+                           std::vector<int64_t>{2001, kDsml, 2003}}) {
+      ToolCallParser::Options opts;
+      opts.start_in_reasoning = false;
+      opts.track_tokens = true;
+      ToolCallParser parser(dsml_markers(dialect), decode, weather_schemas(), opts);
+      std::vector<Event> events;
+      for (const auto id : ids) parser.feed(id, &events);
+      parser.finish(&events);
+      std::string expected, content, attributed;
+      std::vector<size_t> consumed(ids.size(), 0);
+      for (const auto id : ids)
+        expected += id == kDsml ? std::string("｜DSML｜") : decode({id});
+      for (const auto& ev : events) {
+        require(ev.kind == Kind::kContent, "incomplete DSML blocks remain literal content");
+        content += ev.text;
+        size_t end = 0;
+        for (const auto& span : ev.tokens) {
+          require(span.begin == end && span.end <= ev.text.size() && span.token < ids.size(),
+                  "held prefix spans cover the emitted bytes in order");
+          const auto id = ids[span.token];
+          const auto bytes = id == kDsml ? std::string("｜DSML｜") : decode({id});
+          const size_t length = span.end - span.begin;
+          const auto part = bytes.substr(consumed[span.token], length);
+          require(part == ev.text.substr(span.begin, length), "partial span retains its source bytes");
+          consumed[span.token] += length;
+          attributed += part;
+          end = span.end;
+        }
+        require(end == ev.text.size(), "all emitted bytes have provenance");
+      }
+      require(content == expected && attributed == expected, "held and malformed DSML is byte-exact");
+    }
+  }
+}
+
 DGPP_TEST(tool_parser_dsml_format_one_call_string_and_json_values) {
   require(dsml_markers().tool_format() == dgpp::text::ToolFormat::kDsml, "the tag token alone is the DSML format");
   require(dsml_markers().tool_calls_available(), "DSML tool calls are available");
@@ -821,6 +991,7 @@ DGPP_TEST(tool_parser_promptOpensThinkingSeesTheQwenNewline) {
 ChatMarkers mimo_markers() {
   ChatMarkers m = qwen_markers();
   m.xml_compact = true;
+  m.model_opens_thinking = true;  // the family's declaration (ServeFamily)
   return m;
 }
 Run drive_mimo(const std::string& text, ToolCallParser::Options opts = {}) {

@@ -93,6 +93,13 @@ class SchedulerEngine {
   // token budget passed to begin; it returns a first token only on completion.
   virtual int64_t prefill_chunk_alignment() const { return 0; }
   virtual int64_t prefill_chunk_limit() const { return 0; }
+  // The prefill attention grid's wave in query rows (2026-10-15): the rows
+  // that fill every SM with one CTA exactly, 0 when the engine states none.
+  // The adaptive controller rounds its quantum up to whole waves so a
+  // chunk's last wave never leaves a third of the SMs idle (the 27B's tile
+  // kernel at 1024 rows ran 5.33 waves on 48 SMs: 47 against 52 TFLOP/s at
+  // whole waves).
+  virtual int64_t prefill_wave_rows() const { return 0; }
   virtual bool supports_image_chunked_prefill() const { return false; }
   // Several requests' cold prompts in one forward (the scheduler admits a
   // group per tick when the engine allows it): each prompt within
@@ -450,8 +457,9 @@ class SchedulerObserver;
 // reserves blocks_for(prompt + min(max_steps, window)) at admission and
 // grows the reservation at tick top, BEFORE any engine op, whenever the
 // next step would write past it — by `window_tokens` at a time, or by the
-// minimum when the pool is short — and when even the minimum does not fit,
-// SHEDS the youngest active request (retired Done / kPoolExhausted, the
+// minimum when the pool is short. Unattached prefix entries are evicted LRU
+// to fit that minimum; if it still does not fit, SHEDS the youngest active
+// request (retired Done / kPoolExhausted, the
 // service's finish_reason "length") until it does; a request with no
 // younger peer sheds itself. Every decision is a pure function of the
 // scheduler's state, so the journal keeps it identical on every rank. The
@@ -546,6 +554,10 @@ class Scheduler {
     int64_t prefill_chunk_available_tokens = 0;  // min(budget, remaining prompt), before structural cuts
     int64_t prefill_chunk_computed_tokens = 0;
     int64_t prefill_adaptive_limit_tokens = 0;  // last leader-selected ceiling; 0 = fixed policy
+    // The decoders' own pass the controller takes out of the allowance
+    // before sizing a chunk, at the last tick's load (ms; 0 with no
+    // decoders, none measured yet, or fixed budgeting).
+    double prefill_decode_pass_ms = 0.0;
     int64_t mixed_steps = 0;  // subset of decode_steps that also advanced prefill
     double mixed_ms = 0.0;    // included in BOTH prefill_ms and step_ms; subtract once when summing
     double prefill_ms = 0.0;
@@ -763,7 +775,7 @@ class Scheduler {
   // releases the old copy before it takes the new one, so only a first
   // partial copy does.
   bool snapshot_needs_block(int64_t position, int64_t previous) const;
-  // Frees pool blocks for a snapshot by evicting LRU unattached entries
+  // Frees pool blocks for growth or a snapshot by evicting LRU unattached entries
   // until `need` blocks are free; false when nothing evictable remains.
   bool ensure_free_blocks(int64_t need, const std::string& id);
   // The blocks an admission must find FREE: the reservation less the full
@@ -790,8 +802,8 @@ class Scheduler {
   int64_t reserve_blocks(const Request& r) const;
   // Grow-on-demand's tick-top pass (after the cancel sweep, before any
   // admission or step): every active request whose next step would write
-  // past its reservation grows it, shedding the youngest when the pool
-  // cannot cover even the minimum.
+  // past its reservation grows it, evicting LRU unattached cache entries
+  // before shedding the youngest if the pool cannot cover even the minimum.
   void grow_reservations();
   int youngest_active_after(int arrival) const;
   int free_slot() const;
@@ -877,6 +889,7 @@ class Scheduler {
   PrefillLatencyController prefill_latency_;
   int64_t prefill_pass_budget_tokens_ = 0;  // before final-tail allocation trims
   int64_t prefill_adaptive_limit_tokens_ = 0;
+  double prefill_decode_pass_ms_ = 0;  // meters: the learned decoders' pass at the last tick's load
   int64_t grows_ = 0;              // growth events (meters)
   int64_t pool_sheds_ = 0;         // requests shed at exhaustion (meters)
   int64_t prompts_prefilled_ = 0;  // the throughput line's counters (meters)
@@ -942,7 +955,8 @@ class SchedulerObserver {
   // an entry at `position`, arena `slot`), "snapshot" (an entry taken at a
   // prefill cut), "rolling" (a live request's rolling snapshot), "close"
   // (a rolling snapshot became an entry at retire), "evict" (an entry
-  // freed; `id` is the request whose admission needed the slot or blocks),
+  // freed; `id` is the request whose admission, growth or snapshot needed
+  // the slot or blocks),
   // "drop" (a rolling slot released without becoming an entry), "hop"
   // (a snapshot captured inside an MTP step), "hop_fallback" (capture was
   // skipped before sampled fallback passed the hop; `position` is the old

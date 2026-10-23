@@ -1,4 +1,5 @@
 #include "kernels/glm_mhc_launch.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cstdint>
 #include <stdexcept>
@@ -149,6 +150,7 @@ __global__ void mhc_comb_kernel(const float* __restrict__ logits_in,
                                 uint16_t* __restrict__ comb_out, int tokens,
                                 float hc_eps, int sinkhorn_iters,
                                 float* __restrict__ comb_f32) {
+  dgpp_pdl_wait();
   __shared__ float comb_seed[kN * kN];
   const int token = blockIdx.x;
   if (token >= tokens) return;
@@ -350,6 +352,7 @@ __global__ void mhc_dots_kernel(const uint16_t* __restrict__ streams,
                                 float* __restrict__ logits, int tokens,
                                 int hidden, float norm_eps,
                                 MhcFinishArgs fin) {
+  dgpp_pdl_wait();
   __shared__ float scratch[kThreads / 32];
   __shared__ int s_last;
 
@@ -485,6 +488,7 @@ __global__ __launch_bounds__(kThreads) void mhc_dots_tiled_kernel(
     const uint16_t* __restrict__ streams, const uint16_t* __restrict__ fn,
     float* __restrict__ logits, int tokens, int hidden, float norm_eps,
     MhcFinishArgs fin) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint4 tile_smem[];
   uint4* sX = tile_smem;                                   // [4][256]
   uint4* sF = tile_smem + kTileTokens * kTileChunkVecs;    // [12][256], two halves
@@ -587,6 +591,7 @@ template <int kPerThread>
 __global__ void mhc_finish_kernel(const uint16_t* __restrict__ streams,
                                   const float* __restrict__ logits_in,
                                   MhcFinishArgs fin, int tokens, int hidden) {
+  dgpp_pdl_wait();
   const int token = blockIdx.x;
   if (token >= tokens) return;
   mhc_finish_block<kPerThread>(token, streams, logits_in, fin, hidden);
@@ -602,6 +607,7 @@ __global__ void mhc_stream_update_f32_kernel(const float* __restrict__ post,
                                              const uint16_t* __restrict__ streams_in,
                                              uint16_t* __restrict__ streams_out,
                                              int tokens, int hidden) {
+  dgpp_pdl_wait();
   const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const size_t total = static_cast<size_t>(tokens) * hidden;
   if (idx >= total) return;
@@ -633,6 +639,7 @@ __global__ void mhc_collapse_normed_kernel(const uint16_t* __restrict__ streams,
                                            uint16_t* __restrict__ collapsed,
                                            uint16_t* __restrict__ normed,
                                            int tokens, int hidden, float ln_eps) {
+  dgpp_pdl_wait();
   __shared__ float fscratch[kThreads / 32];
   const int token = blockIdx.x;
   if (token >= tokens) return;
@@ -714,6 +721,7 @@ __global__ void mhc_stream_update_kernel(const uint16_t* __restrict__ post,
                                          const uint16_t* __restrict__ streams_in,
                                          uint16_t* __restrict__ streams_out,
                                          int tokens, int hidden) {
+  dgpp_pdl_wait();
   const size_t idx =
       static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const size_t total = static_cast<size_t>(tokens) * hidden;
@@ -742,6 +750,7 @@ __global__ void mhc_stream_update_kernel(const uint16_t* __restrict__ post,
 __global__ void mhc_final_mean_kernel(const uint16_t* __restrict__ streams,
                                       uint16_t* __restrict__ out, int tokens,
                                       int hidden) {
+  dgpp_pdl_wait();
   const size_t idx =
       static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const size_t total = static_cast<size_t>(tokens) * hidden;
@@ -809,6 +818,7 @@ __device__ __forceinline__ void ldmatrix_x2(uint32_t (&r)[2], const void* smem) 
 __global__ __launch_bounds__(mhc_mma::kThreads, 2) void mhc_dots_mma_kernel(
     const uint16_t* __restrict__ streams, const uint16_t* __restrict__ fn,
     float* __restrict__ logits, int tokens, int K, float norm_eps) {
+  dgpp_pdl_wait();
   using namespace mhc_mma;
   extern __shared__ __align__(16) uint8_t smem[];
   __shared__ float s_ssq[BM];

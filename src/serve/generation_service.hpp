@@ -63,28 +63,34 @@
 //   GET  /metrics, /v1/metrics  JSON counters and live prefill progress (ours).
 // See docs/openai-compatibility.md for the complete capability profile.
 //
-// Thread ownership (HTTP and engine threads, one shared mutex):
+// Thread ownership (HTTP, preparation workers and engine):
 //   * HTTP thread — HttpServer::serve() calls handle()/idle()/
-//     on_disconnect(). Parses, validates, tokenizes, renders the chat
-//     template (rank 0 only — never on the fabric critical path),
-//     creates request records, and formats SSE chunks from the rings.
+//     on_disconnect(). Owns sockets, dispatches preparation, publishes
+//     ready admissions, and formats SSE chunks from the rings.
+//   * Preparation workers — one per configured engine slot. Parse and
+//     validate owned requests, render, tokenize and prepare images.
+//     Results return to HTTP in completion order; workers never write sockets.
 //   * Engine thread — the app calls engine_pass() in a loop: it drains
 //     the admission/cancel queue into the scheduler and runs one
 //     scheduler quantum (sched.tick()). The scheduler observer (which
 //     is this service) appends token/retire events to the request
 //     records under the lock; the chat records' tool-call parser runs
 //     there too (pure host work, rank 0 only — the fabric never sees it).
-//   * The single mutex covers the event queue and the record list;
+//   * The service mutex covers the event queue and the record list;
+//     a separate mutex/condition variable protects preparation handoff.
 //     sockets are only ever written by the HTTP thread (idle()).
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "loaders/minijson.hpp"
@@ -101,6 +107,9 @@ namespace dgpp::serve {
 // so the whole HTTP/SSE/lifecycle stack runs without a model cache.
 class ModelFrontend {
  public:
+  // Loaded frontends are shared: preparation calls can overlap each other
+  // and decode calls on the engine/HTTP threads. Per-call state must be local
+  // or synchronized; model assets remain immutable while serving.
   struct ReasoningSettings {
     std::optional<bool> enable_thinking;
     std::optional<std::string> effort;
@@ -108,9 +117,9 @@ class ModelFrontend {
   virtual ~ModelFrontend() = default;
   // text -> token ids (the exact ByteLevel-BPE encode).
   virtual std::vector<int64_t> encode_text(std::string_view text) const = 0;
-  // ids -> text with special tokens skipped (the stream's content
-  // semantics; decode(ids) == decode(ids[0..n-1]) + suffix deltas, so
-  // incremental text is the suffix diff of successive full decodes).
+  // ids -> bytes with special tokens skipped. Must equal the concatenation
+  // of decode_ids({id}) for each id: streaming decodes only the new token.
+  // Individual results may split UTF-8; the HTTP layer buffers those bytes.
   virtual std::string decode_ids(const std::vector<int64_t>& ids) const = 0;
   // The template globals (minijson DOM object: "messages" — the OpenAI
   // messages array, normalized — plus optional "tools",
@@ -138,7 +147,10 @@ class ModelFrontend {
   // Qwen3.8-Flash-Next and GLM-4.7 templates, not of GLM-5.3-Flash's).
   virtual bool template_reads(std::string_view) const { return false; }
   // Resolve API effort into controls the model actually consumes. Models
-  // with only a thinking switch map every positive effort to that switch.
+  // with only a thinking switch map every positive effort to that switch;
+  // a model whose template reads neither control (Flint, 2026-10-22: the
+  // model opens its own <think> block) takes a positive effort as a
+  // no-op — nothing to set — and refuses "none" as every always-on model.
   virtual ReasoningSettings reasoning_settings(std::string_view effort) const {
     ReasoningSettings out;
     if (effort == "none") {
@@ -148,8 +160,6 @@ class ModelFrontend {
     } else {
       if (template_reads("enable_thinking")) out.enable_thinking = true;
       if (template_reads("reasoning_effort")) out.effort = std::string(effort);
-      if (!out.enable_thinking && !out.effort)
-        throw std::invalid_argument("this model exposes no reasoning control");
     }
     return out;
   }
@@ -168,6 +178,9 @@ struct ServiceConfig {
   int default_max_tokens = 256;  // when the request omits max_tokens
   int queue_limit = 64;          // admission bound; beyond → 503
   int admission_gather_ms = 3;   // an idle engine's wait for the rest of an arriving burst (0: none)
+  // Retained input and prepared payloads; transient parser/frontend scratch
+  // is additionally bounded by the request limits and the worker count.
+  size_t preparation_max_bytes = 1024ull * 1024 * 1024;
   int sse_ping_interval = kDefaultSsePingInterval;  // seconds; -1 disables
   dgpp::sched::AdmissionPolicy admission;  // full-reserve unless told otherwise
   // The sampling defaults every omitted request field takes: the
@@ -237,9 +250,13 @@ class GenerationService : public HttpHandler,
                     dgpp::sched::SchedulerEngine* engine,
                     const ModelFrontend* frontend,
                     std::vector<int64_t> eos_token_ids);
+  ~GenerationService() override;
 
   // ---- HttpHandler (HTTP thread) --------------------------------------
   void handle(const HttpRequest& req, HttpResponseWriter& w) override;
+  void set_wakeup(HttpWakeup wakeup) override { wakeup_ = std::move(wakeup); }
+  bool needs_work_wakeup() const override { return true; }
+  void set_work_wakeup(HttpWakeup wakeup) override { work_wakeup_ = std::move(wakeup); }
   void idle() override;
   void on_disconnect(uint64_t tag) override;
 
@@ -354,6 +371,8 @@ class GenerationService : public HttpHandler,
     prom::Histogram ttft_hit_s{prom::latency_buckets()};
     prom::Histogram ttft_miss_s{prom::latency_buckets()};
     prom::Histogram queue_s{prom::latency_buckets()};
+    prom::Histogram preparation_wait_s{prom::latency_buckets()};
+    prom::Histogram preparation_work_s{prom::latency_buckets()};
     prom::Histogram prefill_s{prom::latency_buckets()};
     prom::Histogram decode_s{prom::latency_buckets()};
     prom::Histogram e2e_s{prom::latency_buckets()};
@@ -394,7 +413,15 @@ class GenerationService : public HttpHandler,
   // A request's n choices (2026-09-06): one record per choice, one writer,
   // one end sequence once every choice is done — the usage summed, the
   // one-shot's choices assembled by index.
+  struct PreparationReservation {
+    std::shared_ptr<std::atomic<size_t>> budget;
+    size_t bytes = 0;
+    ~PreparationReservation() {
+      if (budget) budget->fetch_sub(bytes);
+    }
+  };
   struct ChoiceGroup {
+    std::unique_ptr<PreparationReservation> preparation_reservation;
     int sse_ping_interval = kDefaultSsePingInterval;
     int n = 1;
     int finished = 0;            // choices whose end sequence is written
@@ -483,8 +510,7 @@ class GenerationService : public HttpHandler,
     size_t content_span_cursor = 0;
     size_t lps_flushed = 0;    // streaming: entries already sent
     std::vector<int64_t> ids;  // generated so far
-    // Legacy completions: the suffix-diff text path.
-    std::string text;          // decoded so far (the suffix-diff base)
+    // Legacy completions: incremental decoded bytes.
     std::string delta;         // unflushed text delta (the ring)
     std::string out_text;      // the visible text: the stop cut applied
     // Chat: the parser splits the ids into reasoning / content / calls.
@@ -499,11 +525,36 @@ class GenerationService : public HttpHandler,
     HttpResponseWriter* writer = nullptr;  // HTTP thread only
   };
 
-  // Routes (HTTP thread). Each parses, validates, and either responds
-  // directly or creates a record + enqueues an admission.
-  void route_chat_completions(const HttpRequest& req,
-                              HttpResponseWriter& w);
-  void route_completions(const HttpRequest& req, HttpResponseWriter& w);
+  // Workers own their request and result; only HTTP touches writers and
+  // publishes completed groups. No parsed views escape the owned request.
+  struct PreparedRequest {
+    uint64_t tag = 0;
+    std::chrono::steady_clock::time_point arrived, queued, started, finished;
+    size_t accounted_bytes = 0;
+    bool needs_file = false, needs_seed = false;
+    std::optional<FileResponse> error;
+    std::vector<std::shared_ptr<StreamRecord>> records;
+    std::vector<dgpp::sched::SchedulerRequest> requests;
+  };
+  struct PreparationJob {
+    HttpRequest request;
+    PreparedRequest result;
+    HttpResponseWriter* writer = nullptr;  // HTTP only
+    bool file_processed = false;
+    enum class State { queued, running, ready } state = State::queued;
+    std::atomic<bool> cancelled{false};
+  };
+  void enqueue_preparation(const HttpRequest&, HttpResponseWriter&, uint64_t tag = 0,
+                           std::chrono::steady_clock::time_point arrived = {},
+                           bool file_processed = false);
+  void preparation_loop();
+  void pump_preparations();
+  void respond_unavailable(HttpResponseWriter&);
+  void stop_preparation();
+  bool reserve_preparation_bytes(size_t bytes);
+  bool reserve_prepared_payload(PreparedRequest&, size_t bytes);
+  void prepare_chat_completions(const HttpRequest& req, PreparedRequest& w);
+  void prepare_completions(const HttpRequest& req, PreparedRequest& w);
   void route_models(const HttpRequest& req, HttpResponseWriter& w);
   void route_health(HttpResponseWriter& w) const;
   void route_metrics(HttpResponseWriter& w);
@@ -513,30 +564,30 @@ class GenerationService : public HttpHandler,
   // waiting in the HTTP queue as queued.
   void count_live(dgpp::sched::Scheduler::Meters* m,
                   const std::vector<dgpp::PrefillMonitor::Request>& prefills) const;
-  bool validate_chat_parameters(const minijson::Value& body, HttpResponseWriter& w);
-  bool parse_max_tokens(const minijson::Value& body, HttpResponseWriter& w, int* steps, bool chat);
+  bool validate_chat_parameters(const minijson::Value& body, PreparedRequest& w);
+  bool parse_max_tokens(const minijson::Value& body, PreparedRequest& w, int* steps, bool chat);
   // OpenAI's ignore_eos: generate to the token limit whatever is drawn.
-  bool parse_ignore_eos(const minijson::Value& body, HttpResponseWriter& w, bool* ignore);
-  bool parse_sse_ping_interval(const minijson::Value& body, HttpResponseWriter& w, bool stream,
+  bool parse_ignore_eos(const minijson::Value& body, PreparedRequest& w, bool* ignore);
+  bool parse_sse_ping_interval(const minijson::Value& body, PreparedRequest& w, bool stream,
                                int* interval);
-  bool parse_stream_options(const minijson::Value& body, HttpResponseWriter& w,
+  bool parse_stream_options(const minijson::Value& body, PreparedRequest& w,
                             bool stream, bool* usage, bool* obfuscation);
   void write_stream_event(StreamRecord& r, std::string event, bool usage = false);
   void mark_content_logprobs(StreamRecord& r);
 
   // The request's sampling spec: every present field validated and
-  // applied over the defaults, the seed drawn when omitted. Responds 400
-  // (naming the field) and returns false on any refusal.
+  // applied over the defaults. An absent seed is drawn by HTTP on handoff.
+  // Records 400 (naming the field) and returns false on any refusal.
   bool parse_sampling(const dgpp::minijson::Value& body,
-                      HttpResponseWriter& w, sample::Params* sampling,
-                      uint64_t* seed);
+                      PreparedRequest& w, sample::Params* sampling,
+                      std::optional<uint64_t>* seed);
   // n, stop and logit_bias: validated per the schema, 400
   // naming the field otherwise; logit_bias also needs an engine that can
   // bias the pick and the vocabulary bound.
-  bool parse_n(const dgpp::minijson::Value& body, HttpResponseWriter& w, int* n);
-  bool parse_stop(const dgpp::minijson::Value& body, HttpResponseWriter& w,
+  bool parse_n(const dgpp::minijson::Value& body, PreparedRequest& w, int* n);
+  bool parse_stop(const dgpp::minijson::Value& body, PreparedRequest& w,
                   std::vector<std::string>* stops);
-  bool parse_logit_bias(const dgpp::minijson::Value& body, HttpResponseWriter& w,
+  bool parse_logit_bias(const dgpp::minijson::Value& body, PreparedRequest& w,
                         std::vector<dgpp::sched::LogitBias>* bias);
 
   // The chat request's conversation and tool fields (M6 6f): validates
@@ -552,9 +603,11 @@ class GenerationService : public HttpHandler,
     dgpp::text::ToolSchemas schemas;
     std::vector<std::string> custom_tools;
   };
-  bool parse_chat(const dgpp::minijson::Value& body, HttpResponseWriter& w,
+  bool parse_chat(const dgpp::minijson::Value& body, PreparedRequest& w,
                   ChatPlan* plan);
-  void enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat);
+  void enqueue_file_work(const HttpRequest& req, HttpResponseWriter& writer, bool chat,
+                         uint64_t tag = 0,
+                         std::chrono::steady_clock::time_point arrived = {});
   void pump_file_work();
 
   // The OpenAI error body (never a bare string).
@@ -562,11 +615,10 @@ class GenerationService : public HttpHandler,
                      const std::string& message, const std::string& type,
                      const std::string& param = "",
                      const std::string& code = "");
+  static void respond_error(PreparedRequest& w, int status,
+                            const std::string& message, const std::string& type,
+                            const std::string& param = "", const std::string& code = "");
 
-  // Admits a validated request: creates the record, hands the writer,
-  // and enqueues the submit (the engine thread applies it).
-  void enqueue_admission(std::shared_ptr<StreamRecord> record,
-                         dgpp::sched::SchedulerRequest request);
   // A request's n choices at once: admitted or shed together.
   void enqueue_group(std::vector<std::shared_ptr<StreamRecord>> records,
                      std::vector<dgpp::sched::SchedulerRequest> requests);
@@ -590,8 +642,9 @@ class GenerationService : public HttpHandler,
                                size_t to, bool unreported_only = false) const;
   std::string take_content_logprobs(StreamRecord& r) const;
   // The legacy text_completion logprobs object over every token.
-  std::string legacy_logprobs(const StreamRecord& r, size_t from = 0,
-                             size_t to = SIZE_MAX) const;
+  std::string legacy_logprobs(const StreamRecord& r, size_t from = 0, size_t to = SIZE_MAX,
+                              bool unreported_only = false) const;
+  std::string take_legacy_logprobs(StreamRecord& r) const;
   void on_retire(const std::string& id,
                  const dgpp::sched::Scheduler::Result& result) override;
   // Under mutex_: observe a pass's new tokens once, including its final
@@ -620,6 +673,8 @@ class GenerationService : public HttpHandler,
   void flush_stream_carries(StreamRecord& r);  // the held UTF-8 tails, at the end
 
   ServiceConfig cfg_;
+  HttpWakeup wakeup_;  // installed before producers start; immutable while running
+  HttpWakeup work_wakeup_;
   // Parsed once at startup; string values borrow storage from cfg_.
   minijson::Value default_chat_template_kwargs_;
   FileInputs file_inputs_;
@@ -627,7 +682,9 @@ class GenerationService : public HttpHandler,
     uint64_t tag;
     HttpResponseWriter* writer;
     bool chat;
+    std::chrono::steady_clock::time_point arrived;
     std::future<FileResponse> result;
+    std::future<void> worker;  // joins before file_inputs_ is destroyed
   };
   std::vector<PendingFileWork> file_work_;  // HTTP thread only; destroyed before file_inputs_
   std::atomic<size_t> pending_file_count_{0};  // observed by shutdown drain
@@ -673,8 +730,22 @@ class GenerationService : public HttpHandler,
                                  static_cast<uint64_t>(std::random_device{}())};
   Stats stats_;  // written under mutex_ (cheap, exact)
   bool sampling_available_ = false;
-  std::mt19937_64 seed_rng_;  // HTTP thread only (route handlers)
+  std::mt19937_64 seed_rng_;  // HTTP thread only (prepared request handoff)
   std::mt19937_64 obfuscation_rng_{std::random_device{}()};  // independent of sampler seeds
+
+  // Separate from the engine's lock. Workers sleep until work or shutdown;
+  // neither preparation nor joining a worker holds the engine mutex.
+  std::mutex preparation_mutex_;
+  std::condition_variable preparation_cv_;
+  bool preparation_stopping_ = false;
+  std::deque<std::shared_ptr<PreparationJob>> preparation_queue_, preparation_ready_;
+  std::vector<std::shared_ptr<PreparationJob>> preparation_jobs_;  // HTTP only
+  std::vector<std::thread> preparation_workers_;
+  std::atomic<size_t> preparation_count_{0};
+  // Reservations can outlive the preparation job and return capacity when
+  // the last choice record is released, including during service teardown.
+  std::shared_ptr<std::atomic<size_t>> preparation_bytes_ =
+      std::make_shared<std::atomic<size_t>>(0);
 };
 
 }  // namespace dgpp::serve

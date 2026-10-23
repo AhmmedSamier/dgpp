@@ -8,6 +8,7 @@
 
 #include "common/log.hpp"
 #include "loaders/minijson.hpp"
+#include "text/bpe.hpp"
 #include "text/unicode_normalize.hpp"
 #include "text/unicode_tables.hpp"
 
@@ -51,6 +52,29 @@ constexpr const char* kSplitPatternDsv41Cjk = "[\u4e00-\u9fa5\u3040-\u309f\u30a0
 // CR and LF stand in the file as the control characters themselves.
 constexpr const char* kSplitPatternDsv41Main =
     "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+";
+
+// The Flint pre-tokenizer (2026-10-22, docs/flint_plan.md §1.6): the
+// DeepSeek-V4.1 three-stage shape (number runs of at most three, the CJK
+// ranges) with stage 3's main pattern the o200k form over the case
+// classes, leftmost-first:
+//   C1 [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?
+//                               an optional prefix, an "upper" run (Lu, Lt, Lm, Lo, M), a
+//                               "lower" run (Ll, Lm, Lo, M) of at least one, an optional
+//                               contraction suffix
+//   C2 [^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*(?i:...)?
+//                               an upper run of at least one then a lower run
+//   C3 \ ?[\p{P}\p{S}]+[\r\n]*     the DeepSeek B3
+//   C4 \s*[\r\n]+                 B4;  C5 \s+(?!\S);  C6 \s+
+// The classes overlap (Lm, Lo and the marks sit in both runs): C1's
+// greedy upper run backtracks until a lower-class character opens the
+// lower run, so a word of upper-only characters falls to C2 and a word of
+// shared-class characters (CJK letters outside the stage-2 ranges, Lo
+// scripts) matches C1 whole. The contraction suffix is matched
+// case-insensitively and only after a letter run.
+constexpr const char* kSplitPatternFlintMain =
+    "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"
+    "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|"
+    " ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 
 [[noreturn]] void reject(const std::string& what) {
   throw std::runtime_error("glm_tokenizer: " + what);
@@ -326,7 +350,10 @@ class SplitScanner {
 // so the lookahead of \s+(?!\S) sees a piece's end as the text's end).
 class Dsv41Scanner {
  public:
-  Dsv41Scanner(std::string_view text, std::vector<std::string_view>* out) : text_(text), out_(out) {
+  // flint: stage 3 runs the Flint main pattern (kSplitPatternFlintMain)
+  // instead of the DeepSeek-V4.1 one.
+  Dsv41Scanner(std::string_view text, std::vector<std::string_view>* out, bool flint = false)
+      : text_(text), out_(out), flint_(flint) {
     size_t i = 0;
     while (i < text_.size()) {
       const int len = utf8_len(text_[i]);
@@ -439,9 +466,85 @@ class Dsv41Scanner {
     if (gap != b) emit(gap, b);
   }
 
+  // The Flint classes: the "upper" run (Lu, Lt, Lm, Lo, M) and the "lower"
+  // run (Ll, Lm, Lo, M); a character of a letter class outside Lu / Lt /
+  // Ll (Lm, Lo) and a mark sit in both.
+  bool upper_class(size_t i) const {
+    const uint32_t c = cps_[i];
+    return unicode::is_mark(c) || (unicode::is_letter(c) && !unicode::is_lower(c));
+  }
+  bool lower_class(size_t i) const {
+    const uint32_t c = cps_[i];
+    return unicode::is_mark(c) || (unicode::is_letter(c) && !unicode::is_upper_or_title(c));
+  }
+  // The optional contraction suffix at j within [j, b): the length matched
+  // (0 when none) — (?i:'s|'t|'re|'ve|'m|'ll|'d), the longest alternative
+  // first as the regex's leftmost-first order over the alternatives
+  // ('re, 've, 'll before 's, 't, 'm, 'd matters only where both could
+  // match, which they cannot: the two-letter forms begin with r, v, l).
+  size_t contraction(size_t j, size_t b) const {
+    if (j >= b || cps_[j] != '\'' || j + 1 >= b) return 0;
+    auto lower = [&](size_t i) -> uint32_t {
+      const uint32_t c = cps_[i];
+      return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+    };
+    const uint32_t a = lower(j + 1);
+    if (j + 2 < b) {
+      const uint32_t c2 = lower(j + 2);
+      if ((a == 'r' && c2 == 'e') || (a == 'v' && c2 == 'e') || (a == 'l' && c2 == 'l')) return 3;
+    }
+    if (a == 's' || a == 't' || a == 'm' || a == 'd') return 2;
+    return 0;
+  }
+  // The Flint stage 3: C1 / C2 (the letter runs with an optional prefix
+  // and suffix), then the DeepSeek B3 .. B6 tail. `letter_runs(s)` is the
+  // regex's own backtracking over the case classes from a letter-class
+  // character s: C1's greedy upper run [s, u) then a lower run of at
+  // least one — at u when the character there is lower-only, else backed
+  // up to the LAST lower-class (shared) character inside the upper run,
+  // whose lower run ends at the upper-only character after it (the regex
+  // gives the upper run back one character at a time until the lower run
+  // can open); C2 when the upper run holds no lower-class character at
+  // all: the run itself. The match is the regex's leftmost-first one, not
+  // the longest (a Thai run followed by capitals cuts after the Thai).
+  size_t letter_runs(size_t s, size_t b) const {
+    size_t u = s;
+    while (u < b && upper_class(u)) ++u;
+    if (u < b && lower_class(u)) {  // C1: the lower run opens at u
+      size_t l = u;
+      while (l < b && lower_class(l)) ++l;
+      return l + contraction(l, b);
+    }
+    size_t p = u;  // p - 1: the last lower-class character of the upper run
+    while (p > s && !lower_class(p - 1)) --p;
+    if (p > s) {  // C1 after the backtrack: the lower run is [p - 1, p)
+      size_t l = p - 1;
+      while (l < b && lower_class(l)) ++l;
+      return l + contraction(l, b);
+    }
+    if (u > s) return u + contraction(u, b);  // C2: upper-only characters
+    return s;
+  }
+  size_t match3_flint(size_t k, size_t b) const {
+    // The optional prefix (any character but CR, LF, a letter or a
+    // number) and the runs after it, tried first as the regex does; a
+    // mark at k is both a prefix and a run character, and the two paths
+    // meet on the same span.
+    if (!crlf(k) && !letter(k) && !number(k) && !mark(k) && k + 1 < b) {
+      const size_t e = letter_runs(k + 1, b);
+      if (e > k + 1) return e;
+    }
+    if (upper_class(k) || lower_class(k)) {
+      const size_t e = letter_runs(k, b);
+      if (e > k) return e;
+    }
+    return match_tail(k, b);
+  }
+
   // The end of the leftmost-first match at k within [k, b), or k when no
   // alternative matches.
   size_t match3(size_t k, size_t b) const {
+    if (flint_) return match3_flint(k, b);
     // B1: one ASCII punctuation/symbol character + ASCII letters.
     if (ascii_punct(cps_[k]) && k + 1 < b && ascii_letter(cps_[k + 1])) {
       size_t j = k + 2;
@@ -459,6 +562,12 @@ class Dsv41Scanner {
       while (j < b && run_char(j)) ++j;
       return j;
     }
+    return match_tail(k, b);
+  }
+
+  // B3 .. B6 (shared by both main patterns): the punctuation / symbol run
+  // with its CR/LFs, the whitespace alternatives.
+  size_t match_tail(size_t k, size_t b) const {
     // B3: optional literal space + a punctuation/symbol run + CR/LFs.
     {
       size_t j = k;
@@ -490,6 +599,7 @@ class Dsv41Scanner {
 
   std::string_view text_;
   std::vector<std::string_view>* out_;
+  bool flint_ = false;
   std::vector<uint32_t> cps_;
   std::vector<size_t> starts_;
 };
@@ -499,8 +609,9 @@ class Dsv41Scanner {
 // ---------------------------------------------------------------------------
 // Load + validate.
 // ---------------------------------------------------------------------------
-Tokenizer Tokenizer::load(const std::string& path) {
+Tokenizer Tokenizer::load(const std::string& path, size_t word_cache_entries) {
   Tokenizer t;
+  if (word_cache_entries) t.word_cache_ = std::make_unique<detail::WordCache>(word_cache_entries);
   t.json_buf_ = read_file(path);
   t.revision_hash_ = fnv1a_bytes(t.json_buf_.data(), t.json_buf_.size());
   build_byte_level_maps(t.byte_to_cp_, t.cp_to_byte_);
@@ -557,11 +668,14 @@ Tokenizer Tokenizer::load(const std::string& path) {
       reject("Split pattern differs from the pinned regexes (the scanner "
              "hardcodes them — update the scanner or the checkpoint)");
   } else {
-    if (split_regex(0) != kSplitPatternDsv41Numbers || split_regex(1) != kSplitPatternDsv41Cjk ||
-        split_regex(2) != kSplitPatternDsv41Main)
-      reject("the three Split patterns differ from the pinned DeepSeek-V4.1 regexes (the scanner "
+    if (split_regex(0) != kSplitPatternDsv41Numbers || split_regex(1) != kSplitPatternDsv41Cjk)
+      reject("the first two Split patterns differ from the pinned three-stage regexes (the scanner "
              "hardcodes them — update the scanner or the checkpoint)");
-    t.pattern_ = 2;
+    if (split_regex(2) == kSplitPatternDsv41Main) t.pattern_ = 2;
+    else if (split_regex(2) == kSplitPatternFlintMain) t.pattern_ = 4;
+    else
+      reject("the third Split pattern differs from the pinned DeepSeek-V4.1 and Flint regexes (the scanner "
+             "hardcodes them — update the scanner or the checkpoint)");
   }
   if (want_bool(pres[splits], "use_regex", "ByteLevel"))
     reject("ByteLevel use_regex must be false (map-only)");
@@ -714,7 +828,7 @@ Tokenizer Tokenizer::load(const std::string& path) {
       "tokenizer: loaded vocab {} merges {} added {} (revision 0x{:016x}; "
       "{} pattern, {}, ignore_merges {})",
       t.vocab_.size(), t.merge_rank_.size(), t.added_tokens_.size(),
-      t.revision_hash_, t.pattern_ == 2 ? "deepseek-v4.1" : t.pattern_ == 1 ? "qwen" : t.pattern_ == 3 ? "qwen2" : "glm", t.nfc_ ? "NFC" : "no normalizer",
+      t.revision_hash_, t.pattern_ == 2 ? "deepseek-v4.1" : t.pattern_ == 4 ? "flint" : t.pattern_ == 1 ? "qwen" : t.pattern_ == 3 ? "qwen2" : "glm", t.nfc_ ? "NFC" : "no normalizer",
       t.ignore_merges_);
   return t;
 }
@@ -766,8 +880,8 @@ void Tokenizer::encode_segment(std::string_view segment,
     segment = normalized;
   }
   std::vector<std::string_view> pretokens;
-  if (pattern_ == 2) {
-    Dsv41Scanner scanner(segment, &pretokens);
+  if (pattern_ == 2 || pattern_ == 4) {
+    Dsv41Scanner scanner(segment, &pretokens, /*flint=*/pattern_ == 4);
     scanner.run();
   } else {
     SplitScanner scanner(segment, &pretokens, /*marks=*/pattern_ == 1, /*single_number=*/pattern_ == 1 || pattern_ == 3);
@@ -805,12 +919,16 @@ void Tokenizer::encode_word(std::string_view mapped,
       return;
     }
   }
-  // Initial symbols: one per mapped codepoint (1-3 UTF-8 bytes each).
-  // `owned` holds every merged string for the WHOLE call — reserved once
-  // so push_back can never reallocate (a realloc would dangle the
-  // string_views in `symbols`; total merges <= initial count - 1).
+  if (word_cache_) {
+    word_cache_->append(mapped, out, [&] { merge_word(mapped, out); });
+  } else {
+    merge_word(mapped, out);
+  }
+}
+
+void Tokenizer::merge_word(std::string_view mapped, std::vector<int64_t>* out) const {
+  // Adjacent spans remain in `mapped` throughout both merge algorithms.
   std::vector<std::string_view> symbols;
-  std::vector<std::string> owned;
   symbols.reserve(mapped.size());
   for (size_t i = 0; i < mapped.size();) {
     const unsigned char b = static_cast<unsigned char>(mapped[i]);
@@ -818,43 +936,10 @@ void Tokenizer::encode_word(std::string_view mapped,
     symbols.push_back(mapped.substr(i, len));
     i += len;
   }
-  owned.reserve(symbols.size());
-
-  // The merge loop: lowest rank first, ALL occurrences per pass,
-  // left-to-right non-overlapping (HF 0.23's bpe semantics).
-  for (;;) {
-    uint32_t best_rank = UINT32_MAX;
-    size_t best_i = 0;
-    bool found = false;
-    for (size_t i = 0; i + 1 < symbols.size(); ++i) {
-      const auto it = merge_rank_.find(MergeKey{symbols[i], symbols[i + 1]});
-      if (it != merge_rank_.end() && it->second < best_rank) {
-        best_rank = it->second;
-        best_i = i;
-        found = true;
-      }
-    }
-    if (!found) break;
-    // Capture the pair BY VALUE before the rebuild (symbols[best_i+1] is
-    // about to move).
-    const std::string first(symbols[best_i]);
-    const std::string second(symbols[best_i + 1]);
-    std::vector<std::string_view> next;
-    next.reserve(symbols.size());
-    size_t i = 0;
-    while (i < symbols.size()) {
-      if (i + 1 < symbols.size() && symbols[i] == first &&
-          symbols[i + 1] == second) {
-        owned.push_back(first + second);
-        next.push_back(owned.back());
-        i += 2;
-      } else {
-        next.push_back(symbols[i]);
-        ++i;
-      }
-    }
-    symbols = std::move(next);
-  }
+  detail::bpe_merge(symbols, [&](std::string_view first, std::string_view second) {
+    const auto it = merge_rank_.find(MergeKey{first, second});
+    return it == merge_rank_.end() ? UINT32_MAX : it->second;
+  });
   for (const std::string_view s : symbols) {
     const auto it = vocab_.find(s);
     if (it == vocab_.end())

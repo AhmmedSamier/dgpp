@@ -1,13 +1,14 @@
 #include "loaders/resident_image.hpp"
 
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
+#include <filesystem>
+#include <limits>
+#include <stdexcept>
 #include <sys/stat.h>
 #include <unistd.h>
-
-#include <cerrno>
-#include <cstring>
-#include <filesystem>
-#include <stdexcept>
 
 #include "common/log.hpp"
 
@@ -120,13 +121,15 @@ ResidentImage::ResidentImage(const std::string& dir, uint64_t key,
   if (fresh) {
     write_fresh(key);
   } else {
-    pread_all(fd_, entries_.data(), sizeof(Entry) * entries_.size(),
-              sizeof(Header), path_);
-    // An entry whose blob would run past the file is a torn write that
-    // somehow got published — treat it as absent rather than trust it.
+    pread_all(fd_, entries_.data(), sizeof(Entry) * entries_.size(), sizeof(Header), path_);
+    // A published blob must be aligned, outside the table and wholly in
+    // the file. Subtract only after checking the offset to avoid wrapping
+    // corrupted offset/length pairs. Invalid entries are rebuilt.
+    const uint64_t file_bytes = static_cast<uint64_t>(st.st_size);
     for (Entry& e : entries_)
       if (e.bytes != 0 &&
-          e.offset + e.bytes > static_cast<uint64_t>(st.st_size))
+          (e.offset < table_bytes || e.offset % kBlobAlign != 0 || e.offset > file_bytes ||
+           e.bytes > file_bytes - e.offset || e.bytes > std::numeric_limits<size_t>::max()))
         e = Entry{};
   }
 }
@@ -206,6 +209,11 @@ void ResidentImage::write_blob(const void* src, size_t bytes,
                bytes - direct, offset + direct, path_);
 }
 
+bool ResidentImage::verification_enabled() {
+  const char* value = std::getenv("DGPP_RESIDENT_CACHE_VERIFY");
+  return !value || std::strcmp(value, "0") != 0;
+}
+
 void ResidentImage::read_layer(int layer, void* dst, size_t bytes,
                                   bool verify) const {
   // Snapshot the entry under the mutex; the blob itself moves outside it
@@ -234,6 +242,20 @@ void ResidentImage::read_layer(int layer, void* dst, size_t bytes,
     throw std::runtime_error("resident image " + path_ + ": layer " +
                              std::to_string(layer) +
                              " failed verification (corrupt blob)");
+}
+
+bool ResidentImage::try_read_layer(int layer, void* dst, size_t bytes) {
+  if (!has_layer(layer)) return false;
+  try {
+    read_layer(layer, dst, bytes);
+    return true;
+  } catch (const std::runtime_error& e) {
+    DGPP_LOG_WARN("resident image {}: layer {} rejected ({}) — rebuilding from the checkpoint",
+                  path_, layer, e.what());
+    std::lock_guard<std::mutex> lk(mutex_);
+    entries_[static_cast<size_t>(layer)] = Entry{};
+    return false;
+  }
 }
 
 void ResidentImage::write_layer(int layer, const void* src, size_t bytes) {
@@ -265,6 +287,29 @@ void ResidentImage::write_layer(int layer, const void* src, size_t bytes) {
     e.fold = blob_fold;
     write_entry(layer);
   }
+}
+
+std::unique_ptr<ResidentImage> ResidentImage::open_for(const std::string& dir, uint64_t key, int layers,
+                                                       uint64_t payload, bool* replaced) {
+  if (replaced) *replaced = false;
+  auto image = std::make_unique<ResidentImage>(dir, key, layers);
+  uint64_t noted = 0;
+  if (image->read_note(kPayloadNoteName, &noted, sizeof noted)) {
+    if (noted == payload) return image;
+    // Another checkpoint's weights under this key: the image, its digest
+    // (over the SOURCE) and this note all describe the old bytes.
+    const std::filesystem::path stem(image->stem_);
+    image.reset();
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+      const std::string name = entry.path().filename().string();
+      if (name.rfind(stem.filename().string() + ".", 0) == 0) std::filesystem::remove(entry.path(), ec);
+    }
+    image = std::make_unique<ResidentImage>(dir, key, layers);
+    if (replaced) *replaced = true;
+  }
+  image->write_note(kPayloadNoteName, &payload, sizeof payload);
+  return image;
 }
 
 std::string ResidentImage::note_path(const std::string& name) const {

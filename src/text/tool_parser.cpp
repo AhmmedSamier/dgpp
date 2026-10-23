@@ -48,6 +48,10 @@ ChatMarkers ChatMarkers::from_tokenizer(const Tokenizer& tok) {
   {
     const std::vector<int64_t> nl = tok.encode("\n");
     if (nl.size() == 1) m.newline = ChatMarker{nl[0], "\n"};
+    for (int run = 1; run <= 4; ++run) {
+      const std::vector<int64_t> ids = tok.encode(std::string(static_cast<size_t>(run), '\n'));
+      if (ids.size() == 1) m.newline_ids.push_back(ids[0]);
+    }
   }
   return m;
 }
@@ -121,21 +125,14 @@ ToolCallParser::ToolCallParser(ChatMarkers markers, Decode decode,
   }
 }
 
-void ToolCallParser::run_append(Run* run, int64_t id, Event::Kind kind,
+void ToolCallParser::run_append(int64_t id, Event::Kind kind,
                                 std::vector<Event>* out) {
-  run->ids.push_back(id);
-  // Exact incremental text: the suffix diff of successive full decodes of
-  // the run — UTF-8 splits and skipped special tokens come out right by
-  // construction (the tokenizer's own decode, pinned by its goldens).
-  const std::string full = decode_(run->ids);
-  if (full.size() > run->text.size()) {
-    Event ev;
-    ev.kind = kind;
-    ev.text.assign(full, run->text.size(), std::string::npos);
-    if (options_.track_tokens) ev.tokens.push_back({current_token_, 0, ev.text.size()});
-    out->push_back(std::move(ev));
-  }
-  run->text = full;
+  Event ev;
+  ev.kind = kind;
+  ev.text = decode_({id});
+  if (ev.text.empty()) return;
+  if (options_.track_tokens) ev.tokens.push_back({current_token_, 0, ev.text.size()});
+  out->push_back(std::move(ev));
 }
 
 void ToolCallParser::enter_tool_call(int64_t opening_id) {
@@ -475,22 +472,20 @@ void ToolCallParser::dsml_content_append(int64_t id, std::vector<Event>* out) {
     ev.text = kDsmlText;
     if (options_.track_tokens) ev.tokens.push_back({current_token_, 0, ev.text.size()});
     out->push_back(std::move(ev));
-    run_.ids.push_back(id);
-    run_.text = decode_(run_.ids);
+    run_.text += decode_({id});  // the production decoder skips this tag
     dsml_emitted_ = run_.text.size();
     return;
   }
-  run_.ids.push_back(id);
-  const std::string full = decode_(run_.ids);
-  if (options_.track_tokens && full.size() > run_.text.size())
-    run_.tokens.push_back({current_token_, run_.text.size(), full.size()});
-  run_.text = full;
-  const size_t held = dsml_held_suffix(full);
-  const size_t emit_to = full.size() >= held ? full.size() - held : 0;
+  const size_t begin = run_.text.size();
+  run_.text += decode_({id});
+  if (options_.track_tokens && run_.text.size() > begin)
+    run_.tokens.push_back({current_token_, begin, run_.text.size()});
+  const size_t held = dsml_held_suffix(run_.text);
+  const size_t emit_to = run_.text.size() - held;
   if (emit_to > dsml_emitted_) {
     Event ev;
     ev.kind = Event::Kind::kContent;
-    ev.text.assign(full, dsml_emitted_, emit_to - dsml_emitted_);
+    ev.text.assign(run_.text, dsml_emitted_, emit_to - dsml_emitted_);
     slice_tokens(&ev, run_.tokens, dsml_emitted_, emit_to);
     out->push_back(std::move(ev));
     dsml_emitted_ = emit_to;
@@ -695,7 +690,7 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
       }
       // The prompt already opened the block; a repeated opener is noise.
       if (is_marker(id, markers_.think_open)) return;
-      run_append(&run_, id, Event::Kind::kReasoning, out);
+      run_append(id, Event::Kind::kReasoning, out);
       return;
 
     case State::kContent:
@@ -719,7 +714,7 @@ void ToolCallParser::feed(int64_t id, std::vector<Event>* out) {
         return;
       }
       content_started_ = true;
-      run_append(&run_, id, Event::Kind::kContent, out);
+      run_append(id, Event::Kind::kContent, out);
       return;
 
     case State::kToolCall:

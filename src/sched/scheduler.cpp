@@ -162,16 +162,21 @@ void Scheduler::grow_reservations() {
     int64_t target = std::min<int64_t>(
         full, std::max<int64_t>(need, r.reserved_tokens + policy_.window_tokens));
     const int64_t held = engine_->reservation_blocks(r.reserved_tokens);
+    const int64_t minimum_blocks = engine_->reservation_blocks(need) - held;
     for (;;) {
+      // Idle cached histories give way before live work. Reclaim only enough
+      // for the next step: an optional full window must not evict more cache.
+      // The helper rechecks physical capacity after every release, since
+      // snapshots can share blocks with each other and with live requests.
+      const bool fits = ensure_free_blocks(minimum_blocks, r.spec.id);
       const int64_t free_blocks =
           engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
-      if (engine_->reservation_blocks(target) - held <= free_blocks) break;
-      if (engine_->reservation_blocks(need) - held <= free_blocks) {
-        target = need;  // the minimum, rather than shedding for a full window
+      if (fits) {
+        if (engine_->reservation_blocks(target) - held > free_blocks) target = need;
         break;
       }
-      // Even the minimum does not fit: the youngest reserved request goes —
-      // this one when nothing younger is live.
+      // No evictable cache remains and even the minimum does not fit: the
+      // youngest reserved request goes — this one when nothing younger is live.
       const int victim = youngest_active_after(static_cast<int>(i));
       const int shed = victim >= 0 ? victim : static_cast<int>(i);
       Request& v = requests_[static_cast<size_t>(shed)];
@@ -1380,7 +1385,8 @@ std::optional<int64_t> Scheduler::next_prefill_budget() const {
   // keeps the engine's efficient chunk (PrefillLatencyTuning::idle_floor_tokens).
   const int64_t floor = decoders == 0 && !waiting_arrival ? policy_.prefill_latency.idle_floor_tokens : 0;
   return prefill_latency_.limit(decoders, prefill_context(), target, initial,
-                                cap, engine_->prefill_chunk_alignment(), floor, policy_.prefill_latency);
+                                cap, engine_->prefill_chunk_alignment(), floor, engine_->prefill_wave_rows(),
+                                policy_.prefill_latency);
 }
 
 int64_t Scheduler::prefill_context() const {
@@ -1406,6 +1412,14 @@ bool Scheduler::tick(std::optional<int64_t> prefill_budget) {
   const auto started = prefill_budget ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   const int64_t computed = prefill_chunk_computed_tokens_, offered = prefill_chunk_budget_tokens_;
   const int64_t context = prefill_budget ? prefill_context() : 0;  // where this chunk starts
+  // A tick that can only step: decoders, and nothing queued or reading.
+  // Its duration is the pass a mixed tick at this load pays before it
+  // reads a token (PrefillLatencyController::observe_decode).
+  const bool decode_only = prefill_budget && decoders > 0 &&
+      std::none_of(requests_.begin(), requests_.end(), [](const Request& r) {
+        return r.state == State::kQueued || r.state == State::kPrefilling;
+      });
+  const int64_t steps = decode_steps_;
   prefill_pass_budget_tokens_ = 0;
   const bool more = quantum(prefill_budget);
   // A completed group measures final projection/admission work as well as a
@@ -1417,6 +1431,11 @@ bool Scheduler::tick(std::optional<int64_t> prefill_budget) {
         std::max(prefill_pass_budget_tokens_, prefill_chunk_budget_tokens_ - offered),
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
         policy_.prefill_latency);
+  else if (decode_only && decode_steps_ > steps && prefill_chunk_computed_tokens_ == computed)
+    prefill_latency_.observe_decode(decoders,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count(),
+        policy_.prefill_latency);
+  if (prefill_budget) prefill_decode_pass_ms_ = prefill_latency_.decode_pass(decoders);
   compact_retired();
   return more;
 }
@@ -1845,6 +1864,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefill_chunk_available_tokens = prefill_chunk_available_tokens_;
   m.prefill_chunk_computed_tokens = prefill_chunk_computed_tokens_;
   m.prefill_adaptive_limit_tokens = prefill_adaptive_limit_tokens_;
+  m.prefill_decode_pass_ms = prefill_decode_pass_ms_;
   m.mixed_steps = mixed_steps_;
   m.mixed_ms = mixed_ms_;
   m.prefill_ms = prefill_ms_;

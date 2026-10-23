@@ -1,7 +1,7 @@
 # DGPP Engine Design
 
 This document describes the implemented serving architecture. The
-shared runtime supports the GLM, Qwen, DeepSeek and MiMo architectures listed
+shared runtime supports the GLM, Qwen, DeepSeek, MiMo and Flint architectures listed
 in the [supported-model guide](README.md), with resident loading, tensor
 parallelism, decode graphs, sampling, prefix caching and speculative decoding.
 World size and memory requirements depend on the model
@@ -204,6 +204,19 @@ root precedence `HF_HUB_CACHE`, `HF_HOME/hub`, then
 ambiguous or missing snapshots are errors. `--checkpoint-dir` also
 accepts fixture or staged directories. Each rank loads its own slices
 from the node's checkpoint.
+
+The safetensors reader validates header lengths and payload-relative tensor
+offsets before constructing mapped views. Dimensions and offsets must be
+nonnegative integers; the checked shape product and dtype width must match
+the tensor's byte interval. Scalars and empty tensors remain supported.
+Validation preserves the raw header hash used by resident-image cache keys.
+Resident-image entries are checked for aligned offsets beyond the header/table
+and for byte ranges wholly inside the file. Invalid entries are treated as
+missing layers and rebuilt from the checkpoint.
+Resident-image payload folds are verified before upload by default;
+`DGPP_RESIDENT_CACHE_VERIFY=0` opts out of the payload pass. A read failure,
+size mismatch or failed fold causes that layer to be rebuilt and recached.
+This validation runs during loading and does not change resident inference.
 
 Resident serving loads the rank's weights at startup and keeps them for
 the process lifetime. GLM-5.3-Flash-FP8 requires TP=4 on 128 GB Sparks:
@@ -2080,7 +2093,19 @@ merge walk. Unicode tables and normalization live under `src/text/`.
 Unsupported tokenizer configurations are errors.
 
 The tokenizer is loaded once; encode and decode are const and
-thread-safe. Golden corpora compare token IDs and decoded bytes against
+thread-safe. BPE merges use adjacent spans into the mapped pretoken. Small
+words and geometrically shrinking runs use in-place passes. Long words get
+a budget of four times their initial symbol count in pair probes, then
+switch at a pass boundary to a heap ordered by rank and input position.
+Each heap phase merges only pairs available at its start; newly created
+neighbors wait for the next phase, including when their rank is lower.
+This preserves the original all-occurrences, left-to-right semantics while
+bounding repeated scans. There is no deployment setting for the algorithm.
+An optional per-tokenizer cache reuses IDs for mapped words of at most 256
+bytes. Its configured slot count is bounded, collisions replace entries,
+and try-locks let a busy shard fall back to normal merging. It stores owned
+keys and IDs, preserves the GLM vocabulary shortcut, and defaults to disabled.
+See [tokenization](docs/tokenization.md) for bounds and validation. Golden corpora compare token IDs and decoded bytes against
 reference tokenizers and are keyed by the tokenizer file's hash. A
 different checkpoint revision must use its matching corpus.
 
@@ -2108,13 +2133,23 @@ sum. A counter-based SplitMix64 RNG derives draws from the request's
 seed and counter. Greedy selection consumes no random draw.
 
 Defaults come from `generation_config.json`, with explicit handling of
-missing fields and EOS IDs. Process flags and request fields override
-them. Generation stop IDs are resolved separately from the model's
+missing fields and EOS IDs. Deployment penalty defaults, process flags and
+request fields override them in that order; omitted or null request fields
+inherit the served defaults. Generation stop IDs are resolved separately from the model's
 `config.json` EOS: Qwen PLE uses the trained EOS for n-gram padding and
 context resets. `/v1/models` reports effective defaults. The service journals
 sampling parameters as float bits together with the seed, allowing peers
 to reproduce the request's draws. Eager and graph engines both support
 sampling; a backend without that capability rejects stochastic requests.
+
+The full host sampler, eager greedy reports and bus sampling fold skip
+context counting and penalty application when the effective repetition
+penalty is 1 and both additive penalties are positive zero. Active and
+negative-zero parameters retain the original arithmetic; reference samplers
+remain unchanged. The numerical contract is non-NaN logits, round-to-nearest
+and gradual underflow, without preserving floating-point exception flags or
+traps. Greedy requests carrying penalties journal their sampling parameters
+even when they do not request probability reports.
 
 ### Candidate tables and exact fallback
 
@@ -2323,12 +2358,62 @@ the same machine from the journal and its tokenizer.
 
 ## 11. Runtime and API
 
+HTTP request lengths are fully parsed as unsigned decimal integers after trimming
+space/tab padding. Repeated `Content-Length` fields must agree numerically and
+become one canonical field; comma-separated lengths are rejected. Invalid or
+conflicting lengths receive HTTP 400 and close before handler dispatch. Exceptions
+escaping `HttpHandler::handle` retain their diagnostic in server logs and return a
+generic HTTP 500 JSON error. Service-level error responses are unchanged.
+Parser refusals stop further request processing and drain queued responses before
+closing, including earlier pipelined replies under output backpressure. Handler
+exceptions replace only that handler's pending output, preserving earlier replies.
+Input arriving during the drain is discarded without dispatch or buffering so
+unread request bytes do not reset the socket when queued output finishes.
+
 The server separates HTTP processing from model execution. Rank 0 runs
 the text frontend and generation service; every rank runs a scheduler and
-model engine. The HTTP thread accepts and validates requests, renders
-templates, tokenizes prompts and writes responses. The engine thread owns
-admissions, model operations and token events. A mutex protects the event
-queue and request records; sockets are written only by the HTTP thread.
+model engine. The HTTP thread owns connections and publishes prepared
+requests. A persistent preparation pool has one worker per configured engine
+request slot. Workers parse and validate JSON, render templates, tokenize
+prompts and prepare images. Completed requests enter admission in completion
+order; request identities and arrival timestamps survive file extraction and
+preparation. File extraction uses its separately bounded workers so subprocess
+waits do not occupy preparation threads. The engine thread owns scheduler
+admission, model operations and token events. Sockets are written only by HTTP.
+
+The preparation queue admits at most `engine.max_concurrency + engine.queue_limit`
+requests across queued, running and completed stages. A 1 GiB budget bounds
+retained input and prepared payloads, including per-choice token/image copies
+and a conservative allowance for metadata and grammar strings. Reservations
+stay charged through scheduler admission and response completion. Temporary
+parser and frontend allocations are additional; the request limits and fixed
+worker count bound their concurrency. Unstarted disconnected requests release
+their capacity immediately. Workers sleep on a condition variable when idle
+and join before the service's frontend dependencies are destroyed.
+
+Explicit and fixed sampling seeds retain their meaning. Seedless requests draw
+once on HTTP when their prepared result reaches admission; completion order can
+therefore change their random draws. Preparation wait and work histograms expose
+the new stage, and request latency begins at HTTP dispatch, before preparation.
+
+The HTTP loop drains asynchronous output once per pass. `http.stream_flush`
+defaults to `pass`, which retains the 25 ms quiet-loop timeout for generated
+output. Preparation and file completions always notify through a nonblocking,
+close-on-exec `eventfd`; `wake` also notifies for generated output.
+Producers publish results under their existing
+synchronization, then notify; the HTTP thread clears the accumulated counter
+and performs its normal drain and socket flush. Notifications arriving during
+a drain remain pending for the next pass. The timeout still drives maintenance
+when no output is available.
+
+A copyable notification handle owns the descriptor independently of the server,
+so a late file worker cannot write a recycled descriptor after server teardown.
+File workers publish a value or exception through a separate promise before
+notifying: the worker's `std::async` future alone becomes ready too late to
+notify from inside that worker. Workers remain joined during service teardown.
+Token text and logprobs may be delivered separately; wake mode also drains
+legacy logprob-only updates. Rejections, retirements, shutdown and engine
+failure notify without changing scheduler or journal decisions.
 
 Streaming keep-alives run in `GenerationService::idle()` after draining all
 normal and terminal events. `HttpResponseWriter` frames comments inside HTTP

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 namespace dgpp {
@@ -39,6 +40,19 @@ void full_attn_decode(const uint16_t* q, int64_t q_row_stride, const uint16_t* k
 size_t full_attn_partials_bytes(int rows, int kv_heads);
 int full_attn_max_splits();
 
+// The fp8 storage form (engine.kv_dtype = fp8 on the Qwen3.5 mixed
+// release, 2026-10-16): the caches hold e4m3 codes of K / k_scale and
+// V / v_scale (kv_scales: F32 [2] on the device, the layer's shipped
+// kv_cache_scheme scalars); the math is the bf16 form's on the widened
+// codes, with k_scale folded into the softmax scale and v_scale applied to
+// the output. Bitwise the bf16 form run on the widened planes with
+// scale * k_scale and its output times v_scale (the tests' gate).
+void full_attn_decode_fp8(const uint16_t* q, int64_t q_row_stride, const uint8_t* k_cache,
+                          const uint8_t* v_cache, const int32_t* req_ids, const int64_t* pos, int rows,
+                          int local_heads, int kv_heads, int block_tokens, const int32_t* block_tables,
+                          int blocks_per_request, float scale, const float* kv_scales, float* out,
+                          float* partials, cudaStream_t stream);
+
 // The prefill form: `rows` consecutive rows of one request (block_table =
 // that request's row of the tables), positions per row. Groups wider than
 // eight heads take the row form (req_ids / block_tables as above).
@@ -47,6 +61,74 @@ void full_attn_prefill(const uint16_t* q, int64_t q_row_stride, const uint16_t* 
                        const int64_t* pos, int rows, int local_heads, int kv_heads, int block_tokens,
                        const int32_t* block_tables, int blocks_per_request, float scale, float* out,
                        cudaStream_t stream);
+
+// The staged form (2026-10-15): the K/V tile fetched by the TMA engine's
+// 2-D box copies instead of per-thread 16-byte cp.async — one tensor map per
+// plane over the pool as a [rows, kv_heads * 256] bf16 tensor, four 32 x 64
+// boxes per plane per tile with the 128-byte swizzle, completion on the
+// stage's mbarrier. Measured on the GB10 at 262K context: 56.5 -> 60.6
+// TFLOP/s at full waves, 49 -> 54 at 1024-row chunks, 35 -> 40 at 256.
+// Bitwise the cp.async form (the same tiles, the same operands).
+struct FullAttnStageMaps {
+  CUtensorMap k;
+  CUtensorMap v;
+};
+// Whether the staged form serves this geometry: <= 8 query heads per KV
+// head (one warp each), a page of >= 32 tokens that is a power of two.
+bool full_attn_tma_supported(int local_heads, int kv_heads, int block_tokens);
+// The maps over `rows` cache rows of `kv_heads * 256` bf16 each (a pool's
+// Full-layer planes stacked: layers x slots), built once per pool.
+FullAttnStageMaps full_attn_stage_maps(const uint16_t* k_cache, const uint16_t* v_cache, int64_t rows,
+                                       int kv_heads);
+// The prefill form over the maps; `row_base` is the layer's first row in
+// them (layer x slots), the block table and positions as full_attn_prefill.
+void full_attn_prefill_tma(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                           int64_t q_row_stride, const int32_t* block_table, const int64_t* pos, int rows,
+                           int local_heads, int kv_heads, int block_tokens, float scale, float* out,
+                           cudaStream_t stream);
+// The block decode form (2026-10-16): decode rows grouped by request —
+// `spans` int32 [groups, 2] = (first row, count) on the device (null: one
+// group of all `rows`, at most 16), req_ids / pos per row (a negative
+// position is a padding row: zero output). One CTA per (group, KV head,
+// key split) stages every 32-key tile once for the group's rows and heads
+// through the TMA maps; a row's arithmetic and bits are the row form's
+// (full_attn_decode) exactly, split ranges included, so the forms may
+// mix. `partials` as full_attn_decode (null: the unsplit walk). Needs
+// full_attn_tma_supported geometry; groups hold at most 16 rows.
+void full_attn_decode_blocks(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                             int64_t q_row_stride, const int32_t* req_ids, const int64_t* pos,
+                             const int32_t* spans, int groups, int rows, const int32_t* block_tables,
+                             int blocks_per_request, int local_heads, int kv_heads, int block_tokens, float scale,
+                             float* out, float* partials, cudaStream_t stream);
+void full_attn_decode_blocks_fp8(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                                 int64_t q_row_stride, const int32_t* req_ids, const int64_t* pos,
+                                 const int32_t* spans, int groups, int rows, const int32_t* block_tables,
+                                 int blocks_per_request, int local_heads, int kv_heads, int block_tokens,
+                                 float scale, const float* kv_scales, float* out, float* partials,
+                                 cudaStream_t stream);
+// The same over fp8 planes (`rows` cache rows of kv_heads * 256 codes):
+// uint8 maps with 32 x 128 boxes, the tile widened to bf16 in shared
+// memory, the scales as full_attn_decode_fp8. The fp8 pool has no
+// cp.async fallback: its geometry must pass full_attn_tma_supported.
+FullAttnStageMaps full_attn_stage_maps_fp8(const uint8_t* k_cache, const uint8_t* v_cache, int64_t rows,
+                                           int kv_heads);
+void full_attn_prefill_tma_fp8(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                               int64_t q_row_stride, const int32_t* block_table, const int64_t* pos, int rows,
+                               int local_heads, int kv_heads, int block_tokens, float scale,
+                               const float* kv_scales, float* out, cudaStream_t stream);
+
+// The fp8 compute form (engine.prefill_attention = fp8, 2026-10-16): the
+// same planes and maps as full_attn_prefill_tma_fp8, the attention on the
+// fp8 tensor cores — Q quantized per row to e4m3 (amax / 448, the row's
+// scale folded with scale * k_scale into the softmax multiplier), S = Q8
+// K8^T, P = exp2(s - m + 8) rounded to e4m3, O += P8 V8, the denominator
+// the unrounded P sum, the output times v_scale. Not the bf16 chain: its
+// gate is the recipe (full_attn_test's host reference) and the serving
+// suite. Prefill only — decode rows keep the storage form's exact walk.
+void full_attn_prefill_tma_fp8_compute(const FullAttnStageMaps& maps, int64_t row_base, const uint16_t* q,
+                                       int64_t q_row_stride, const int32_t* block_table, const int64_t* pos,
+                                       int rows, int local_heads, int kv_heads, int block_tokens, float scale,
+                                       const float* kv_scales, float* out, cudaStream_t stream);
 
 // The unsplit row form (every row's whole range in one warp): the tests'
 // reference path and the original kernel's contract.

@@ -243,6 +243,13 @@ Recognized request fields remain validated, and known unsupported API features
 still return explicit errors. Unknown fields inside `chat_template_kwargs`
 remain errors because that object explicitly requests prompt changes.
 
+Server-side `http.stream_flush: "wake"` (or `--stream-flush wake`) delivers
+ready asynchronous output without waiting for the normal 25 ms HTTP poll.
+The default is `pass`. This setting changes delivery timing and batching;
+SSE event ordering, delayed preambles and keep-alive comments retain their
+contracts. It is not a per-request setting. Legacy completion logprobs can
+arrive in a later event with empty text when their callback follows a text flush.
+
 Streaming uses `chat.completion.chunk` events followed by `[DONE]`.
 Each choice's assistant-role preamble arrives immediately before its first
 output, or before its terminal chunk if the completion is empty. The legacy
@@ -296,15 +303,17 @@ first token to the latest last token, and rates exclude one prefill pick per
 choice that generated any tokens. This reports aggregate request throughput,
 including intervening work when choices cannot all run at once.
 
-These are additional response fields. Existing `usage` counts, `/metrics` and
-`/v1/metrics` counters, Prometheus measurements, and throughput logs retain
-all of their existing definitions. In particular, usage counts the full prompt,
-TTFT continues to include queue wait, and engine execution counters remain
-separate from per-request elapsed time.
+These are additional response fields. Usage counts the full prompt; TTFT and
+end-to-end latency include request preparation and queue wait. Engine execution
+counters and response timings remain separate from per-request elapsed time.
 
 Errors use `{ "error": { "message", "type", "param", "code" } }`.
 An overload detected before opening a stream returns HTTP 503. Errors after
 stream headers have been sent use an SSE error followed by `[DONE]`.
+Preparation runs concurrently, with one worker per configured engine slot;
+ready requests can reach admission before earlier, larger requests. Exhausting
+the preparation count or retained-payload budget returns HTTP 503 with
+`code: "preparation_busy"` before any stream headers are sent.
 HTTP body-limit errors return 413 with `code: "request_too_large"`; this is a
 serialized byte limit, separate from model context/KV capacity.
 
@@ -393,7 +402,7 @@ The families mirror the JSON fields:
 | Occupancy | `dgpp_num_requests_running` (slots held, prefills included), `_waiting`, `_prefilling`, `dgpp_pending_admissions`, `dgpp_pending_cancellations`, `dgpp_kv_pool_blocks_total`, `_in_use`, `dgpp_kv_cache_usage_perc` (0-1), `dgpp_scheduler_snapshot_age_seconds`, `dgpp_prefill_inflight_prompt_tokens`, `_remaining_tokens` |
 | Requests | `dgpp_requests_total`, `_shed_total`, `_shed_pool_total`, `_cancelled_total`, `_failed_total`, `_rejected_total`, `dgpp_request_finished_total{reason}` (`eos`, `length`, `stop`, `cancelled`, `pool_exhausted`, `none`; counts choices), `dgpp_tool_calls_total`, `dgpp_reservations_grown_total` |
 | Tokens and engine time | `dgpp_prompt_tokens_total` (attached prefixes included), `_computed_total`, `_cached_total`, `dgpp_generation_tokens_total`, `dgpp_prompts_prefilled_total`, `dgpp_prefill_seconds_total`, `dgpp_prefill_request_seconds_total`, `dgpp_decode_steps_total`, `dgpp_decode_rows_total`, `dgpp_decode_step_seconds_total` |
-| Prefill policy | `dgpp_admission_decode_gap_target_ms`, `dgpp_admission_first_token_target_ms`, `dgpp_admission_prefill_{initial_tokens,latency_headroom_pct,growth_factor,cost_recovery_pct}`, `dgpp_prefill_adaptive_limit_tokens`, `dgpp_first_token_target_misses_total`, `dgpp_decode_gap_target_misses_total` |
+| Prefill policy | `dgpp_admission_decode_gap_target_ms`, `dgpp_admission_first_token_target_ms`, `dgpp_admission_prefill_{initial_tokens,latency_headroom_pct,growth_factor,cost_recovery_pct}`, `dgpp_prefill_adaptive_limit_tokens`, `dgpp_prefill_decode_pass_ms`, `dgpp_first_token_target_misses_total`, `dgpp_decode_gap_target_misses_total` |
 | Prefill work | `dgpp_prefill_chunk_{steps,budget_tokens,available_tokens,computed_tokens}_total` (budgeted physical advances; a grouped walk counts once) |
 | Decode graphs | `dgpp_decode_batch_*` ([decode graph batch counters](operations.md#decode-graph-batch-counters)), `replays_by_slots_total{slots}` |
 | Speculative decoding | `dgpp_spec_decode_depth`, `_num_drafts_total`, `_num_draft_tokens_total`, `_num_accepted_tokens_total`, `_num_draft_tokens_per_pos_total{position}`, `_num_accepted_tokens_per_pos_total{position}` (positions from 0) |
@@ -488,7 +497,9 @@ token buckets from 1 to 1M.
 - `service.requests_total` counts validated HTTP generation requests reaching
   admission, once even when `n > 1`, including overload rejections. Shed,
   cancellation, pool exhaustion and failure counters each count a request at
-  most once. `rejects_bad` counts service-generated 4xx responses, excluding
+  most once. Shed counts also include preparation refusals, which have not
+  reached admission and are excluded from `requests_total`.
+  `rejects_bad` counts service-generated 4xx responses, excluding
   transport-level parsing/size errors. Pending admissions/cancellations,
   scheduler counters and TTFT observations count individual choices.
 
