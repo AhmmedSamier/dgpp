@@ -2,7 +2,7 @@
 // Deterministic BF16 DFlash2 (v2) checkpoint for the Qwen3.8-Flash-Next
 // tests (the 2026-10-20 port): two sliding draft layers, two target taps,
 // the two-tap grouped convs and the candidate-selector codebooks — the
-// tensor set load_dflash2_weights preflights (models/qwen/dflash2.cpp).
+// tensor set load_dflash2_weights preflights (models/dflash2/dflash2.cpp).
 // Sized to the qwenfx tiny target: hidden 256, vocab 512, four target
 // layers, one full-attention layer (the taps land at mix sites 1 and 3).
 #include <cstdint>

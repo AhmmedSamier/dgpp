@@ -22,6 +22,7 @@
 
 #include "engine/paged_blocks.hpp"
 #include "kernels/latent_format.hpp"
+#include "models/dflash2/draft_planes.hpp"
 #include "models/qwen/layers.hpp"
 
 namespace dgpp {
@@ -41,7 +42,7 @@ struct QwenKvPoolShape {
   // The DFlash2 drafter's planes (2026-10-20, the Flash-Next port): plain
   // bf16 K/V rows over the SAME block table — the draft's KV context rides
   // the request's blocks, so sharing, copying and release need no protocol
-  // of their own (models/qwen/dflash2.hpp). 0 layers: no planes.
+  // of their own (models/dflash2/draft_planes.hpp). 0 layers: no planes.
   int draft_layers = 0;
   int draft_kv_heads = 0;
   int draft_dim = 0;
@@ -112,15 +113,11 @@ class QwenKvPool {
   float* v_scale_ = nullptr;
   uint16_t* idx_base_ = nullptr;  // [layers][pool_slots][idx_dim]
   uint16_t* ring_base_ = nullptr; // [layers][max_requests][kpool][idx_dim]
-  uint16_t* dk_base_ = nullptr;   // [draft_layers][token_slots][dkv*ddim] bf16 (the drafter's planes)
-  uint16_t* dv_base_ = nullptr;
+  DraftKvPlanes draft_;           // the DFlash2 drafter's planes over the shared table
   bool fp8() const { return shape_.format == LatentFormat::kFp8; }
   size_t kv_row_elems() const { return static_cast<size_t>(shape_.kv_heads) * shape_.dim; }
   size_t kv_row_bytes() const { return kv_row_elems() * (fp8() ? 1 : 2); }
   size_t layer_kv_bytes() const { return static_cast<size_t>(shape_.token_slots) * kv_row_bytes(); }
-  size_t layer_draft_bytes() const {
-    return static_cast<size_t>(shape_.token_slots) * shape_.draft_kv_heads * shape_.draft_dim * 2;
-  }
   size_t layer_scale_bytes() const {
     return static_cast<size_t>(shape_.token_slots) * shape_.kv_heads * sizeof(float);
   }

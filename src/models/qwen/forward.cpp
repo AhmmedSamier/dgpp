@@ -79,41 +79,26 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   if (max_tokens <= 0) throw std::invalid_argument("QwenModel: max_tokens must be positive");
   if (mtp && cfg_.mtp_layer() < 0)
     throw std::invalid_argument("QwenModel: the config has no draft layer (mtp)");
+  DFlash2Config dfcfg;  // v2, parsed here for the pool's draft-plane geometry
   if (!dflash2_dir.empty()) {
     if (mtp)
       throw std::invalid_argument("QwenModel: dflash2 replaces the MTP draft; enable one or the other");
     // The drafter's own architecture string decides (never a guess): this
     // family takes the DFlash2 v2 draft only — the v1 drafter's integration
     // lives in the Qwen35 stack and its target-side taps are plain residuals.
-    std::string darch;
-    {
-      std::ifstream df(dflash2_dir + "/config.json", std::ios::binary);
-      if (!df) throw std::invalid_argument("QwenModel: cannot open the drafter config");
-      std::ostringstream ss;
-      ss << df.rdbuf();
-      const std::string text = ss.str();  // values view the input: it must outlive the parse
-      const auto parsed = dgpp::minijson::parse(text);
-      const auto& root = parsed.root;
-      if (root.find("architectures") && root.at("architectures").is_array() &&
-          !root.at("architectures").items().empty())
-        darch = std::string(root.at("architectures").items().front().as_string());
-    }
+    const std::string darch = drafter_architecture(dflash2_dir);
     if (darch != "DFlash2DraftModel")
       throw std::invalid_argument("QwenModel: the block drafter needs the DFlash2DraftModel "
                                   "architecture (got '" + darch + "')");
-    dfcfg_ = DFlash2Config::from_json_file(dflash2_dir + "/config.json");
-    dfcfg_.validate_against(cfg_);
+    dfcfg = DFlash2Config::from_json_file(dflash2_dir + "/config.json");
+    dfcfg.validate_against(DFlash2TargetShape{cfg_.hidden_size, cfg_.vocab_size,
+                                              cfg_.num_hidden_layers, cfg_.context_limit()});
     // The tap SITES: layer t's output residual is x_ at layer t + 1's
     // attention-mix launch (the mix applies layer t's pending combine in the
     // same read of R); the last layer's output is the mixer's h_. Tap the
-    // site, never the target stack's layer loop itself.
-    df_tap_.assign(cfg_.num_hidden_layers + 1, -1);
-    // The drafter's taps: the target's completed layer outputs at the
-    // checkpoint's 0-based layer ids (the vLLM reference contract — its
-    // Eagle3 plumbing converts dflash_config.target_layer_ids to 1-based
-    // aux ids and captures the layer each id names, which is the id - 1).
-    for (size_t t = 0; t < dfcfg_.target_layer_ids.size(); ++t)
-      df_tap_[dfcfg_.target_layer_ids[t]] = static_cast<int>(t);
+    // site, never the target stack's layer loop itself. The component owns
+    // the map (df_.tap) from these 0-based layer ids (the vLLM reference
+    // contract).
     dflash2_ = true;
   }
   if (max_requests <= 0 || max_requests > kPickMaxRequests)
@@ -250,9 +235,9 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     shape.fp8_prefill_attention = fp8_prefill_attention_;
     shape.fp8_decode_attention = fp8_decode_attention_;
     if (dflash2_) {  // the drafter's context planes over the same block table
-      shape.draft_layers = dfcfg_.num_hidden_layers;
-      shape.draft_kv_heads = dfcfg_.local_kv_heads(tp_world);
-      shape.draft_dim = dfcfg_.head_dim;
+      shape.draft_layers = dfcfg.num_hidden_layers;
+      shape.draft_kv_heads = dfcfg.local_kv_heads(tp_world);
+      shape.draft_dim = dfcfg.head_dim;
     }
     pool_.init(shape);
     spec_ring_ = dev_alloc<uint16_t>(static_cast<size_t>(num_qsa_) * rows * ring_elems());
@@ -296,81 +281,53 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
                                               max_tokens_, cfg_.rms_norm_eps);
   }
   if (dflash2_) {
-    // The drafter (model35's block): weights on device (this rank's slices
-    // at tp_world > 1), the draft's rope table — plain, or riding the
-    // target's YaRN ramp at the draft's own theta when engine.rope_scaling
-    // is set (models/qwen/model35.cpp: the same wavelengths at the draft's
-    // band) — and the scratch: feature path at CR rows, block forward at
-    // BR = df_batch_ * query_rows stacked rows.
-    if (!dfcfg_.tp_divisible(tp_world))
-      throw std::invalid_argument(
-          "QwenModel: the DFlash2 drafter's heads / kv heads / MLP rows must divide across the world");
-    df_nh_ = dfcfg_.local_heads(tp_world);
-    df_kvh_ = dfcfg_.local_kv_heads(tp_world);
-    df_qw_ = dfcfg_.local_q_row(tp_world);
-    df_kvr_ = dfcfg_.local_kv_row(tp_world);
-    df_i_ = dfcfg_.local_intermediate(tp_world);
-    dfw_ = load_dflash2_weights(dfcfg_, dflash2_dir, stream_, tp_rank, tp_world, dflash2_fp8_);
-    {
-      std::vector<float> host(static_cast<size_t>(dfcfg_.head_dim) / 2);
-      if (cfg_.rope_scaling.has_value()) {
-        const RopeScaling& rs = *cfg_.rope_scaling;
-        yarn_rope_inv_freq_host(dfcfg_.head_dim, dfcfg_.rope_theta, rs.correction_max_position(),
-                                rs.factor, rs.beta_fast, rs.beta_slow, host.data());
-      } else {
-        const double theta = dfcfg_.rope_theta;
-        for (size_t i = 0; i < host.size(); ++i)
-          host[i] = static_cast<float>(
-              std::pow(theta, -static_cast<double>(2 * i) / static_cast<double>(dfcfg_.head_dim)));
-      }
-      DGPP_CUDA_OK(cudaMalloc(&df_inv_freq_, host.size() * 4));
-      DGPP_CUDA_OK(cudaMemcpy(df_inv_freq_, host.data(), host.size() * 4, cudaMemcpyHostToDevice));
-    }
-    const int CR = df_rows_cap();
-    const int QR = dfcfg_.query_rows();
-    const int D = QR - 1;
-    df_batch_ = std::max(1, max_decode_rows_ / QR);
-    const int BR = df_batch_ * QR, BD = df_batch_ * D;
+    // The DFlash2 drafter (models/dflash2/drafter.hpp, the shared
+    // component): weights on device (this rank's slices at tp_world > 1),
+    // the draft's rope table — plain, or riding the target's YaRN ramp at
+    // the draft's own theta when engine.rope_scaling is set — and the
+    // scratch. The family supplies the pool planes (draft_view), the
+    // exact-head dispatch (df_head), the gemm row envelope and the
+    // session/graph state.
+    DFlash2Host host;
+    host.hidden = cfg_.hidden_size;
+    host.num_target_layers = cfg_.num_hidden_layers;
+    host.target_vocab = cfg_.vocab_size;
+    host.vocab_count = lm_vocab_count_;
+    host.vocab_begin = lm_vocab_begin_;
+    host.rank = tp_rank;
+    host.world = tp_world;
+    host.stream = stream_;
+    host.max_requests = max_requests_;
+    host.max_tokens = max_tokens_;
+    host.max_decode_rows = max_decode_rows_;
+    host.max_context = max_context();
+    host.position_limit = cfg_.context_limit();
+    host.weights_fp8 = dflash2_fp8_;
+    host.rope = cfg_.rope_scaling.has_value() ? &*cfg_.rope_scaling : nullptr;
+    host.device_tables = pool_.blocks().device_tables();
+    host.total_blocks = static_cast<int>(pool_.total_blocks());
+    host.block_tokens = kv_block_tokens_static();
+    host.ensure_request_blocks =
+        [this](int req, int64_t pos, cudaStream_t st) { return pool_.ensure_request_blocks(req, pos, st); };
+    host.plane = [this](int l) {
+      const auto c = pool_.draft_view(l);
+      return DFlash2Host::Plane{c.k_cache, c.v_cache};
+    };
+    host.session_position = [this](int req) { return session_position(req); };
+    host.session_pos = d_session_pos_;
+    host.decode_tokens = d_tokens_;
+    host.embed = globals_.embed;
+    host.gemm = &gemm_;
+    host.gemm_ws = gemm_ws_;
+    host.gemm_ws_bytes = gemm_ws_bytes_;
+    host.gemm_rows = [this](int rows, bool decode) { qwen_configure_gemm_rows(gemm_, rows, decode); };
+    host.boundary = boundary_;
+    host.head = [this](const uint16_t* hidden, float* out, int rows) { df_head(hidden, out, rows); };
+    df_.init(host, dflash2_dir);
+    // The tap site's staging: one tap's mean over the hc streams (the mix
+    // sites' collapse), at the row bound.
     const size_t M = static_cast<size_t>(max_tokens_);
-    DGPP_CUDA_OK(cudaMalloc(&df_acc_, M * H * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_t32_, M * H * 4));
     DGPP_CUDA_OK(cudaMalloc(&df_mean_, M * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_norm_, static_cast<size_t>(CR) * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_kv_, static_cast<size_t>(CR) * 2 * df_kvr_ * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_resid_, static_cast<size_t>(BR) * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_x_, static_cast<size_t>(BR) * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_xc_, static_cast<size_t>(BR) * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_qkv_, static_cast<size_t>(BR) * (df_qw_ + 2 * df_kvr_) * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_q_, static_cast<size_t>(BR) * df_qw_ * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_attn_, static_cast<size_t>(BR) * df_qw_ * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_attn_part_, dflash2_block_attn_partials_bytes(BR, df_nh_)));
-    DGPP_CUDA_OK(cudaMalloc(&df_o_, static_cast<size_t>(BR) * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_mlp_, static_cast<size_t>(BR) * df_i_ * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_gate_, static_cast<size_t>(BR) * df_i_ * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_up_, static_cast<size_t>(BR) * df_i_ * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_zero_, QR * 4));
-    DGPP_CUDA_OK(cudaMemsetAsync(df_zero_, 0, QR * 4, stream_));
-    DGPP_CUDA_OK(cudaMalloc(&df_delta_, static_cast<size_t>(BR) * 2 * dfcfg_.conv_taps *
-                                             dfcfg_.conv_groups() * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_h_, static_cast<size_t>(BR) * H * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_logits_, static_cast<size_t>(BR) * lm_vocab_count_ * 4));
-    df_topk_ws_bytes_ = dflash2_topk_ws_bytes(lm_vocab_count_, BR, dfcfg_.selector_top_k);
-    DGPP_CUDA_OK(cudaMalloc(&df_topk_ws_, df_topk_ws_bytes_));
-    DGPP_CUDA_OK(cudaMalloc(&df_hidden32_, static_cast<size_t>(BR) * dfcfg_.selector_rank * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_ids_, static_cast<size_t>(BR) * dfcfg_.selector_top_k * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_sc_, static_cast<size_t>(BR) * dfcfg_.selector_top_k * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_tok_, static_cast<size_t>(BD) * 4));
-    DGPP_CUDA_OK(cudaMalloc(&df_pos_, static_cast<size_t>(BR) * 8));
-    DGPP_CUDA_OK(cudaMalloc(&df_tokens_, static_cast<size_t>(BR) * 8));
-    DGPP_CUDA_OK(cudaMallocHost(&df_tok_h_, static_cast<size_t>(BD) * 4));
-    DGPP_CUDA_OK(cudaMallocHost(&df_io64_h_, static_cast<size_t>(2) * BR * 8));
-    if (tp_world > 1)
-      DGPP_CUDA_OK(cudaMalloc(&df_table_, dflash2_topk_table_elems(BR, dfcfg_.selector_top_k, tp_world) * 2));
-    DGPP_CUDA_OK(cudaMalloc(&df_conf_, static_cast<size_t>(max_requests_) * D * 4));
-    DGPP_CUDA_OK(cudaMemset(df_conf_, 0, static_cast<size_t>(max_requests_) * D * 4));
-    DGPP_CUDA_OK(cudaMallocHost(&df_mirror_h_, static_cast<size_t>(max_requests_) * D * 4));
-    DGPP_CUDA_OK(cudaMallocHost(&df_cands_h_, static_cast<size_t>(max_requests_) * D *
-                                                       dfcfg_.selector_top_k * 4));
     DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
   }
   DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
@@ -414,24 +371,13 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   if (!dflash2_dir.empty()) {
     if (mtp)
       throw std::invalid_argument("plan_memory: dflash2 replaces the MTP draft; enable one or the other");
-    std::string darch;
-    {
-      std::ifstream df(dflash2_dir + "/config.json", std::ios::binary);
-      if (!df) throw std::invalid_argument("plan_memory: cannot open the drafter config");
-      std::ostringstream ss;
-      ss << df.rdbuf();
-      const std::string text = ss.str();  // values view the input: it must outlive the parse
-      const auto parsed = dgpp::minijson::parse(text);
-      const auto& root = parsed.root;
-      if (root.find("architectures") && root.at("architectures").is_array() &&
-          !root.at("architectures").items().empty())
-        darch = std::string(root.at("architectures").items().front().as_string());
-    }
+    const std::string darch = drafter_architecture(dflash2_dir);
     if (darch != "DFlash2DraftModel")
       throw std::invalid_argument("plan_memory: the Flash-Next block drafter needs the "
                                   "DFlash2DraftModel architecture (got '" + darch + "')");
     dfcfg = std::make_unique<DFlash2Config>(DFlash2Config::from_json_file(dflash2_dir + "/config.json"));
-    dfcfg->validate_against(cfg);
+    dfcfg->validate_against(DFlash2TargetShape{cfg.hidden_size, cfg.vocab_size,
+                                               cfg.num_hidden_layers, cfg.context_limit()});
   }
   if (decode_rows > kDecodeRowsMax) throw std::invalid_argument("plan_memory: decode_rows exceeds kDecodeRowsMax");
   if (mtp && cfg.mtp_layer() < 0) throw std::invalid_argument("plan_memory: the config has no draft layer");
@@ -574,31 +520,15 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
              R * 8);
   }
   if (dfcfg) {
-    if (!dfcfg->tp_divisible(tp_world))
-      throw std::invalid_argument(
-          "plan_memory: the DFlash2 drafter's heads / kv heads / MLP rows must divide across the world");
-    plan.add(dflash2_fp8_
-                 ? "dflash2 drafter weights (this rank's slices; the block matrices as fp8, the rest bf16)"
-                 : "dflash2 drafter weights (this rank's slices)",
-             dflash2_weights_bytes(*dfcfg, tp_world, dflash2_fp8_));
-    const size_t QR = static_cast<size_t>(dfcfg->query_rows());
-    const size_t BW = std::max<size_t>(1, rows / QR);  // the stacked draft batch's slots
-    const size_t CR = static_cast<size_t>(QwenModel::df_rows_cap());
-    const size_t dI = static_cast<size_t>(dfcfg->local_intermediate(tp_world));
-    const size_t dQW = static_cast<size_t>(dfcfg->local_q_row(tp_world));
-    const size_t dKV = static_cast<size_t>(dfcfg->local_kv_row(tp_world));
-    plan.add("dflash2 feature path",
-             2 * M * H * 4 + CR * H * 2 + CR * 2 * dKV * 2 + dfcfg->head_dim / 2 * 4);
-    plan.add("dflash2 block scratch",
-             BW * QR * (6 * H * 2 + (dQW + 2 * dKV) * 2 + dQW * 2 * 2 + 3 * dI * 2 +
-                        2 * dfcfg->conv_taps * dfcfg->conv_groups() * 2) +
-                 dflash2_block_attn_partials_bytes(static_cast<int>(BW * QR),
-                                                   dfcfg->local_heads(tp_world)) +
-                 BW * QR * V * 4 +  // the draft rows' head logits
-                 BW * static_cast<size_t>(dfcfg->drafts()) *
-                     (dfcfg->selector_rank * 4 + dfcfg->selector_top_k * (4 + 4) + 4) +
-                 BW * QR * 16 + BW * static_cast<size_t>(dfcfg->drafts()) * 4 + QR * 4);
-    plan.add("dflash2 confidence", R * std::max<size_t>(1, QR - 1) * 4);
+    // The shared drafter's plan lines (models/dflash2/drafter.hpp): the
+    // weights, the feature path and the block scratch exactly as the
+    // component's init allocates them (V rows a head, this rank's slice).
+    std::vector<std::pair<std::string, size_t>> dflash2_entries;
+    DFlash2Drafter::plan_entries(*dfcfg, tp_world, decode_rows, max_tokens, max_requests,
+                                 static_cast<int64_t>(V), dflash2_fp8_, &dflash2_entries);
+    for (const auto& e : dflash2_entries) plan.add(e.first, e.second);
+    // The tap site's staging: one tap's mean over the hc streams.
+    plan.add("dflash2 tap staging", M * H * 2);
   }
   if (cfg.vision) {
     plan.add("vision tower weights (bf16, replicated)", cfg.vision->weight_bytes());
@@ -628,40 +558,7 @@ QwenModel::~QwenModel() {
   cudaFree(head_cand_count_);
   cudaFree(head_dump_meta_);
   cudaFree(spec_ring_);
-  cudaFree(df_acc_);
-  cudaFree(df_t32_);
-  cudaFree(df_mean_);
-  cudaFree(df_norm_);
-  cudaFree(df_kv_);
-  cudaFree(df_inv_freq_);
-  cudaFree(df_resid_);
-  cudaFree(df_x_);
-  cudaFree(df_xc_);
-  cudaFree(df_qkv_);
-  cudaFree(df_q_);
-  cudaFree(df_attn_);
-  cudaFree(df_attn_part_);
-  cudaFree(df_o_);
-  cudaFree(df_mlp_);
-  cudaFree(df_gate_);
-  cudaFree(df_up_);
-  cudaFree(df_delta_);
-  cudaFree(df_h_);
-  cudaFree(df_zero_);
-  cudaFree(df_logits_);
-  cudaFree(df_topk_ws_);
-  cudaFree(df_hidden32_);
-  cudaFree(df_ids_);
-  cudaFree(df_sc_);
-  cudaFree(df_tok_);
-  cudaFree(df_table_);
-  cudaFree(df_pos_);
-  cudaFree(df_tokens_);
-  cudaFree(df_conf_);
-  cudaFreeHost(df_tok_h_);
-  cudaFreeHost(df_io64_h_);
-  cudaFreeHost(df_mirror_h_);
-  cudaFreeHost(df_cands_h_);
+  cudaFree(df_mean_);  // the tap site's staging (the component's buffers are df_'s RAII)
   cudaFree(r_);
   cudaFree(x_);
   cudaFree(y_);
@@ -1534,14 +1431,15 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
     // collapsed to the mean over the hc streams — no norm, no gating; the
     // drafter applies its own norms downstream. The result feeds only the
     // drafter's context, never a served logit.
-    if (dflash2_ && df_tap_[layer] >= 0) {
+    const int df_tap = dflash2_ ? df_.tap(layer) : -1;
+    if (df_tap >= 0) {
       QwenGrSite::apply_pending(r_, pend, T, H, stream_);
       pend = {};
       dsv41_stream_mean_bf16(r_, cfg_.hc_count, H, T, df_mean_, H, stream_);
-      const uint16_t* fc_t = dfw_.fc + static_cast<size_t>(df_tap_[layer]) * H * H;
-      gemm_.matmul(df_mean_, fc_t, df_t32_, T, H, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H),
+      const uint16_t* fc_t = df_.weights().fc + static_cast<size_t>(df_tap) * H * H;
+      gemm_.matmul(df_mean_, fc_t, df_.tap_gemm_out(), T, H, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H),
                    gemm_ws_, gemm_ws_bytes_, stream_);
-      dflash2_acc_f32(df_acc_, df_t32_, static_cast<int64_t>(T) * H, df_tap_[layer] == 0 ? 0 : 1,
+      dflash2_acc_f32(df_.acc(), df_.tap_gemm_out(), static_cast<int64_t>(T) * H, df_tap == 0 ? 0 : 1,
                       stream_);
     }
     if (run.capture_layers || (session_capture_layers_ && run.decode && !run.capture)) {
@@ -1604,7 +1502,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   // (rejected verify rows included: they land past the committed end and
   // the next draft's position mask hides them — no rollback; models/qwen/
   // model35.cpp's contract, ported).
-  if (dflash2_) dflash2_store_features(T, d_req, d_pos);
+  if (dflash2_) df_.store_features(T, d_req, d_pos);
   // The prefetch side stream rejoins here: a capture must end with every
   // forked stream joined, and the eager tail's sync (finish_run) covers
   // the prefetches too (they read weights, nothing else).
@@ -2281,364 +2179,65 @@ void QwenModel::apply_image_embeddings(uint16_t* dst, int64_t first, int rows, i
   }
 }
 
-// ---- the DFlash2 block drafter (models/qwen/dflash2.hpp) --------------------
-// The Qwen35 drafter's eager half, ported 2026-10-20: the target's runs
-// feed the draft planes (dflash2_store_features), a redraft stacks
-// [bonus, mask x drafts] rows per slot, walks the five bidirectional
-// layers over the plane context, and proposes through the mask rows'
-// top-K selector walk. Kernels and the pool's shared block table carry
-// the QSA geometry; everything target-side is the mix-site taps above.
+// ---- the DFlash2 block drafter (models/dflash2/drafter.hpp) ----------------
+// The shared drafter's family side: the target's runs feed the draft planes
+// (the mix-site taps above, df_.store_features), and a redraft / the
+// recorded block proposal run the component (df_) over this pool and the
+// exact head below. Everything else (the block forward, the mask-row
+// select, the staging and the pinned mirrors) is the component's.
 
-void QwenModel::dflash2_store_features(int T, const int32_t* d_req, const int64_t* d_pos) {
-  const int H = cfg_.hidden_size;
-  const int L = dfcfg_.num_hidden_layers, KV = df_kvr_;
-  const int KVH = df_kvh_, HD = dfcfg_.head_dim;
-  const int32_t* tables = pool_.blocks().device_tables();
-  const int bpr = static_cast<int>(pool_.total_blocks());
-  const int bt = kv_block_tokens_static();
-  for (int off = 0; off < T; off += df_rows_cap()) {
-    const int rows = std::min(df_rows_cap(), T - off);
-    dflash2_norm_f32_bf16(df_acc_ + static_cast<size_t>(off) * H, dfw_.hidden_norm, df_norm_, rows, H,
-                          dfcfg_.rms_norm_eps, stream_);
-    for (int l = 0; l < L; ++l) {
-      // k|v rows of the fused layer weight (a view right after q, or their
-      // own bf16 slot under the fp8 block matrices).
-      const uint16_t* kv_w = dfw_.layers[l].kv_rows;
-      gemm_.matmul(df_norm_, kv_w, df_kv_, rows, 2 * KV, H, DType::BF16, GemmOut::BF16,
-                   static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-      dflash2_norm_rope_bf16(df_kv_, 2 * KV, dfw_.layers[l].k_norm, d_pos + off, df_inv_freq_, df_kv_,
-                             2 * KV, rows, KVH, HD, dfcfg_.rms_norm_eps, stream_);
-      const QwenFullAttnCache plane = pool_.draft_view(l);
-      qsa_kv_append(df_kv_, 2 * KV, df_kv_ + KV, 2 * KV, d_req + off, d_pos + off, rows, tables, bpr,
-                    bt, KVH, HD, plane.k_cache, plane.v_cache, nullptr, nullptr, stream_);
-    }
-  }
-}
-
-void QwenModel::df_head(const uint16_t* hidden, int rows) {
+void QwenModel::df_head(const uint16_t* hidden, float* out, int rows) {
   // The full head at the draft's rows: the served dispatch (packed / fp8 /
   // bf16), no screen, no argmax-only flag — the selector walk reads top-K
   // out of these logits, so every row must be the exact product.
   const int H = cfg_.hidden_size;
   const int V = lm_vocab_count_;
   if (globals_.lm_head_packed.packed) {
-    launch_packq_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_packed, df_logits_, rows,
+    launch_packq_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_packed, out, rows,
                           V, H, stream_);
   } else if (globals_.lm_head_fp8.payload) {
     launch_scale_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_fp8.payload,
-                          globals_.lm_head_fp8.scales, df_logits_, rows, V, H, stream_,
+                          globals_.lm_head_fp8.scales, out, rows, V, H, stream_,
                           static_cast<size_t>(lm_vocab_count_), fp8_head_mma_ ? 1 : 0, false, nullptr,
                           0, -1);
   } else {
-    gemm_.matmul(hidden, globals_.lm_head, df_logits_, rows, V, H, DType::BF16, GemmOut::F32,
+    gemm_.matmul(hidden, globals_.lm_head, out, rows, V, H, DType::BF16, GemmOut::F32,
                  static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-  }
-}
-
-void QwenModel::df_block_layers(int slots, const int* reqs, bool capture) {
-  const int H = cfg_.hidden_size;
-  const int QR = dfcfg_.query_rows();
-  const int L = dfcfg_.num_hidden_layers, QW = df_qw_, KV = df_kvr_;
-  const int KVH = df_kvh_, HD = dfcfg_.head_dim, NH = df_nh_;
-  const int G = dfcfg_.conv_groups(), TAPS = dfcfg_.conv_taps;
-  const int I = df_i_;
-  const float eps = dfcfg_.rms_norm_eps;
-  const int R = slots * QR;
-  // The sharded drafter's boundary folds: the o and down projections'
-  // partial [R, H] outputs summed across the ranks before the output-side
-  // convs read them (world 1: no boundary, no folds).
-  const auto stage = [&](uint16_t* fallback, int width) -> uint16_t* {
-    if (!boundary_) return fallback;
-    uint16_t* s = boundary_->stage(R, width);
-    if (s == nullptr && capture)
-      throw std::runtime_error("dflash2 draft: a capture fold does not fit the recorder's staged buffer");
-    return s ? s : fallback;
-  };
-  const auto fold = [&](uint16_t* buf, int width) {
-    if (!boundary_) return;
-    if (!capture) DGPP_CUDA_OK(cudaStreamSynchronize(stream_));  // the host-driven fold's contract
-    boundary_->reduce(buf, R, width);
-  };
-  const int32_t* tables = pool_.blocks().device_tables();
-  const int bpr = static_cast<int>(pool_.total_blocks());
-  const int bt = kv_block_tokens_static();
-  const size_t qkv_stride = static_cast<size_t>(QW) + 2 * KV;
-  const float scale = 1.0f / std::sqrt(static_cast<float>(HD));
-  for (int l = 0; l < L; ++l) {
-    const DFlash2LayerWeights& w = dfw_.layers[l];
-    dflash2_rmsnorm_bf16(df_resid_, w.input_norm, df_x_, R, H, eps, stream_);
-    // The attention conv: deltas from the normed input, one GEMM; side 0
-    // conditions the qkv input, side 1 the attention output.
-    gemm_.matmul(df_x_, w.attn_conv_kp, df_delta_, R, 2 * TAPS * G, H, DType::BF16, GemmOut::BF16,
-                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-    dflash2_grouped_conv_bf16(df_x_, df_delta_, w.attn_conv_base, df_xc_, R, QR, H, TAPS,
-                              dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
-    if (w.qkv_fp8 != nullptr)
-      launch_mma_gemv_fp8_bf16(df_xc_, static_cast<size_t>(H), w.qkv_fp8, w.qkv_scales, df_qkv_, R,
-                               static_cast<int>(qkv_stride), H, qkv_stride, 7, 7, stream_, gemm_ws_,
-                               gemm_ws_bytes_);
-    else
-      gemm_.matmul(df_xc_, w.qkv, df_qkv_, R, static_cast<int>(qkv_stride), H, DType::BF16,
-                   GemmOut::BF16, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-    dflash2_norm_rope_bf16(df_qkv_, qkv_stride, w.q_norm, df_pos_, df_inv_freq_, df_q_, QW, R, NH, HD,
-                           eps, stream_);
-    dflash2_norm_rope_bf16(df_qkv_ + QW, qkv_stride, w.k_norm, df_pos_, df_inv_freq_, df_qkv_ + QW,
-                           qkv_stride, R, KVH, HD, eps, stream_);
-    const QwenFullAttnCache plane = pool_.draft_view(l);
-    for (int k = 0; k < slots; ++k) {
-      const size_t ro = static_cast<size_t>(k) * QR;
-      const int32_t* table = tables + static_cast<size_t>(reqs[k]) * pool_.total_blocks();
-      const uint16_t* krow = df_qkv_ + ro * qkv_stride + QW;
-      qsa_kv_append(krow, qkv_stride, krow + KV, qkv_stride, df_zero_, df_pos_ + ro, QR, table, 1, bt,
-                    KVH, HD, plane.k_cache, plane.v_cache, nullptr, nullptr, stream_);
-      // The split-key form: the row's 2K window in parallel ranges.
-      dflash2_block_attn_split(df_q_ + ro * QW, QW, plane.k_cache, plane.v_cache, table, bt, bpr, QR,
-                               dfcfg_.sliding_window, df_pos_ + ro, QR, NH, KVH, HD, scale,
-                               df_attn_part_ + ro * static_cast<size_t>(NH) * dflash2_block_attn_splits() * 130,
-                               df_attn_ + ro * QW, stream_);
-    }
-    uint16_t* ao = stage(df_o_, H);
-    if (w.o_fp8 != nullptr)
-      launch_mma_gemv_fp8_bf16(df_attn_, static_cast<size_t>(QW), w.o_fp8, w.o_scales, ao, R, H, QW,
-                               static_cast<size_t>(H), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
-    else
-      gemm_.matmul(df_attn_, w.o, ao, R, H, QW, DType::BF16, GemmOut::BF16, QW, gemm_ws_,
-                   gemm_ws_bytes_, stream_);
-    fold(ao, H);
-    dflash2_grouped_conv_bf16(ao, df_delta_ + TAPS * G,
-                              w.attn_conv_base + static_cast<size_t>(TAPS) * H, df_xc_, R, QR, H, TAPS,
-                              dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
-    dflash2_add_rmsnorm_bf16(df_resid_, df_xc_, w.post_norm, df_x_, R, H, eps, stream_);
-    // The MLP conv: same shape around the SwiGLU.
-    gemm_.matmul(df_x_, w.mlp_conv_kp, df_delta_, R, 2 * TAPS * G, H, DType::BF16, GemmOut::BF16,
-                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-    dflash2_grouped_conv_bf16(df_x_, df_delta_, w.mlp_conv_base, df_xc_, R, QR, H, TAPS,
-                              dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
-    if (w.gate_fp8 != nullptr) {
-      launch_mma_gemv_fp8_bf16(df_xc_, static_cast<size_t>(H), w.gate_fp8, w.gate_scales, df_gate_, R, I,
-                               H, static_cast<size_t>(I), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
-      launch_mma_gemv_fp8_bf16(df_xc_, static_cast<size_t>(H), w.up_fp8, w.up_scales, df_up_, R, I, H,
-                               static_cast<size_t>(I), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
-    } else {
-      gemm_.matmul(df_xc_, w.gate, df_gate_, R, I, H, DType::BF16, GemmOut::BF16,
-                   static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-      gemm_.matmul(df_xc_, w.up, df_up_, R, I, H, DType::BF16, GemmOut::BF16, static_cast<size_t>(H),
-                   gemm_ws_, gemm_ws_bytes_, stream_);
-    }
-    swiglu_limit_bf16(df_gate_, df_up_, df_mlp_, static_cast<int64_t>(R) * I, INFINITY, stream_);
-    uint16_t* mo = stage(df_o_, H);
-    if (w.down_fp8 != nullptr)
-      launch_mma_gemv_fp8_bf16(df_mlp_, static_cast<size_t>(I), w.down_fp8, w.down_scales, mo, R, H, I,
-                               static_cast<size_t>(H), 7, 7, stream_, gemm_ws_, gemm_ws_bytes_);
-    else
-      gemm_.matmul(df_mlp_, w.down, mo, R, H, I, DType::BF16, GemmOut::BF16,
-                   static_cast<size_t>(I), gemm_ws_, gemm_ws_bytes_, stream_);
-    fold(mo, H);
-    dflash2_grouped_conv_bf16(mo, df_delta_ + TAPS * G,
-                              w.mlp_conv_base + static_cast<size_t>(TAPS) * H, df_xc_, R, QR, H, TAPS,
-                              dfcfg_.conv_group_size, 2 * TAPS * G, stream_);
-    add_inplace_bf16(df_resid_, df_xc_, static_cast<int64_t>(R) * H, stream_);
-  }
-  dflash2_rmsnorm_bf16(df_resid_, dfw_.norm, df_h_, R, H, eps, stream_);
-}
-
-// The mask rows through the shared head and their top-K, per slot at row
-// offsets; at world > 1 each rank's slice lists meet in one boundary fold
-// and every rank merges the same global top-K (the walk then proposes the
-// same tokens on every rank). The proposal: the reference chained selector
-// walk (vLLM's _selector_walk_kernel at temperature 0) over each mask row's
-// top-K — the eager walk is the argmax (the drawn walk is the recorded
-// draft's, not ported); every walk writes the slot's confidence.
-void QwenModel::df_block_select(int slots, const int* reqs, bool capture) {
-  const int H = cfg_.hidden_size;
-  const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
-  const int64_t V = lm_vocab_count_;
-  const int topk = dfcfg_.selector_top_k, rank = dfcfg_.selector_rank;
-  // One head stream for every slot's rows (the mask rows of slot k are rows
-  // k*QR + 1 .. k*QR + D; the anchor rows' logits and top-K go unread).
-  const int R = slots * QR;
-  df_head(df_h_, R);
-  dflash2_topk_f32(df_logits_, df_ids_, df_sc_, V, R, topk, stream_, df_topk_ws_, df_topk_ws_bytes_);
-  if (world_ > 1) {
-    const int rows = R;
-    const size_t elems = dflash2_topk_table_elems(rows, topk, world_);
-    uint16_t* table = boundary_ ? boundary_->stage(1, static_cast<int>(elems)) : nullptr;
-    if (table == nullptr && capture)
-      throw std::runtime_error("dflash2 draft: the top-K gather does not fit the recorder's staged buffer");
-    if (table == nullptr) table = df_table_;
-    dflash2_topk_stage(df_ids_, df_sc_, rows, topk, lm_vocab_begin_, rank_, world_, table, stream_);
-    if (!capture) DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-    if (boundary_) boundary_->reduce(table, 1, static_cast<int>(elems));
-    dflash2_topk_merge(table, rows, topk, world_, df_ids_, df_sc_, stream_);
-  }
-  gemm_.matmul(df_h_, dfw_.hidden_projection, df_hidden32_, R, rank, H, DType::BF16, GemmOut::F32,
-               static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
-  for (int k = 0; k < slots; ++k) {
-    const size_t ro = static_cast<size_t>(k) * QR, co = static_cast<size_t>(k) * D, mo = ro + 1;
-    dflash2_selector_walk(df_ids_ + mo * topk, df_sc_ + mo * topk, df_hidden32_ + mo * rank,
-                          dfw_.pred_codebook, dfw_.succ_codebook, df_tokens_ + ro, df_tok_ + co, D, topk,
-                          rank, stream_, nullptr, nullptr, nullptr, nullptr,
-                          df_conf_ + static_cast<size_t>(reqs[k]) * D);
   }
 }
 
 bool QwenModel::dflash2_draft(int req, int64_t bonus, std::vector<int32_t>* drafts) {
   if (!dflash2_) throw std::logic_error("dflash2_draft: no drafter loaded");
-  const int H = cfg_.hidden_size;
-  const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
-  const int64_t pos = session_position(req);
-  if (pos < 0 || pos + QR > max_context()) return false;
-  // The block writes K/V at [pos, pos + QR): grow the table now (the next
-  // verify's rows live in the same span). Pool exhausted -> plain step.
-  if (!pool_.ensure_request_blocks(req, pos + QR, stream_)) return false;
-
-  // Row inputs: [bonus, mask x D] at positions pos..pos+QR-1.
-  for (int j = 0; j < QR; ++j) {
-    df_io64_h_[j] = pos + j;
-    df_io64_h_[QR + j] = j == 0 ? bonus : dfcfg_.mask_token_id;
-  }
-  DGPP_CUDA_OK(cudaMemcpyAsync(df_pos_, df_io64_h_, QR * 8, cudaMemcpyHostToDevice, stream_));
-  DGPP_CUDA_OK(cudaMemcpyAsync(df_tokens_, df_io64_h_ + QR, QR * 8, cudaMemcpyHostToDevice, stream_));
-  embed_gather_bf16(globals_.embed, df_tokens_, df_resid_, QR, H, stream_);
-  qwen_configure_gemm_rows(gemm_, QR, true);
-  const int reqs[1] = {req};
-  df_block_layers(1, reqs);
-  df_block_select(1, reqs);
-  DGPP_CUDA_OK(cudaMemcpyAsync(df_tok_h_, df_tok_, D * 4, cudaMemcpyDeviceToHost, stream_));
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-  drafts->assign(df_tok_h_, df_tok_h_ + D);
-  return true;
+  return df_.draft(req, bonus, drafts);
 }
 
-// The batched redraft (engine.dflash_draft_batch): one stacked block
-// forward for every slot; the per-slot failures leave empty drafts, the
-// same rule as the scalar call.
 void QwenModel::dflash2_draft_batch(const std::vector<int>& reqs, const std::vector<int64_t>& bonuses,
                                     std::vector<std::vector<int32_t>>* drafts) {
   if (!dflash2_) throw std::logic_error("dflash2_draft_batch: no drafter loaded");
-  if (reqs.empty()) throw std::invalid_argument("dflash2_draft_batch: no requests");
-  if (reqs.size() != bonuses.size() || drafts == nullptr)
-    throw std::invalid_argument("dflash2_draft_batch: reqs/bonuses/drafts shape");
-  const int S = static_cast<int>(reqs.size());
-  if (S > df_batch_)
-    throw std::invalid_argument("dflash2_draft_batch: batch exceeds the stacked scratch");
-  const int H = cfg_.hidden_size;
-  const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
-  drafts->assign(static_cast<size_t>(S), {});
-  // Admission first (no shared state touched): positions and block growth
-  // per slot, compacting out the failures.
-  std::vector<int> idx, creqs;
-  idx.reserve(static_cast<size_t>(S));
-  std::vector<int64_t> poss(static_cast<size_t>(S), -1);
-  for (int s = 0; s < S; ++s) {
-    const int req = reqs[static_cast<size_t>(s)];
-    const int64_t pos = session_position(req);
-    if (pos < 0 || pos + QR > max_context()) continue;
-    if (!pool_.ensure_request_blocks(req, pos + QR, stream_)) continue;
-    poss[static_cast<size_t>(s)] = pos;
-    idx.push_back(s);
-    creqs.push_back(req);
-  }
-  const int NS = static_cast<int>(idx.size());
-  if (NS == 0) return;
-  const int R = NS * QR;
-  // Row inputs: each stacked block [bonus, mask x D] at its slot's positions.
-  for (int k = 0; k < NS; ++k) {
-    const int s = idx[static_cast<size_t>(k)];
-    const int64_t pos = poss[static_cast<size_t>(s)];
-    for (int j = 0; j < QR; ++j) {
-      df_io64_h_[static_cast<size_t>(k) * QR + j] = pos + j;
-      df_io64_h_[static_cast<size_t>(df_batch_) * QR + static_cast<size_t>(k) * QR + j] =
-          j == 0 ? bonuses[static_cast<size_t>(s)] : dfcfg_.mask_token_id;
-    }
-  }
-  DGPP_CUDA_OK(cudaMemcpyAsync(df_pos_, df_io64_h_, static_cast<size_t>(R) * 8, cudaMemcpyHostToDevice,
-                               stream_));
-  DGPP_CUDA_OK(cudaMemcpyAsync(df_tokens_, df_io64_h_ + static_cast<size_t>(df_batch_) * QR,
-                               static_cast<size_t>(R) * 8, cudaMemcpyHostToDevice, stream_));
-  embed_gather_bf16(globals_.embed, df_tokens_, df_resid_, R, H, stream_);
-  qwen_configure_gemm_rows(gemm_, R, true);
-  df_block_layers(NS, creqs.data());
-  df_block_select(NS, creqs.data());
-  DGPP_CUDA_OK(cudaMemcpyAsync(df_tok_h_, df_tok_, static_cast<size_t>(NS) * D * 4,
-                               cudaMemcpyDeviceToHost, stream_));
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
-  for (int k = 0; k < NS; ++k)
-    (*drafts)[static_cast<size_t>(idx[static_cast<size_t>(k)])].assign(
-        df_tok_h_ + static_cast<size_t>(k) * D, df_tok_h_ + static_cast<size_t>(k + 1) * D);
-  qwen_configure_gemm_rows(gemm_, std::max(max_decode_rows_, 1), true);
+  df_.draft_batch(reqs, bonuses, drafts);
 }
-
-// ---- the recorded block proposal (the graph engine's block draft, ported
-// from the Qwen35 capture at model35.cpp:2996): the graph engine records the
-// block forward off the verify's verdict inside a step replay — the staged
-// rows are device-driven (positions off d_session_pos_, tokens off the
-// verdict), the feed lands in the slot's persistent feed rows and the
-// drafts + candidate lists in the pinned mirrors the engine reads after the
-// replay's end event.
 
 void QwenModel::session_graph_capture_block_draft(int req, const PickVerdict* verdict) {
   if (!dflash2_) throw std::logic_error("session_graph_capture_block_draft: no drafter loaded");
-  if (req < 0 || req >= max_requests_) throw std::invalid_argument("session_graph_capture_block_draft: request");
-  if (verdict == nullptr) throw std::invalid_argument("session_graph_capture_block_draft: null verdict");
-  if (!graph_device_positions_ || !graph_device_tokens_)
-    throw std::logic_error("session_graph_capture_block_draft: the step must be captured with device positions and tokens");
-  const int H = cfg_.hidden_size;
-  const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
-  if ((graph_feed_rows_ > 0 ? graph_feed_rows_ : decode_rows_) != QR)
-    throw std::logic_error("session_graph_capture_block_draft: the token feed is [next, drafts] (T = query rows)");
-  // The block's rows off the verdict: the anchor is the verify's next
-  // token at the position the recorded commit advanced to; mask rows
-  // follow (positions past the context -1: no state write).
-  dflash2_stage_block(verdict, d_session_pos_ + req, dfcfg_.mask_token_id, QR, max_context(), df_pos_,
-                      df_tokens_, stream_);
-  embed_gather_bf16(globals_.embed, df_tokens_, df_resid_, QR, H, stream_);
-  qwen_configure_gemm_rows(gemm_, QR, true);
-  const int reqs[1] = {req};
-  df_block_layers(1, reqs, /*capture=*/true);
-  df_block_select(1, reqs, /*capture=*/true);
-  // The next replay's feed and the host's copy of the drafts.
-  dflash2_block_feed(verdict, df_tok_, D, step_tokens_, stream_);
-  dflash2_publish_drafts(df_tok_, df_mirror_h_ + static_cast<size_t>(req) * D, D, stream_);
-  const int K = dfcfg_.selector_top_k;
-  dflash2_publish_words(df_ids_ + K, df_cands_h_ + static_cast<size_t>(req) * D * K, D * K, stream_);
+  df_.capture_block_draft(req, verdict, df_capture_ctx());
 }
 
 void QwenModel::session_graph_capture_block_draft_batch(const PickVerdict* verdicts, int requests) {
   if (!dflash2_) throw std::logic_error("session_graph_capture_block_draft_batch: no drafter loaded");
-  if (verdicts == nullptr) throw std::invalid_argument("session_graph_capture_block_draft_batch: null verdicts");
-  if (requests < 1 || requests > max_requests_ || requests > df_batch_)
-    throw std::invalid_argument("session_graph_capture_block_draft_batch: requests exceed the slots or the stacked scratch");
-  if (graph_batch_requests_ != requests || !graph_device_positions_ || !graph_device_tokens_)
-    throw std::logic_error("session_graph_capture_block_draft_batch: requires the device-driven fixed batch of these slots");
-  if (graph_batch_map_source_ != nullptr)
-    throw std::logic_error("session_graph_capture_block_draft_batch: the block draft takes slot q as request q (no compaction)");
-  const int H = cfg_.hidden_size;
-  const int QR = dfcfg_.query_rows(), D = dfcfg_.drafts();
-  // The persistent feed is the whole block per slot ([next, drafts] at
-  // query rows); a reduced-row verify (engine.dflash_batch_rows) reads it
-  // compacted and the block draft still writes the whole of it.
-  const int feed_rows = graph_feed_rows_ > 0 ? graph_feed_rows_ : graph_rows_per_request_;
-  if (feed_rows != QR || graph_rows_per_request_ > QR)
-    throw std::logic_error("session_graph_capture_block_draft_batch: the feed is [next, drafts] per slot (T = query rows)");
-  const int R = requests * QR;
-  dflash2_stage_block_batched(verdicts, d_session_pos_, dfcfg_.mask_token_id, QR, requests, max_context(), df_pos_,
-                              df_tokens_, stream_);
-  embed_gather_bf16(globals_.embed, df_tokens_, df_resid_, R, H, stream_);
-  qwen_configure_gemm_rows(gemm_, R, true);
-  std::vector<int> reqs(static_cast<size_t>(requests));
-  for (int q = 0; q < requests; ++q) reqs[static_cast<size_t>(q)] = q;
-  df_block_layers(requests, reqs.data(), /*capture=*/true);
-  df_block_select(requests, reqs.data(), /*capture=*/true);
-  // The fixed batch's feeds sit behind the decode rows at QR rows per slot
-  // (session_graph_capture_batch's step_tokens_).
-  int64_t* feeds = d_tokens_ + static_cast<size_t>(max_decode_rows_);
-  dflash2_block_feed_batched(verdicts, df_tok_, D, requests, QR, feeds, stream_);
-  dflash2_publish_drafts_batched(df_tok_, df_mirror_h_, D, requests, stream_);
-  const int K = dfcfg_.selector_top_k;
-  for (int q = 0; q < requests; ++q)  // slot q == request q: its mask rows' lists
-    dflash2_publish_words(df_ids_ + (static_cast<size_t>(q) * QR + 1) * K,
-                          df_cands_h_ + static_cast<size_t>(q) * D * K, D * K, stream_);
+  df_.capture_block_draft_batch(verdicts, requests, df_capture_ctx());
+}
+
+DFlash2CaptureCtx QwenModel::df_capture_ctx() const {
+  DFlash2CaptureCtx c;
+  c.step_tokens = step_tokens_;
+  c.decode_rows = decode_rows_;
+  c.graph_feed_rows = graph_feed_rows_;
+  c.graph_batch_requests = graph_batch_requests_;
+  c.graph_rows_per_request = graph_rows_per_request_;
+  c.graph_batch_map_source = graph_batch_map_source_;
+  c.graph_device_positions = graph_device_positions_;
+  c.graph_device_tokens = graph_device_tokens_;
+  return c;
 }
 
 }  // namespace dgpp

@@ -203,19 +203,23 @@ project procedures and design guidance live in `docs/`.
   mask rows' top-K through the chained selector walk, the embeddings and lm
   head shared with the target. Re-hosted on `QwenModel`: the block forward
   and the mask-row select, the feature store that feeds the draft planes,
-  and the batched redraft, most of the arithmetic riding the shared
-  `kernels/dflash2` and the engine's `requires`-guarded duck typing (no
-  engine or kernel change). Two family seams: the target-side taps read the
+  the batched redraft, and the recorded block draft the decode graph
+  replays (the Qwen35 family's capture, re-hosted — the
+  `session_graph_capture_block_draft/_batch` pair), most of the arithmetic
+  riding the shared `kernels/dflash2` and the engine's `requires`-guarded
+  duck typing (one eager-engine dispatch guard for the families without the
+  captured static verify). Two family seams: the target-side taps read the
   layer's output at the NEXT layer's attention-mix launch (a QSA stack has
   no per-layer `[T, H]` residual stream to read, only the mixed hidden), and
   the draft K/V rides new plain planes on the QSA pool's shared block table
-  (`QwenKvPoolShape::draft_layers`, copying with the request's blocks). The
-  eager engine only — the recorded block draft is not ported, so a graph
-  world with `dflash_model` on this family is refused at boot; the MTP
-  world is unaffected. `engine.dflash_model` selects it (`mtp: false`,
-  `decode_graph: false`); the [template](deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark-dflash2_w1.example.json)
-  is the eager drafter's. Gates: the armed eager engine's scalar and batched
-  transcripts are bit-for-bit the plain engine's on the world-1 fixture, the
+  (`QwenKvPoolShape::draft_layers`, copying with the request's blocks).
+  `engine.dflash_model` selects it (`mtp: false`); the
+  [template](deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark-dflash2_w1.example.json)
+  ships it on the decode graph, and `--mtp-schedule` sizes the verify depth
+  from the walk's published confidence. Gates: the armed eager engine's
+  scalar and batched transcripts are bit-for-bit the plain engine's on the
+  world-1 fixture, the graph replay's published drafts are the eager
+  redraft's and its transcript the eager engine's bit-for-bit, the
   drafter-armed plain walk is bitwise the no-drafter model's, and the block
   proposes its seven drafts repeatably; the `validate_against` overload
   cross-checks the qwen4_exp widths in the config unit suite.

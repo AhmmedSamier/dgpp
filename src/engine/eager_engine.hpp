@@ -500,8 +500,8 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
       auto outs = [&] {
         // Families without the captured static verify (no re-hosted block
         // graph) take the eager batch; the graph call only instantiates
-        // where it exists (QwenModel's dflash_graph_verify_available is a
-        // constant false).
+        // where the model has session_verify_batch_graph (QwenModel has no
+        // such member, so its block drafts stay on the eager batch).
         if constexpr (requires { model_->session_verify_batch_graph(reqs, feds, &offs); }) {
           const bool want_graph =
               model_->dflash_verify_graph() && model_->dflash_graph_verify_available();

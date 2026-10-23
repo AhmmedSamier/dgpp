@@ -35,12 +35,11 @@ def run(cells, out):
         drafts, accepted = d1 - d0, a1 - a0
         per_pos = [b - a for a, b in zip(pa0, pa1)]
         pos_drafts = [b - a for a, b in zip(p0, p1)]
-        tau = None if drafts == 0 else accepted / drafts * (1 + accepted / max(n1 - n0, 1)) if False else None
         # τ = accepted/(steps) : steps = num_new_drafts; accepted counts bonus? match bench: τ counts bonus token
         steps = m1["num_drafts_total"] - n0
         tau = None if not steps else accepted / steps
         results.append({
-            "cell": c["cell"], "ok": drafts > 0 or True, "wall_s": round(wall, 2),
+            "cell": c["cell"], "ok": True, "wall_s": round(wall, 2),
             "steps": steps, "drafts": drafts, "accepted": accepted,
             "alpha": None if drafts == 0 else round(accepted / drafts, 4),
             "tau": None if not steps else round(accepted / steps, 3),

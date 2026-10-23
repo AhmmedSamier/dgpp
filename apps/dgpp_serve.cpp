@@ -2173,7 +2173,7 @@ int main(int argc, char** argv) {
   // the MTP world beside it (--mtp --mtp-depth N), run without it unless
   // the command line asked for it.
   if (no_dflash_cli && !mtp_schedule_cli) mtp_schedule = false;
-  // The DFlash2 block drafter (models/qwen/dflash2.hpp): a standalone
+  // The DFlash2 block drafter (models/dflash2/drafter.hpp): a standalone
   // checkpoint (a directory or a cached HF id) that replaces the MTP
   // draft. World 1 without the decode graph is the eager engine's drafter
   // (the batched verify graph, the stacked redrafts); the graph worlds —
