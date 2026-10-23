@@ -95,6 +95,13 @@ struct ClusterConfig {
     // shards hold the table) or the extracted table repo. Only the table's
     // tensors are taken from it. Empty: the checkpoint's own shards.
     std::string ngram_table_model;
+    // The DeepSeek-V4.1 Engram tables' source (2026-10-22, the EXL3 pack
+    // ships none): a Hugging Face repository id resolved through the model
+    // cache like `model` — the base release whose shards hold the tables
+    // (`deepseek-ai/DeepSeek-V4.1-Flash-1017`). Only the table tensors are
+    // taken from it; its Engram sidecar serves when the checkpoint has
+    // none. Empty: the checkpoint's own shards. Refused for any other family.
+    std::string engram_source;
     // The Qwen dense stack's form: "checkpoint" (the default:
     // the BF16 the checkpoint ships) or "fp8" (every dense projection
     // encoded to block FP8 at load — the same recipe as the FP8 releases;

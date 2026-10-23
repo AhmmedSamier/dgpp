@@ -195,7 +195,12 @@ Stats compare(const std::vector<uint16_t>& got, const std::vector<uint16_t>& wan
   for (size_t i = 0; i < got.size(); ++i) {
     const double g = bf16_bits_to_float(got[i]), w = bf16_bits_to_float(want[i]);
     int u = bf16_ulps(got[i], want[i]);
-    if (std::fabs(g - w) <= 0.02 * rms) u = 0;
+    // The floor under the ulp count: a world's fold sums the ranks' bf16
+    // partials, each rounded at its own magnitude, so an element near
+    // zero whose partials cancel carries the partials' rounding (four
+    // partials of a few times the rms: a few percent of it) — 5 % of the
+    // layer's rms, which a defect's whole-row error dwarfs.
+    if (std::fabs(g - w) <= 0.05 * rms) u = 0;
     s.max_ulps = std::max(s.max_ulps, static_cast<double>(u));
     if (u > 128) ++s.hard;
     d2 += (g - w) * (g - w);
@@ -376,6 +381,20 @@ void check_world(int world, uint16_t port, const std::string& dir, const Dsv41Te
       const Stats s = compare(kept_got, kept_want);
       std::printf("[ .. ] world %d layer-local, layer %d (%d of %d rows routed alike): l2 %.3g max %g ulps hard %ld of %ld; worst row t%d %.3g\n",
                   world, l, kept, T, s.l2, s.max_ulps, s.hard, s.total, worst_row, worst);
+      if (s.hard > 0) {
+        // The hard elements themselves (the evidence: a value against its twin and the layer's rms).
+        double rms = 0;
+        for (uint16_t v : kept_want) rms += std::pow(bf16_bits_to_float(v), 2);
+        rms = std::sqrt(rms / std::max<size_t>(kept_want.size(), 1));
+        int shown = 0;
+        for (size_t i = 0; i < kept_got.size() && shown < 6; ++i) {
+          const double g = bf16_bits_to_float(kept_got[i]), w = bf16_bits_to_float(kept_want[i]);
+          if (std::fabs(g - w) <= 0.02 * rms || bf16_ulps(kept_got[i], kept_want[i]) <= 128) continue;
+          std::printf("[ .. ]   hard element %zu (row %zu, stream %zu, channel %zu): got %.5g want %.5g (rms %.4g)\n", i, i / W,
+                      (i % W) / (W / 4), (i % W) % (W / 4), g, w, rms);
+          ++shown;
+        }
+      }
       budget(kept >= T - 2 && s.l2 < 0.01 && s.hard == 0,
              "world " + std::to_string(world) + " layer " + std::to_string(l) + " layer-local outside the numerics budget");
     }
@@ -870,6 +889,10 @@ DGPP_TEST(dsv41_engram_prestage_is_bitwise_the_sequential_staging) {
 DGPP_TEST(dsv41_lm_head_bf12_companion_matches_the_bf16_head) {
   const std::string dir = (fs::current_path() / "dsv41_tp_fixture_bf12").string();
   const Dsv41TextConfig cfg = dsv41fx::tiny_config();
+  if (cfg.weights_exl3) {
+    std::printf("[ .. ] the EXL3 pack's head is a trellis matrix (no bf16 bytes, no bf12 companion): nothing to pack\n");
+    return;
+  }
   dsv41fx::write_fixture(cfg, dir);
   (void)dsv41fx::fixture_sidecar(cfg, dir);
   const std::vector<int64_t> prompt = make_tokens(cfg, 160);

@@ -242,6 +242,7 @@ class PortabilityTest(unittest.TestCase):
             "RadixArk/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-radixark",
             "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek-v4.1-flash_mxfp4-fp8",
             "deepseek-ai/DeepSeek-V4.1-Flash-1017": "deepseek-v4.1-flash-1017_mxfp4-fp8",
+            "LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw": "deepseek-v4.1-flash-1017_exl3-3.5bpw",
             "XiaomiMiMo/MiMo-V2.6-Flash-RL": "mimo-v2.6-flash_mxfp4-fp8",
             "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4-flash_mxfp4-fp8",
             "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN": "qwen-3.8-flash-next_autoround-int4",

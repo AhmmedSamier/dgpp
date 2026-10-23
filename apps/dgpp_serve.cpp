@@ -772,6 +772,10 @@ struct Dsv41Family final : ServeFamily {
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     dgpp::Dsv41LayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    if (cfg.weights_exl3 && dgpp::Dsv41LayerStream::engram_source_dir().empty())
+      throw std::invalid_argument(
+          "the EXL3 pack ships no Engram tables: set engine.engram_source to the base release "
+          "(deepseek-ai/DeepSeek-V4.1-Flash-1017) whose shards hold them (docs/deepseek_v41_flash_exl3_plan.md §1.3)");
     model = std::make_unique<dgpp::Dsv41Model>(
         cfg, ckpt, forward_rows, pool_tokens,
         fabric ? dgpp::Dsv41Residency::Resident : dgpp::Dsv41Residency::Streaming, reducer,
@@ -1680,6 +1684,7 @@ int main(int argc, char** argv) {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string ngram_table_model;         // the table's shards from another cached snapshot (engine.ngram_table_model)
+  std::string engram_source;             // the DeepSeek-V4.1 Engram tables' snapshot (engine.engram_source)
   std::string fp8_head = "gemv";
   std::string draft_head = "exact";         // the MTP draft head's read: exact | screen (engine.draft_head)
   int draft_head_blocks = 32;               // the screen's candidate cap (engine.draft_head_blocks)
@@ -1816,6 +1821,7 @@ int main(int argc, char** argv) {
     kv_dtype = e.kv_dtype;
     ngram_table = e.ngram_table;
     ngram_table_model = e.ngram_table_model;
+    engram_source = e.engram_source;
     dense_weights = e.dense_weights;
     fp8_head = e.fp8_head;
     draft_head = e.draft_head;
@@ -1958,6 +1964,7 @@ int main(int argc, char** argv) {
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
     else if (a == "--ngram-table-model") ngram_table_model = next();
+    else if (a == "--engram-source") engram_source = next();
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
@@ -2529,6 +2536,21 @@ int main(int argc, char** argv) {
     dgpp::QwenLayerStream::set_ngram_table_dir(dir);
     DGPP_LOG_INFO("n-gram table shards from {} -> {}", ngram_table_model, dir);
   }
+  // The DeepSeek-V4.1 Engram tables from another cached snapshot (the EXL3
+  // pack ships none): resolved like --model, set before the family opens
+  // the checkpoint (the loader admits only the table tensors from it; the
+  // Engram sidecar falls back to it). The family check below refuses the
+  // key for any other family.
+  if (!engram_source.empty()) {
+    std::string err;
+    const std::string dir = dgpp::hf::model_dir(engram_source, &err);
+    if (dir.empty()) {
+      DGPP_LOG_ERROR("engine.engram_source {}: {}", engram_source, err);
+      return 1;
+    }
+    dgpp::Dsv41LayerStream::set_engram_source_dir(dir);
+    DGPP_LOG_INFO("Engram table shards from {} -> {}", engram_source, dir);
+  }
   if (fp8_head != "gemv" && fp8_head != "mma") {
     DGPP_LOG_ERROR("engine.fp8_head (--fp8-head) must be gemv or mma, got '{}'", fp8_head);
     return 1;
@@ -3015,6 +3037,11 @@ int main(int argc, char** argv) {
                     "and a bf16 lm head, and keeps their bf16 bytes resident (one drafter arena; the stacked "
                     "redrafts read bf16): the same residency as bf12+bf16",
                     family->name());
+    if (!engram_source.empty() && std::string(family->name()) != "deepseek_v41") {
+      DGPP_LOG_ERROR("engine.engram_source names the DeepSeek-V4.1 (deepseek_v41) Engram tables' snapshot; {} has no such path",
+                     family->name());
+      return 1;
+    }
     if (std::string(family->name()) != "deepseek_v41" && prefill != "bounded")
       DGPP_LOG_WARN("serve: --prefill {} applies to the DeepSeek-V4.1 family only; the {} family prefills every layer",
                     prefill, family->name());

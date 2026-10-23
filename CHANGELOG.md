@@ -5,6 +5,98 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1-Flash-1017 in its EXL3 3.5 bpw re-pack** (2026-10-23,
+  [LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw)).
+  The engine serves the trellis-coded pack as published — every
+  projection of the model, the experts, the drafts and the head are EXL3
+  matrices (int16 trellis tiles under the `mul1` codebook with per-channel
+  input and output scales, 3 to 8 bits per weight by class from the
+  pack's `exl3_k_map.json`) — through its own decode core: the activation
+  row scaled and rotated in fp32 and rounded once to fp16, the tensor
+  cores against the codebook values decoded in registers from the bit
+  stream, fp32 accumulation, the output rotation and scale in fp32, one
+  rounding at the site. The dense form streams the weights once for 1 to
+  64 rows (split-K on the narrow attention projections), the MoE slot
+  kernels and the grouped prefill kernels take EXL3 expert views on the
+  shared MoE core, and a row's chain is the same whatever rows ride with
+  it. The `deepseek_v41` family gains the pack as a weight format
+  (`quant_method: exl3`): the binding table's EXL3 quadruples and checked
+  f16 / f32 natives, tensor-parallel slices on whole 128-blocks (the
+  experts' intermediate 640 / 640 / 512 / 512 at world 4, the head on
+  128-row blocks), the Engram tables from the base release through the new
+  key `engine.engram_source` (the pack ships none; required for an EXL3
+  pack, refused for other families), the attention, Engram and head
+  projections dispatched by format. The numpy reference decodes the
+  trellis independently and models the engine's one fp16 rounding; the
+  dsv41 suites run twice (`DGPP_DSV41_FIXTURE=exl3`, the `_exl3` ctest
+  variants) and the EXL3 fixture passes the release fixture's strict
+  teacher-forced budgets. The binding census on the published pack
+  matches 192,495 tensors with the four Engram tables the base supplies.
+  Template `deploy/cluster_deepseek-v4.1-flash-1017_exl3-3.5bpw_w4.example.json`;
+  plan and record in [docs/deepseek_v41_flash_exl3_plan.md](docs/deepseek_v41_flash_exl3_plan.md);
+  [card](docs/model_cards/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw.md). The
+  format follows exllamav3 ([docs/licenses/exllamav3.md](docs/licenses/exllamav3.md)).
+  The day's first campaign, on the six-slot template (source `a24e05b5`
+  plus the port, binary `c7efb833f88a06e3`): decode 65.0–105.0 /
+  90.9–141.8 / 115.5–156.4 / 91.1–137.9 tok/s at C1 / C2 / C4 / C8 against
+  the release template's 53.5–89.4 / 75.5–121.9 / 94.7–130.3 / 83.8–139.0,
+  the plain pass 20.0 ms against 23.9, the context matrix 36.21–51.39 ms a
+  pass from a short prompt to 512K against 43.12–60.35; cold prefill
+  1.225 / 3.489 / 13.607 s against 1.006 / 2.638 / 10.024 (the grouped
+  trellis kernels' first version — the plan's §3.4 names the second
+  round); HumanEval 159/164, GSM8K 294/300, extraction 100/100 against the
+  release's 157 / 295 / 100. The pack's first requests exposed a
+  decode-graph defect fixed before the run: `GlmMoeLayer::prepare_graph_table`
+  filled the graph's per-slot expert table with the routed EXL3 views but
+  had shared-expert branches for the NVFP4 and packed-int forms only, so
+  every graph step ran each MoE layer's shared expert on a stale view (the
+  first token right, the text degrading after it; the eager table had the
+  branch). The MoE test's EXL3 decode case now runs the graph table too.
+  The same day's decode and prefill program on this pack (the plan's §7
+  has every leg): the split form's reduce folded
+  into the EXL3 GEMV (the last split block of an output block folds the
+  splits; arrival counters in a fixed region at the head of each EXL3
+  workspace, zeroed by the owner, never cuBLASLt's); an eight-stage
+  cp.async ring for the slot kernels (the one-row gate-up from 72 % to
+  ~95 % of the DRAM rate; the dense GEMV keeps four); the experts'
+  intermediate slices alternating by parity (`exl3_expert_block_split`:
+  5/5/4/4 blocks on even experts, 4/4/5/5 on odd, the shared expert by its
+  layer's — a step's expert bytes even out across the ranks; the resident
+  image format is 2); a 128-row A tile for dense launches above 64 rows
+  (prefill −2.5 % at 8K and 32K); the family's decode batch 32 → 64 rows
+  (`decode_rows_cap`, the CSA2 layer's bound and the DSA select layout
+  rows) and the template at twelve slots with `queue_limit` 16 and a
+  4,096-token first prefill chunk for a lone prompt. Measured on one
+  binary: the plain one-row step 20.0 → 18.9 ms; C1 within ±2 % of six
+  slots; C8 code / JSON 127 / 135 → 154 / 175–180 decode tok/s, C12 167 /
+  181. Then the expert-run slot form: the per-slot kernels had streamed
+  and trellis-decoded an expert again for every slot that picked it (L2
+  served under half — eight identical streams cost them 4.9x one
+  stream's time, a C8 trace), so the expert-sorted order now emits each
+  position's equal-expert run length, the rotated rows are laid out by
+  position, and the run's first block computes all its rows as one A tile
+  (a 16-row tile, or a 64-row tile above 16 token rows) while the
+  duplicates' blocks return — bitwise the per-slot form per row (the MoE
+  test's decode case at 17 / 40 / 64 rows with few experts). C1 code /
+  JSON / prose 35.4 / 38.6 / 29.5 → 32.2 / 35.4 / 28.5 ms a pass (+10 / +9
+  / +4 % tok/s: the shared expert's run and the draft block's own
+  duplicates), C8 158 / 175 / 137 → 191 / 228 / 167 decode tok/s; eight
+  identical streams' step 166 → 92 ms. Measured and rejected: rotating the activation rows inside
+  the GEMV's stage (every rotating kernel 30–60 % slower: the rotating
+  warp also computes); closed with numbers: the prefetch window budget
+  and boundary rate (as shipped is best, the windows worth 2.5 ms a pass)
+  and the prefill chunk policy (a lone prompt already reaches 4,096-token
+  ticks). Per token the pack prefills at 1,760 / 2,270 / 2,420 tok/s at
+  2K / 8K / 32K. The campaign of record on the finished template (binary
+  `6f8bccfa5b70efef`, the rows in docs/benchmarks.md): decode 70.6–119.3
+  / 96.7–170.3 / 126.4–183.7 / 167.7–224.0 tok/s at C1 / C2 / C4 / C8
+  against the six-slot campaign's 65.0–105.0 / 90.9–141.8 / 115.5–156.4
+  / 91.1–137.9 (C1 prose / code / JSON / math / chat 70.6 / 96.2 / 119.3 /
+  111.3 / 70.9; the C8 cell eight live streams at 167.7 / 200.8 / 224.0 /
+  208.3 / 177.9), the plain one-row pass 18.9 ms, cold prefill 1.166 /
+  3.398 / 13.326 s, the context matrix 33.18 → 50.58 ms a pass from a
+  short prompt to 512K; HumanEval 159/164, GSM8K 293/300, extraction
+  100/100.
 - **The adaptive prefill controller charges a chunk only for what it adds**
   (2026-10-22, issue #116 finding 2 and a second field report). The
   controller timed the whole tick — the decoders' pass included — and

@@ -224,9 +224,12 @@ void launch_moe_round_bf16(uint16_t* out, const float* acc, int64_t n,
 // `shared_early`: the shared expert's slots interleaved with the first
 // routed ones instead of last (the kernel's comment: compute over
 // L2-resident weights beside the routed DRAM stream).
+// `runs` (nullable): runs[p] = the length of the equal-expert run starting
+// at position p of the order, 0 inside a run — the EXL3 slot kernels'
+// expert-run form (kernels/exl3_gemv.hpp).
 void launch_moe_slot_order(const int32_t* ids, int32_t* order, int slots,
                            int top_k, int n_experts, cudaStream_t stream,
-                           bool shared_early = false);
+                           bool shared_early = false, int32_t* runs = nullptr);
 void launch_moe_slot_gate_up_swiglu(
     const uint16_t* x, size_t x_stride, const int32_t* ids,
     const int32_t* order, const MoeExpertView* views, int n_routed,

@@ -1240,9 +1240,9 @@ void check_select_common(int heads, int select_k, const char* who) {
 }  // namespace
 
 size_t csa2_select_workspace_bytes(int max_rows, int64_t max_entries) {
-  if (max_rows <= 0 || max_rows > 32 || max_entries <= 0 || max_entries > (int64_t(1) << kIdxBits))
+  if (max_rows <= 0 || max_rows > 64 || max_entries <= 0 || max_entries > (int64_t(1) << kIdxBits))
     throw std::invalid_argument(
-        "csa2_select_workspace_bytes: rows in [1, 32], entries in [1, 2^21]");
+        "csa2_select_workspace_bytes: rows in [1, 64], entries in [1, 2^21]");
   return size_t(max_rows) * size_t(max_entries) * sizeof(uint64_t);
 }
 

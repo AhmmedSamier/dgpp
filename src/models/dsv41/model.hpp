@@ -188,10 +188,11 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
 
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
   static constexpr int kv_block_tokens_static() { return kBlockTokens; }
-  // 32 since 2026-09-14 (16 before): six request slots at DSpark depth 4
-  // (30 rows) in one batched replay — the vLLM recipe's six-stream
-  // aggregate; kDecodeRowsMax bounds it.
-  static constexpr int decode_rows_cap() { return 32; }
+  // 64 since 2026-10-23 (32 from 2026-09-14, 16 before): twelve request
+  // slots at DSpark depth 4 (60 rows) in one batched replay — the
+  // aggregate past six streams, where the step's fixed costs (collectives,
+  // the small kernels) amortize over more rows; kDecodeRowsMax bounds it.
+  static constexpr int decode_rows_cap() { return 64; }
   // The group prefill (session_prefill_group): a span's longest prompt —
   // each span fits the walk. Bounded prefill packs the spans' final
   // windows into decoder space before projecting their last rows.
@@ -388,7 +389,11 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
     return decode && prefetch_.enabled() && loader_.residency() == Dsv41Residency::Resident;
   }
   void prefetch_fp8(const GlmQuantMatrix& m);
+  void prefetch_exl3(const Exl3Matrix& m);
   void prefetch_bf16(const uint16_t* w, size_t bytes, int rows);
+  // The lm head's logits (fp32 [rows, lm_vocab_count]) for `rows` hidden
+  // rows: the bf16 / bf12 head through the GEMM, or the EXL3 head's launcher.
+  void head_logits(const uint16_t* h, int rows, float* out, cudaStream_t stream);
   void prefetch_mhc(const uint16_t* fn, const uint16_t* norm, int rows);
   void prefetch_attention_weights(const Dsv41LayerResident& r, int rows);
   void prefetch_ffn_side(const Dsv41LayerResident& r, int rows);
@@ -412,6 +417,8 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   bool dense_mma_ = true;  // the dense projections' and head's decode form (DGPP_DSV41_DENSE_GEMV=1: the GEMV chunks)
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;
+  void* exl3_ws_ = nullptr;  // the EXL3 GEMV's own (head, DSpark main projection); zeroed at allocation
+  size_t exl3_ws_bytes_ = 0;
   Dsv41GlobalsResident globals_;
   GlmMoeConfig moe_cfg_;
   GlmMhcConfig mhc_cfg_;

@@ -36,6 +36,7 @@ over RoCE. Each quant links to its specific Hugging Face model card.
 | GLM-5.3 | [HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128](https://huggingface.co/HawkBearPig/GLM-5.3-Mixed346-GPTQ-H32-A8-g128) | 4 | [Four nodes](deploy/cluster_glm-5.3_mixed346_w4.example.json) (272K FP8 K/V pool) |
 | DeepSeek-V4.1-Flash | [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash_mxfp4-fp8_w4.example.json) |
 | DeepSeek-V4.1-Flash-1017 | [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json) (the V4.1-Flash engine path on the re-trained weights; the indexer budget is a deployment key, `engine.index_topk`, shipped at the checkpoint's 512 with 2048 measured; [card](docs/model_cards/DeepSeek-V4.1-Flash-1017.md)) |
+| DeepSeek-V4.1-Flash-1017 EXL3 | [LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw) | 4 | [Four nodes](deploy/cluster_deepseek-v4.1-flash-1017_exl3-3.5bpw_w4.example.json) (the 3.5 bpw EXL3 trellis re-pack served through the engine's own trellis kernels, the Engram tables from the base release via `engine.engram_source`; [card](docs/model_cards/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw.md)) |
 | MiMo-V2.6-Flash | [XiaomiMiMo/MiMo-V2.6-Flash-RL](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL) | 2, 4 | [Two nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) |
 | Flint | [HawkBearPig/flint-FP8-NVFP4](https://huggingface.co/HawkBearPig/flint-FP8-NVFP4) | 1, 2, 4 | [One node](deploy/cluster_flint_fp8-nvfp4_w1.example.json), [two nodes](deploy/cluster_flint_fp8-nvfp4_w2.example.json) and [four nodes](deploy/cluster_flint_fp8-nvfp4_w4.example.json) |
 | DeepSeek-V4-Flash | [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | 2, 4 | [Two nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w2.example.json), [four nodes](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w4.example.json) |
@@ -274,7 +275,8 @@ mapping its n-gram table from NVMe and encoding the dense stack to FP8 at load.
 
 The Qwen sixteen-slot decode graphs and prefill continuation are implemented as
 opt-in controls; the shipped Qwen templates retain four slots and monolithic
-admission. DeepSeek ships at six slots with DSpark depth 4, confidence
+admission. DeepSeek ships at six slots with DSpark depth 4 (the EXL3
+re-pack at twelve on the 64-row decode batch since 2026-10-23), confidence
 scheduling, bounded grouped prefill and the stream-ordered eager collective.
 Full GLM-5.3 ships at eight slots and uses packed tensor-core prefill from 128
 rows. MiMo-V2.6-Flash ships at four slots with MTP depth 1 on two or four
