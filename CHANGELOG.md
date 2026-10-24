@@ -5,6 +5,49 @@ project procedures and design guidance live in `docs/`.
 
 ## Unreleased
 
+- **DeepSeek-V4.1-Flash-1017 EXL3: sixteen slots on a 96-row decode
+  batch, and the step's cost past a few rows** (2026-10-23 evening,
+  `docs/deepseek_v41_flash_exl3_plan.md` §3.3, §3.6, §7). The family's
+  decode batch widens from 64 to 96 rows (the engine's `kDecodeRowsMax`
+  and every bound that mirrored it — the pick tables, the GEMM lowering,
+  the CSA2 select and layer, the batch-map upload, the tensor-core GEMV's
+  one split chain, now to 128 rows) and the EXL3 template ships at sixteen
+  slots (queue 24): sixteen streams decode live where twelve had queued
+  four. The forms that pay for it, each bitwise its predecessor per row or
+  a fixed function of the request alone: the expert-run slot form's long
+  runs as 64-row groups from a launch list (the 64-row launch no longer
+  puts 1,400 idle blocks on the GPU a layer); the decode attention's
+  splits merged eight at a time by the group's last block in L2, the dead
+  partials discarded before they write back (the finish reads five
+  partials a row instead of forty; a one-time rounding-class change of
+  the decode attention, the two-level merge at 5e-8 relative to the flat
+  combine, batch-invariant by construction); the router's tiled dots and
+  the mHC dots' token tile from sixteen decode rows; the graph-variant
+  budget at 256 so sixteen slots keep all their scheduled depths, with the
+  new key `engine.mtp_schedule_options` to cap the depth options at the
+  budget's even spread (the template pins three: 1, 3, 4 — every depth as
+  an option let the schedule stop at depth 2 on code, 8 % of its tokens a
+  step) and the schedule's row and base costs measured on the pack (2.95
+  and 19.9 ms, from the mode boots). On the
+  twelve-slot template the campaign-method C8 legs read code 191.1 → 206.1
+  tok/s, JSON 227.9 → 240.7, prose level, C1 level at equal rows; on the
+  sixteen-slot template sixteen identical streams decode at 128 ms a
+  step. Two defects the gates caught on the way are in the plan's record
+  (the discard racing the merge's own reads; the 65–128-row tensor-core
+  form's unsplit chain past 64 rows). Later that evening the template's
+  block widened to five drafts (`engine.mtp_depth` 5, the schedule's
+  options 1, 3 and 5): the code, table, JSON and counting classes had
+  saturated the four-draft block (counting 4.96 tokens a step of a
+  possible 5) — now 5.95 / 5.17 / 5.20 / 3.60 tokens a step, C1 JSON
+  120.8 → 133.1 tok/s and code 91.1 → 92.0 on the campaign prompts, prose
+  level (plan §3.6). The campaign of record on the shipped template
+  (binary `9a179b15a6de02fa`, 2026-10-24 00:06–00:54 UTC, every gate
+  green): C1 70.7 / 92.0 / 134.2 / 111.4 / 70.1 tok/s (prose / code /
+  JSON / math / chat), C2 95.7–182.4, C4 127.8–206.6, C8 165.0–247.7;
+  cold prefill 1.188 / 3.446 / 13.331 s; HumanEval 160/164, GSM8K
+  295/300, extraction 100/100 — docs/benchmarks.md and the model card
+  carry the rows.
+
 - **DeepSeek-V4.1-Flash-1017 in its EXL3 3.5 bpw re-pack** (2026-10-23,
   [LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw)).
   The engine serves the trellis-coded pack as published — every
@@ -2217,10 +2260,7 @@ project procedures and design guidance live in `docs/`.
   them; bitwise (the long-prompt sha on every leg; an in-situ self-check,
   `DGPP_QWEN_PLE_PRESTAGE_CHECK=1`, gathers both channels and compares
   them; `DGPP_QWEN_PLE_PRESTAGE=0` keeps the one channel). The round also
-  served the author's vLLM stack on the same box for a kernel-level
-  comparison (their expert GEMM 1.8x ours per token, their fp8 dense GEMMs
-  and bf16 partials; our attention, indexer, hyper-connection glue and
-  n-gram path level or ahead) and left two opt-in forms: the expert GEMM
+  left two opt-in forms: the expert GEMM
   with its weight fragments decoded in registers and three pipeline stages
   (`DGPP_PACKQ_GEMM=wide3`, bitwise, level), the gate and up projections
   as one launch (`DGPP_MOE_PACKQ_PAIR=1`, bitwise, level) and the down

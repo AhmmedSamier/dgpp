@@ -12,7 +12,7 @@ the original soak alone did not establish those later changes.
 
 ## Original problem
 
-Single-stream dgpp matches or beats vLLM, but per-request throughput collapses
+Single-stream dgpp sits at its step floor, but per-request throughput collapses
 under concurrency (measured: 45 → 9 tok/s @d8k c4). Root causes in the
 scheduler (`src/sched/scheduler.cpp:quantum()`, `1124-1254`):
 

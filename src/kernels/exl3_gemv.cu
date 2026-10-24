@@ -433,12 +433,25 @@ __global__ void exl3_moe_rotate_slots_kernel(const uint16_t* __restrict__ x, siz
 // form). A launch serves one run class — kMT 1 the runs of up to 16 rows,
 // kMT 4 the longer ones (up to 64, the decode batch's bound) — and a block
 // of the other class returns.
+// The block's run: the 16-row tile (kMT 1) at position blockIdx.y, which
+// computes when it leads a run of up to kMoeRunTileRows rows (every
+// position when `runs` is null); the 64-row tile (kMT 4) from the order
+// kernel's group list after the run lengths (glm_moe_launch.hpp): entry
+// blockIdx.y = position | rows << 16, -1 past the last group.
 template <int kMT>
-__device__ __forceinline__ int run_rows_of(const int32_t* __restrict__ runs, int p) {
-  const int L = runs ? runs[p] : 1;
-  if (L <= 0) return 0;
-  if (kMT == 1 ? L > 16 : L <= 16) return 0;
-  return L;
+__device__ __forceinline__ bool run_block_rows(const int32_t* __restrict__ runs, int slots, int* p, int* L) {
+  if constexpr (kMT == 1) {
+    *p = static_cast<int>(blockIdx.y);
+    if (*p >= slots) return false;
+    *L = runs ? runs[*p] : 1;
+    return *L > 0 && *L <= kMoeRunTileRows;
+  } else {
+    const int e = runs[slots + static_cast<int>(blockIdx.y)];
+    if (e < 0) return false;
+    *p = e & 0xFFFF;
+    *L = e >> 16;
+    return true;
+  }
 }
 
 // Gate + up + SwiGLU per expert run: block (x, y) = output block x of
@@ -464,10 +477,8 @@ __global__ __launch_bounds__(kThreads) void exl3_moe_slot_gate_up_kernel(
   using CS = Core<kSBits, kMT>;
   static_assert(CR::kRows == CS::kRows, "one A tile height");
   extern __shared__ __align__(16) uint8_t smem[];
-  const int p = static_cast<int>(blockIdx.y);
-  if (p >= slots) return;
-  const int L = run_rows_of<kMT>(runs, p);
-  if (L == 0) return;
+  int p, L;
+  if (!run_block_rows<kMT>(runs, slots, &p, &L)) return;
   const int slot = order ? order[p] : p;
   bool shared = false;
   const int vb = view_base_of(ids, slot, top_k, shared_view_base, shared);
@@ -538,10 +549,8 @@ __global__ __launch_bounds__(kThreads) void exl3_moe_slot_down_kernel(
   using CR = Core<kRBits, kMT>;
   using CS = Core<kSBits, kMT>;
   extern __shared__ __align__(16) uint8_t smem[];
-  const int p = static_cast<int>(blockIdx.y);
-  if (p >= slots) return;
-  const int L = run_rows_of<kMT>(runs, p);
-  if (L == 0) return;
+  int p, L;
+  if (!run_block_rows<kMT>(runs, slots, &p, &L)) return;
   const int slot = order ? order[p] : p;
   bool shared = false;
   const int vb = view_base_of(ids, slot, top_k, shared_view_base, shared);
@@ -647,9 +656,11 @@ __global__ __launch_bounds__(kThreads) void exl3_moe_grouped_kernel(const uint16
 
 // The slot forms' two run classes: the 16-row tile (kMT 1, the deep ring)
 // serves every run of up to 16 rows — every block when `runs` is null —
-// and the 64-row tile (kMT 4) the longer runs, which exist only when the
-// batch has more than 16 token rows (a routed expert appears at most once
-// per row; the shared expert's run is every row).
+// and the 64-row tile (kMT 4) the longer runs' groups of up to 64 rows,
+// which exist only when the batch has more than 16 token rows (a routed
+// expert appears at most once per row; the shared expert's run is every
+// row). The 64-row launch's grid is the group list's bound (a run that
+// spans more than 64 rows is several groups), so its blocks all compute.
 template <int kR, int kS, int kMT>
 void launch_slot_gate_up_mt(const uint16_t* xh_g, const uint16_t* xh_u, size_t xh_stride, const int32_t* ids,
                             const int32_t* order, const int32_t* runs, const MoeExpertView* views, int n_max, int k,
@@ -665,7 +676,7 @@ void launch_slot_gate_up_mt(const uint16_t* xh_g, const uint16_t* xh_u, size_t x
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSmem)));
     opted_in = true;
   }
-  const dim3 grid(n_max / kExl3Block, slots);
+  const dim3 grid(n_max / kExl3Block, kMT == 1 ? slots : moe_run_groups_max(slots));
   exl3_moe_slot_gate_up_kernel<kR, kS, kMT><<<grid, kThreads, kSmem, stream>>>(
       xh_g, xh_u, xh_stride, ids, order, runs, views, k, act, act_stride, slots, top_k, limit, shared_view_base,
       n_shared);
@@ -678,7 +689,7 @@ void launch_slot_gate_up(const uint16_t* xh_g, const uint16_t* xh_u, size_t xh_s
                          int n_shared, cudaStream_t stream) {
   launch_slot_gate_up_mt<kR, kS, 1>(xh_g, xh_u, xh_stride, ids, order, runs, views, n_max, k, act, act_stride, slots,
                                     top_k, limit, shared_view_base, n_shared, stream);
-  if (runs && slots / (top_k + 1) > 16)
+  if (runs && slots / (top_k + 1) > kMoeRunTileRows)
     launch_slot_gate_up_mt<kR, kS, 4>(xh_g, xh_u, xh_stride, ids, order, runs, views, n_max, k, act, act_stride,
                                       slots, top_k, limit, shared_view_base, n_shared, stream);
 }
@@ -695,7 +706,7 @@ void launch_slot_down_mt(const uint16_t* xh_d, size_t xh_stride, const int32_t* 
                                       cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kSmem)));
     opted_in = true;
   }
-  const dim3 grid(n / kExl3Block, slots);
+  const dim3 grid(n / kExl3Block, kMT == 1 ? slots : moe_run_groups_max(slots));
   exl3_moe_slot_down_kernel<kR, kS, kMT><<<grid, kThreads, kSmem, stream>>>(
       xh_d, xh_stride, ids, order, runs, views, out, out_stride, slots, top_k, shared_view_base, n_shared);
   DGPP_CUDA_OK(cudaGetLastError());
@@ -706,7 +717,7 @@ void launch_slot_down(const uint16_t* xh_d, size_t xh_stride, const int32_t* ids
                       int top_k, int shared_view_base, int n_shared, cudaStream_t stream) {
   launch_slot_down_mt<kR, kS, 1>(xh_d, xh_stride, ids, order, runs, views, n, out, out_stride, slots, top_k,
                                  shared_view_base, n_shared, stream);
-  if (runs && slots / (top_k + 1) > 16)
+  if (runs && slots / (top_k + 1) > kMoeRunTileRows)
     launch_slot_down_mt<kR, kS, 4>(xh_d, xh_stride, ids, order, runs, views, n, out, out_stride, slots, top_k,
                                    shared_view_base, n_shared, stream);
 }
@@ -826,7 +837,7 @@ void launch_exl3_moe_slot_gate_up_swiglu(const uint16_t* xh_g, const uint16_t* x
   if (slots <= 0) return;
   if (!xh_g || !xh_u || !ids || !views || !act || n_max <= 0 || n_max % kExl3Block != 0 || k <= 0 ||
       k % kExl3Block != 0 || (xh_stride * 2) % 16 != 0 || act_stride < n_max || shared_view_base < 0 ||
-      (runs && !order) || slots / (top_k + 1) > 4 * 16)
+      (runs && !order) || slots > 1024)
     throw std::invalid_argument("exl3_moe_slot_gate_up_swiglu: arguments outside the contract");
   dispatch_pair(routed_bits, shared_bits, [&](auto r, auto s) {
     launch_slot_gate_up<decltype(r)::value, decltype(s)::value>(xh_g, xh_u, xh_stride, ids, order, runs, views, n_max,
@@ -841,7 +852,7 @@ void launch_exl3_moe_slot_down(const uint16_t* xh_d, size_t xh_stride, const int
                                int shared_view_base, int n_shared, cudaStream_t stream) {
   if (slots <= 0) return;
   if (!xh_d || !ids || !views || !out || n <= 0 || n % kExl3Block != 0 || (xh_stride * 2) % 16 != 0 ||
-      out_stride < n || shared_view_base < 0 || (runs && !order) || slots / (top_k + 1) > 4 * 16)
+      out_stride < n || shared_view_base < 0 || (runs && !order) || slots > 1024)
     throw std::invalid_argument("exl3_moe_slot_down: arguments outside the contract");
   dispatch_pair(routed_bits, shared_bits, [&](auto r, auto s) {
     launch_slot_down<decltype(r)::value, decltype(s)::value>(xh_d, xh_stride, ids, order, runs, views, n, out,

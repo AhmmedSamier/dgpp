@@ -221,6 +221,8 @@ class Csa2Layer {
     size_t pos, req_ids, req_zero, slots, pos_sel, entries, ent_pos, scratch_pos, iota, one_block;
     size_t wlist, wcounts, wscratch, dlist, dcounts, topk, counts, cand, cand_counts;
     size_t m_main, l_main, c_main, m_win, l_win, c_win;
+    size_t m_grp_main, l_grp_main, c_grp_main, m_grp_win, l_grp_win, c_grp_win, tickets;
+    size_t tickets_per_source = 0;  // ints per source (the window's follow the main's)
     size_t gather_k, gather_scale, logits, select_ws, counter, violations;
     size_t exl3_ws = 0, exl3_ws_bytes = 0;
     int tile_cap = 0;
@@ -359,6 +361,16 @@ class Csa2Layer {
   float* m_win_ = nullptr;        // [ws_win_rows, lh]
   float* l_win_ = nullptr;
   float* c_win_ = nullptr;        // [ws_win_rows, lh, 512]
+  // The decode split groups' partials (kernels/dsa.hpp kAttnSplitGroup):
+  // one per group of eight splits, per source, and the groups' tickets.
+  float* m_grp_main_ = nullptr;   // [ws_slots / 8, lh]
+  float* l_grp_main_ = nullptr;
+  float* c_grp_main_ = nullptr;   // [ws_slots / 8, lh, 512]
+  float* m_grp_win_ = nullptr;
+  float* l_grp_win_ = nullptr;
+  float* c_grp_win_ = nullptr;
+  int32_t* tickets_main_ = nullptr;  // [row pairs x groups], zero at rest
+  int32_t* tickets_win_ = nullptr;
   uint8_t* gather_k_ = nullptr;   // [max_entries, 128]
   float* gather_scale_ = nullptr; // [max_entries]
   float* logits_ = nullptr;       // [tile_cap, max_entries]: the fused scorer's row tile (the budget)

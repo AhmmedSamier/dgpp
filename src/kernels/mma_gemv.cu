@@ -852,8 +852,6 @@ void launch(const uint16_t* act, size_t act_stride, const void* w, const ScaleT*
   if (out_stride == 0) out_stride = static_cast<size_t>(n);
   if (out_stride < static_cast<size_t>(n)) throw std::invalid_argument("mma_gemv: out stride");
   if (kFp8 && (scales == nullptr || cs < 4)) throw std::invalid_argument("mma_gemv: fp8 scales");
-  constexpr int kWideThreads = kWideWarps * 32;
-  const dim3 grid((n + kWideWarps * kRowsPerWarp - 1) / (kWideWarps * kRowsPerWarp));
   // Groups of at most kMmaGemvMaxRowsPerLaunch rows; the form by the group's rows.
   for (int row0 = 0; row0 < m; row0 += kMmaGemvMaxRowsPerLaunch) {
     const int rows = std::min(kMmaGemvMaxRowsPerLaunch, m - row0);
@@ -871,10 +869,14 @@ void launch(const uint16_t* act, size_t act_stride, const void* w, const ScaleT*
       launch_decode<1, kFp8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     else if (rows <= 32)
       launch_decode<2, kFp8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
-    else if (rows <= kMmaGemvSplitRows)
+    else if (rows <= 64)
       launch_wide_split<4, kFp8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     else
-      mma_gemv_kernel<8, kFp8, kWideWarps, OutT, ScaleT><<<grid, kWideThreads, Win<8, kFp8>::kSmemBytes, stream>>>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, nullptr, a2, limit, nullptr, nullptr, nullptr, nullptr, 0, 0, 0, nullptr, nullptr, nullptr);
+      // The 65..128-row form splits like the narrower ones (2026-10-23: the
+      // 96-row decode batch; launched unsplit, its rows' chain differed from
+      // their solo rows' — sixteen DSpark slots' transcripts diverged at
+      // near-ties while twelve matched).
+      launch_wide_split<8, kFp8, OutT, ScaleT>(a, act_stride, w, scales, o, rows, n, k, out_stride, rs, cs, stream, ws, ws_bytes, a2, limit);
     DGPP_CUDA_OK(cudaGetLastError());
   }
 }

@@ -258,7 +258,7 @@ GlmMoeLayer::GlmMoeLayer(const GlmMoeWeights& weights, const GlmMoeConfig& cfg,
     DGPP_CUDA_OK(cudaMalloc(&d_hidden_rot_, static_cast<size_t>(decode_slots_) * H * 2));
     DGPP_CUDA_OK(cudaMalloc(&d_slot_down_, rows * H * sizeof(float)));
     DGPP_CUDA_OK(cudaMalloc(&d_slot_order_, rows * sizeof(int32_t)));
-    DGPP_CUDA_OK(cudaMalloc(&d_slot_runs_, rows * sizeof(int32_t)));
+    DGPP_CUDA_OK(cudaMalloc(&d_slot_runs_, (rows + moe_run_groups_max(static_cast<int>(rows))) * sizeof(int32_t)));
     DGPP_CUDA_OK(cudaMalloc(&d_tile_counter_, 2 * sizeof(int)));
     DGPP_CUDA_OK(cudaMemset(d_tile_counter_, 0, 2 * sizeof(int)));
     if (cfg_.shared_mma_aside) {

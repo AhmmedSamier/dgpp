@@ -18,7 +18,7 @@
 // workspace, one reduce launch that sums in split order and rotates); the
 // split count is a function of (n, k) alone, so a row's chain — its mma
 // accumulation over k in window order, then the split sum — is the same
-// whatever rows ride in the launch, 1..64 (the row-count invariance the
+// whatever rows ride in the launch, 1..128 (the row-count invariance the
 // batch family relies on). Above 16 rows the A tile grows to 32, 64 and
 // 128 rows (kMT 2, 4, 8 — the 128-row tile since 2026-10-23: a dense
 // prefill site read its weights once per 64 rows, 0.74 s of an 8K
