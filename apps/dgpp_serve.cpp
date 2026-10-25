@@ -354,11 +354,13 @@ struct ServeFamily {
     if (!dir.empty())
       throw std::invalid_argument(std::string(name()) + ": no block drafter (dflash_model) support");
   }
-  // Whether this family runs the block drafter inside the decode graph (the
-  // recorded block draft, engine/graph_engine.hpp). True where the graph
-  // capture exists; families with the eager drafter only refuse the
-  // combination at startup.
-  virtual bool block_draft_graph_ok() const { return true; }
+  // Whether this family records the block drafter's draft inside the decode
+  // graph step (the session_graph_capture_block_draft pair the graph engine
+  // duck-types). A family that takes a drafter but not the capture would
+  // replay a step that records no draft at all: the verify stays exact and the
+  // acceptance collapses with no diagnostic, so the combination is refused at
+  // startup instead. Opt-in: the capture is what earns the flag.
+  virtual bool block_draft_graph_ok() const { return false; }
 };
 
 // GLM-5.3-Flash: the DSA pool's block and pool-id geometry, the latent
@@ -1148,6 +1150,11 @@ struct Qwen35Family final : ServeFamily {
         fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash, kv_format);
   }
   void set_draft_model(const std::string& dir) override { dflash = dir; }
+  // The block draft records in this family's capture (the
+  // session_graph_capture_block_draft pair, the graph worlds since 2026-10-04,
+  // for both the DFlash2 and the DFlash v1 drafter), so the decode graph is a
+  // legal drafter world here.
+  bool block_draft_graph_ok() const override { return true; }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
   std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
