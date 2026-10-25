@@ -354,6 +354,13 @@ struct ServeFamily {
     if (!dir.empty())
       throw std::invalid_argument(std::string(name()) + ": no block drafter (dflash_model) support");
   }
+  // Whether this family records the block drafter's draft inside the decode
+  // graph step (the session_graph_capture_block_draft pair the graph engine
+  // duck-types). A family that takes a drafter but not the capture would
+  // replay a step that records no draft at all: the verify stays exact and the
+  // acceptance collapses with no diagnostic, so the combination is refused at
+  // startup instead. Opt-in: the capture is what earns the flag.
+  virtual bool block_draft_graph_ok() const { return false; }
 };
 
 // GLM-5.3-Flash: the DSA pool's block and pool-id geometry, the latent
@@ -439,6 +446,7 @@ struct GlmFamily final : ServeFamily {
 struct QwenFamily final : ServeFamily {
   dgpp::QwenTextConfig cfg;
   std::string ckpt;
+  std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
   std::unique_ptr<dgpp::QwenModel> model;
   bool fp8_head_mma;
   dgpp::LatentFormat kv_format;
@@ -521,9 +529,10 @@ struct QwenFamily final : ServeFamily {
   }
   dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
                         bool mtp, int decode_rows) const override {
-    return dgpp::QwenModel::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
-                                        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
-                                        slots, fabric && mtp, decode_rows, /*serving_logits=*/true, kv_format);
+    return dgpp::QwenModel::plan_memory(
+        cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+        fabric || !dflash.empty() ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
+        slots, fabric && mtp, decode_rows, /*serving_logits=*/true, kv_format, dflash);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::QwenModel::session_snapshot_bytes(cfg, world_, mtp);
@@ -535,10 +544,17 @@ struct QwenFamily final : ServeFamily {
     dgpp::QwenLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
     model = std::make_unique<dgpp::QwenModel>(
         cfg, ckpt, forward_rows, pool_tokens,
-        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming, reducer,
+        fabric || !dflash.empty() ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
+        reducer,
         fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows, fp8_head_mma,
-        /*serving_logits=*/true, kv_format);
+        /*serving_logits=*/true, kv_format, dflash);
   }
+  // The drafter (2026-10-20 port of the Qwen35 DFlash2 walk): its recorded
+  // block draft (session_graph_capture_block_draft/_batch, mirrors and the
+  // capture-aware folds) re-hosted in commit 40da8852..0fae644e, so the
+  // decode graph records it (block_draft_graph_ok).
+  void set_draft_model(const std::string& dir) override { dflash = dir; }
+  bool block_draft_graph_ok() const override { return true; }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
   std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
@@ -1134,6 +1150,11 @@ struct Qwen35Family final : ServeFamily {
         fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash, kv_format);
   }
   void set_draft_model(const std::string& dir) override { dflash = dir; }
+  // The block draft records in this family's capture (the
+  // session_graph_capture_block_draft pair, the graph worlds since 2026-10-04,
+  // for both the DFlash2 and the DFlash v1 drafter), so the decode graph is a
+  // legal drafter world here.
+  bool block_draft_graph_ok() const override { return true; }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
   std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
@@ -1599,7 +1620,10 @@ int main(int argc, char** argv) {
       "    [--mtp-depth N]  draft tokens per step (1..5; the verify runs 1+N rows)\n"
       "    [--prefill-fp8-per-tensor]  Qwen3.8-27B: prefill GEMMs on cuBLASLt's per-tensor e4m3 kernels\n"
       "      (engine.prefill_fp8_per_tensor; ~2x the prefill rate, +23 GiB, changes greedy output)\n"
-      "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint (replaces --mtp; past world 1 on the decode graph)\n"
+      "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint: the drafter's world. It\n"
+      "      replaces the MTP draft on an MTP template (the draft's own settings go with the switch\n"
+      "      unless named; --mtp beside it is a contradiction and refused); past world 1 it runs on\n"
+      "      the decode graph\n"
       "    [--no-dflash]  run plain from a drafter template on the decode graph (the A/B knob; add --mtp for the MTP world)\n"
       "    [--no-dflash-verify-graph]  the multi-slot verify as an eager batch (engine.dflash_verify_graph)\n"
       "    [--no-prefill-group]  one cold prompt per prefill walk (engine.prefill_group false)\n"
@@ -1749,7 +1773,8 @@ int main(int argc, char** argv) {
   bool no_eos = false, decode_graph = false, mtp = false;
   int mtp_depth = 1;  // draft tokens per step (needs --mtp; 1..5)
   bool no_mtp_cli = false, mtp_depth_cli = false, mtp_schedule_cli = false;  // given on the command line
-  bool no_dflash_cli = false;
+  bool no_dflash_cli = false, dflash_model_cli = false, mtp_cli = false;
+  bool lookup_draft_cli = false, lookup_tail_cli = false, draft_head_cli = false;
   bool mtp_depth_explicit = false;  // named by the flag or the file (else the family's default)
   bool mtp_schedule = false;  // the confidence-scheduled verify depth (needs --mtp)
   double mtp_schedule_row_ms = 8.0;
@@ -1970,8 +1995,10 @@ int main(int argc, char** argv) {
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
-    else if (a == "--draft-head") draft_head = next();
-    else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
+    else if (a == "--draft-head") {
+      draft_head = next();
+      draft_head_cli = true;
+    } else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
     else if (a == "--mtp-expert-format") mtp_expert_format = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--draft-vocab") draft_vocab = next();
@@ -1998,15 +2025,20 @@ int main(int argc, char** argv) {
     else if (a == "--decode-graph") decode_graph = true;
     else if (a == "--graph-batch-min-live")
       graph_batch_min_live = std::stoi(next());
-    else if (a == "--mtp") mtp = true;
-    else if (a == "--dflash-model") dflash_model = next();
-    else if (a == "--no-dflash") {
+    else if (a == "--mtp") {
+      mtp = true;
+      mtp_cli = true;
+    } else if (a == "--dflash-model") {
+      dflash_model = next();
+      dflash_model_cli = true;
+    } else if (a == "--no-dflash") {
       // The plain world from a drafter template (the A/B knob): the drafter
       // runs on the eager engine, whose plain world without a drafter would
       // stream its layers (0.65 tok/s measured), so the knob lands on the
       // decode graph — the same resident plain world the MTP templates'
       // --no-mtp gives; --mtp [--mtp-depth N] beside it is the MTP world.
       dflash_model.clear();
+      dflash_model_cli = false;  // --no-dflash wins a --dflash-model on the same line
       decode_graph = true;
       no_dflash_cli = true;
     }
@@ -2052,13 +2084,19 @@ int main(int argc, char** argv) {
     else if (a == "--mtp-draft-temperature") mtp_draft_temperature = std::stod(next());
     else if (a == "--mtp-verify") mtp_verify = next();
     else if (a == "--dflash-batch-rows") dflash_batch_rows = std::stoi(next());
-    else if (a == "--lookup-draft") lookup_draft = true;
-    else if (a == "--no-lookup-draft") lookup_draft = false;
-    else if (a == "--lookup-nmin") lookup_nmin = std::stoi(next());
+    else if (a == "--lookup-draft") {
+      lookup_draft = true;
+      lookup_draft_cli = true;
+    } else if (a == "--no-lookup-draft") {
+      lookup_draft = false;
+      lookup_draft_cli = true;
+    } else if (a == "--lookup-nmin") lookup_nmin = std::stoi(next());
     else if (a == "--lookup-nstrong") lookup_nstrong = std::stoi(next());
     else if (a == "--lookup-agree") lookup_agree = std::stoi(next());
-    else if (a == "--lookup-tail") lookup_tail = std::stoi(next());
-    else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
+    else if (a == "--lookup-tail") {
+      lookup_tail = std::stoi(next());
+      lookup_tail_cli = true;
+    } else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
     else if (a == "--admission") admission_mode = next();
@@ -2161,8 +2199,34 @@ int main(int argc, char** argv) {
   // schedule and its cost model are the drafter's — the plain world, and
   // the MTP world beside it (--mtp --mtp-depth N), run without it unless
   // the command line asked for it.
-  if (no_dflash_cli && !mtp_schedule_cli) mtp_schedule = false;
-  // The DFlash2 block drafter (models/qwen/dflash2.hpp): a standalone
+  if (no_dflash_cli) {
+    // An explicit disable wins regardless of the order of the CLI flags.
+    dflash_model.clear();
+    dflash_model_cli = false;
+    if (!mtp_schedule_cli) mtp_schedule = false;
+  }
+  // --dflash-model on the command line replaces the template's MTP world, as
+  // its usage has claimed since the drafter landed (until 2026-10-24 the flag
+  // only worked on a template that already set mtp false; on an MTP template
+  // it tripped the "not both" refusal below, which is why RadixArk NVFP4
+  // carried a second drafter template instead of a knob). The MTP group is the
+  // draft it replaces, so it goes with the switch the way --no-mtp's does: the
+  // depth, the schedule, the lookup drafts and the tail (the block drafter
+  // refuses a tail outright, engine/graph_engine.hpp), and the screened head
+  // — unless the command line named them. So an MTP template plus the flag is
+  // the drafter world the standalone template carried, setting for setting.
+  if (dflash_model_cli && !dflash_model.empty() && !mtp_cli) {
+    mtp = false;
+    if (!mtp_depth_cli) {
+      mtp_depth = 1;
+      mtp_depth_explicit = false;
+    }
+    if (!mtp_schedule_cli) mtp_schedule = false;
+    if (!lookup_draft_cli) lookup_draft = false;
+    if (!lookup_tail_cli) lookup_tail = 0;
+    if (!draft_head_cli) draft_head = "exact";
+  }
+  // The DFlash2 block drafter (models/dflash2/drafter.hpp): a standalone
   // checkpoint (a directory or a cached HF id) that replaces the MTP
   // draft. World 1 without the decode graph is the eager engine's drafter
   // (the batched verify graph, the stacked redrafts); the graph worlds —
@@ -2685,11 +2749,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   dgpp::Qwen35Model::set_dflash2_weights_fp8(dflash_weights == "fp8");
+  dgpp::QwenModel::set_dflash2_weights_fp8(dflash_weights == "fp8");
   if (dflash_depth < 0 || dflash_depth > 7) {
     DGPP_LOG_ERROR("engine.dflash_depth (--dflash-depth) must be in [0, 7], got {}", dflash_depth);
     return 2;
   }
   dgpp::Qwen35Model::set_dflash_options(dflash_verify_graph, dflash_draft_batch, dflash_depth);
+  dgpp::QwenModel::set_dflash_options(dflash_verify_graph, dflash_draft_batch, dflash_depth);
   if (prefill_fp8_per_tensor)
     DGPP_LOG_INFO("serve: engine.prefill_fp8_per_tensor on — prefill GEMMs on per-tensor e4m3 (not transcript-preserving)");
   dgpp::QwenLayerStream::set_ngram_prestage(ngram_prestage);
@@ -2903,6 +2969,13 @@ int main(int argc, char** argv) {
         family->set_draft_model(dflash_dir);
       } catch (const std::exception& e) {
         DGPP_LOG_ERROR("{}", e.what());
+        return 2;
+      }
+      if (decode_graph && !family->block_draft_graph_ok()) {
+        DGPP_LOG_ERROR(
+            "engine.dflash_model on {} runs the eager engine: set engine.decode_graph false "
+            "(the recorded block draft is not ported to this family)",
+            family->name());
         return 2;
       }
     }

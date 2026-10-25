@@ -98,6 +98,32 @@ class ServeStartupTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 2, result.stdout)
                 self.assertIn("--sse-ping-interval must be", result.stdout)
 
+    def test_dflash_switch_and_explicit_disable_precedence(self):
+        with tempfile.TemporaryDirectory(prefix="dgpp-dflash-switch-") as directory:
+            config = Path(directory) / "cluster.json"
+            config.write_text(json.dumps({
+                "model": "unused/model", "nodes": ["127.0.0.1"],
+                "engine": {"decode_graph": True, "mtp": True, "mtp_depth": 2,
+                           "mtp_schedule": True, "lookup_draft": True, "lookup_tail": 2,
+                           "draft_head": "screen"},
+            }))
+            common = [self.binary, "--config", str(config), "--model", "",
+                      "--checkpoint-dir", directory, "--max-connections", "0"]
+            for flags, contradiction in (
+                (["--dflash-model", directory], False),
+                (["--mtp", "--dflash-model", directory], True),
+                (["--dflash-model", directory, "--mtp"], True),
+                (["--no-dflash", "--dflash-model", "unused/not-cached"], False),
+                (["--dflash-model", "unused/not-cached", "--no-dflash"], False),
+            ):
+                with self.subTest(flags=flags):
+                    result = subprocess.run(common + flags, text=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, timeout=10,
+                                            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+                    self.assertEqual(result.returncode, 2 if contradiction else 1, result.stdout)
+                    self.assertIn("enable one or the other" if contradiction else
+                                  "all capacity knobs must be >= 1", result.stdout)
+
     def run_world(self, settings, head_modes=None):
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))

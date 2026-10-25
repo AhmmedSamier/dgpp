@@ -4,6 +4,46 @@ The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
 ## Unreleased
+- **DFlash2 integration fixes** (2026-10-25): the shared drafter follows
+  the active eager/capture reducer, copies complete draft KV blocks during
+  prefix reuse, and arms sampled proposal distributions on Flash-Next.
+  Memory plans use the local vocabulary slice. Flash-Next now honors the
+  explicitly requested draft-head screen and uses recurrent-state replay
+  for DFlash2, avoiding full recurrent snapshots at every speculative row.
+  Regression tests cover both model families, two-rank graph execution,
+  prefix reuse, screening, sampling and all eight accepted prefix lengths.
+  The paired probe reconciles completed requests and includes the bonus
+  token in mean acceptance length; explicit `--no-dflash` wins in either
+  command-line order.
+
+- **The draft mechanism is a knob, not a template fork** (2026-10-25):
+  `--dflash-model DIR_OR_ID` now replaces the template's MTP world the way its
+  usage text always claimed. The flag only worked on a template that
+  already set `mtp: false`; on an MTP template it hit the "enable one or the
+  other, not both" refusal (`apps/dgpp_serve.cpp`), which is why this work's
+  first cut shipped the RadixArk NVFP4 Flash-Next drafter as a second template
+  (`cluster_qwen-3.8-flash-next_nvfp4-radixark-dflash2_w1[_yarn512k]`). That is
+  a mechanism fork of the kind `deploy/README.md`'s one-template rule refuses
+  (the Qwen3.8-27B releases name `engine.dflash_model` in their single template
+  and reach the other worlds by knob), so the fork does not land: the two
+  templates are deleted here and the drafter ships as the knob. Giving the flag
+  on the command line takes the MTP group back to
+  its defaults unless the command line names the setting: `mtp` off,
+  `mtp_depth` 1, `mtp_schedule` off, `lookup_draft` off, `lookup_tail` 0 (the
+  block drafter refuses a tail outright, `engine/graph_engine.hpp`) and
+  `draft_head` exact — the same "the settings go with the switch" rule
+  `--no-mtp` and `--no-dflash` already follow. Explicit `--mtp` beside
+  `--dflash-model` is still the contradiction and still refused; `--no-dflash`
+  wins a `--dflash-model` on the same line. Gate: the drafter worlds of both
+  RadixArk shapes resolve to settings records identical to the deleted
+  templates' (digests `4b798c02e99efb2a` plain, `0a61b45aacd39d69` with
+  `--mtp-schedule`), verified with `--memory-plan` (no world forms). The two
+  fork templates are deleted, and the portability shape rule loses the
+  `-dflash2` marker that had been added to let the fork through, so a
+  drafter/MTP pair of one model, quant and world fails the gate again.
+  `deploy/README.md` and `docs/configuration.md` carry the drafter as the knob
+  it is; the benchmarks of record are untouched (the MTP templates are
+  byte-identical).
 
 - **DeepSeek-V4.1-Flash-1017 EXL3: sixteen slots on a 96-row decode
   batch, and the step's cost past a few rows** (2026-10-23 evening,
@@ -237,6 +277,37 @@ project procedures and design guidance live in `docs/`.
   NVFP4 column slices. Regression fixtures cover nested CSF checkpoints,
   TP slicing, independent forward references, graph replay and mixed prefill.
   See [docs/fp4local_plan.md](docs/fp4local_plan.md).
+
+- **The DFlash2 block drafter serves Qwen3.8-Flash-Next** (2026-10-20).
+  The Qwen3.5 drafter (`engine.dflash_model`, the block-diffusion proposal
+  model from a separate checkpoint) reaches the `qwen4_exp` family:
+  `incoai/Qwen3.8-Flash-Next-DFlash2` — five bidirectional sliding Qwen3
+  layers over a KV context built from the target's tapped features, the
+  mask rows' top-K through the chained selector walk, the embeddings and lm
+  head shared with the target. Re-hosted on `QwenModel`: the block forward
+  and the mask-row select, the feature store that feeds the draft planes,
+  the batched redraft, and the recorded block draft the decode graph
+  replays (the Qwen35 family's capture, re-hosted — the
+  `session_graph_capture_block_draft/_batch` pair), most of the arithmetic
+  riding the shared `kernels/dflash2` and the engine's `requires`-guarded
+  duck typing (one eager-engine dispatch guard for the families without the
+  captured static verify). Two family seams: the target-side taps read the
+  layer's output at the NEXT layer's attention-mix launch (a QSA stack has
+  no per-layer `[T, H]` residual stream to read, only the mixed hidden), and
+  the draft K/V rides new plain planes on the QSA pool's shared block table
+  (`QwenKvPoolShape::draft_layers`, copying with the request's blocks).
+  `engine.dflash_model` selects it (`mtp: false`) on the decode graph, and
+  `--mtp-schedule` sizes the verify depth
+  from the walk's published confidence. (At the time this shipped as its own
+  `nvfp4-radixark-dflash2` template; 2026-10-24 folded that fork back into the
+  one [RadixArk template](deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark_w1.example.json)
+  as the `--dflash-model` knob.) Gates: the armed eager engine's
+  scalar and batched transcripts are bit-for-bit the plain engine's on the
+  world-1 fixture, the graph replay's published drafts are the eager
+  redraft's and its transcript the eager engine's bit-for-bit, the
+  drafter-armed plain walk is bitwise the no-drafter model's, and the block
+  proposes its seven drafts repeatably; the `validate_against` overload
+  cross-checks the qwen4_exp widths in the config unit suite.
 
 - **The day's DeepSeek-V4.1 levers ported where they apply; the campaign's
   C8 cell on a six-slot template read** (2026-10-20). Inventory of the

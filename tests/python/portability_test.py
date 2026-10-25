@@ -287,7 +287,11 @@ class PortabilityTest(unittest.TestCase):
                 # that shape in one documented engine setting (today the Qwen
                 # 512K YaRN ramp) instead of in its size. A base shape stays
                 # unique, and a variant may repeat one only with its suffix;
-                # deploy/README.md carries the rule and the catalogue.
+                # deploy/README.md carries the rule and the catalogue. The
+                # draft mechanism is never a fork of the shape: a model's
+                # drafter world is the same template with --dflash-model, so a
+                # drafter template and an MTP template of one model, quant and
+                # world share a stem and the rule below refuses the pair.
                 shape = re.fullmatch(
                     rf"cluster_{re.escape(models[cfg['model']])}_w([0-9]+)(_[a-z0-9]+)?",
                     path.name.removesuffix(".example.json"))
