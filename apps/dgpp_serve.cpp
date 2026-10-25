@@ -2199,7 +2199,12 @@ int main(int argc, char** argv) {
   // schedule and its cost model are the drafter's — the plain world, and
   // the MTP world beside it (--mtp --mtp-depth N), run without it unless
   // the command line asked for it.
-  if (no_dflash_cli && !mtp_schedule_cli) mtp_schedule = false;
+  if (no_dflash_cli) {
+    // An explicit disable wins regardless of the order of the CLI flags.
+    dflash_model.clear();
+    dflash_model_cli = false;
+    if (!mtp_schedule_cli) mtp_schedule = false;
+  }
   // --dflash-model on the command line replaces the template's MTP world, as
   // its usage has claimed since the drafter landed (until 2026-10-24 the flag
   // only worked on a template that already set mtp false; on an MTP template
