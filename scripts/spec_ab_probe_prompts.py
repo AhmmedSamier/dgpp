@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Paired spec-decode probe corpus: fixed prompt cells (code d0/d4096/d8192,
-# filler, structured), deterministic so two engines see identical input.
+# Paired spec-decode probe corpus: short code, code with module context,
+# filler and structured tasks. Lengths are reported by the server tokenizer.
 # The corpus is module-level: spec_ab_probe_dgpp.py imports CELLS rather than
 # restating it, so the two sides cannot drift apart mid-measurement.
 # Usage: spec_ab_probe_prompts.py <engine_url> <out.json> [--model ID]
@@ -28,7 +28,6 @@ CODE = [ini_parser(), json_diff(), lru_cache(), toml_dump(), jsonl_flush(), env_
 
 def lorem_fill():
     return ("Write a short blog post about a mountain sunrise coffee ritual. Include sensory details.\n\n"
-            # ~1200 tokens of filler prefix so ctx-focused tokens are spread
             "For reference, here are the opening lines of the draft so far: "
             "\"The alarm rang at five. I stepped out into cold air and climbed the trail "
             "past sleeping houses with only my headlamp on. Mist moved between the pines. "
@@ -41,9 +40,8 @@ STRUCT = [
     ("Given this TOML, output a one-line JSON object with the keys sorted alphabetically.\n\n[limits]\nwindow = 7\nblock = 8\n[tokens]\nbos = 248044\neos = 248044\nmask = 248077\n\n", "toml"),
 ]
 
-def long_code(prefix_msgs):
-    base = jsonl_flush()
-    return base + "\n\n# Here is the module the function belongs to:\n\n" + prefix_msgs
+def long_code(task, prefix_msgs):
+    return task + "\n\n# Here is the module the function belongs to:\n\n" + prefix_msgs
 
 SRC_MODULE = "\n".join(
     f"def helper_{i}(rows, out, seen=set()):\n"
@@ -59,11 +57,11 @@ CELLS = []
 for i, p in enumerate(CODE[:3]):
     CELLS.append({"cell": f"code-d0-{i}", "messages": [{"role": "user", "content": p}], "max_tokens": 160})
 for i, p in enumerate(CODE[:3]):
-    CELLS.append({"cell": f"code-d4096-{i}", "messages": [{"role": "user", "content": long_code(SRC_MODULE)}], "max_tokens": 160})
+    CELLS.append({"cell": f"code-module-{i}", "messages": [{"role": "user", "content": long_code(p, SRC_MODULE)}], "max_tokens": 160})
 for i, p in enumerate(CODE[:3]):
-    CELLS.append({"cell": f"code-d8192-{i}", "messages": [{"role": "user", "content": long_code(SRC_MODULE) + "\n\n# Extended notes:\n\n" + SRC_MODULE}], "max_tokens": 160})
+    CELLS.append({"cell": f"code-long-module-{i}", "messages": [{"role": "user", "content": long_code(p, SRC_MODULE) + "\n\n# Extended notes:\n\n" + SRC_MODULE}], "max_tokens": 160})
 CELLS.append({"cell": "filler-d0-0", "messages": [{"role": "user", "content": lorem_fill()}], "max_tokens": 160})
-CELLS.append({"cell": "filler-d8192-0", "messages": [{"role": "user", "content": lorem_fill() + "The valley held its breath. The sky turned from black to iron, iron to rose, rose to gold.\n\n"}], "max_tokens": 160})
+CELLS.append({"cell": "filler-extra-0", "messages": [{"role": "user", "content": lorem_fill() + "The valley held its breath. The sky turned from black to iron, iron to rose, rose to gold.\n\n"}], "max_tokens": 160})
 for i, (p, tag) in enumerate(STRUCT[:2]):
     CELLS.append({"cell": f"structured-d0-{i}", "messages": [{"role": "user", "content": p}], "max_tokens": 160})
 

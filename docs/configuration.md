@@ -468,22 +468,14 @@ On the Qwen3.8-Flash-Next family (`qwen4_exp`) the recorded block draft runs
 on the graph engine, and the drafter's block confidence feeds the scheduler
 settings above. `engine.dflash_model` names it in a template (the
 Qwen3.8-27B releases) or `--dflash-model DIR_OR_ID` selects it at boot on a
-template that names MTP, as the measured RadixArk NVFP4 Flash-Next world
-does:
+template that names MTP, for example:
 `dgpp-serve --config deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark_w1_yarn512k.example.json --dflash-model incoai/Qwen3.8-Flash-Next-DFlash2 --mtp-schedule`
 (the drafter replaces the MTP draft, so the template's `mtp_depth`,
 `mtp_schedule`, `lookup_draft`, `lookup_tail` and `draft_head` revert to
-their defaults unless the command line names them). With `mtp_schedule` true (the `--mtp-schedule` boot
-flag) the scheduler
-verifies 2–4 drafts per step instead of the whole block, following
-the predicted acceptance of each row: measured on
-Qwen3.8-Flash-Next-NVFP4, one node, 2026-10-21, scheduled depth raised
-effective decode throughput 22–30% per workload class over the fixed
-whole-block verify (45.8 t/s class average, 1.54× the same engine without
-speculation) at 70% window utilization instead of 33%. The cost-model
-defaults (`row_ms: 8.0`, `base_ms: 28.0`) match this deployment's measured
-pass cost (≈89 ms per eight-row pass) and are a reasonable starting point
-for similar single-node deployments of this family.
+their defaults unless the command line names them). With `mtp_schedule` true,
+the scheduler chooses the verification depth from the drafter's confidence
+and the configured cost model. Measure those costs on the selected deployment;
+acceptance and throughput depend on its target weights and workload.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
