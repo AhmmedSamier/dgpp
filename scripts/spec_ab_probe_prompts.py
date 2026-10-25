@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # Paired spec-decode probe corpus: fixed prompt cells (code d0/d4096/d8192,
 # filler, structured), deterministic so two engines see identical input.
-# Usage: spec_ab_probe_prompts.py <engine_url> <out.json>
-import json, sys, time, urllib.request
-
-URL = sys.argv[1]
-OUT = sys.argv[2]
+# The corpus is module-level: spec_ab_probe_dgpp.py imports CELLS rather than
+# restating it, so the two sides cannot drift apart mid-measurement.
+# Usage: spec_ab_probe_prompts.py <engine_url> <out.json> [--model ID]
+import argparse, json, time, urllib.request
 
 def ini_parser():
     return "Write a Python function to parse INI-style files, handling sections, comments, and quoted values.\n\ndef parse_ini(text):\n    config = {}\n    current = None\n    for line in text.splitlines():\n        line = line.strip()\n"
@@ -68,35 +67,48 @@ CELLS.append({"cell": "filler-d8192-0", "messages": [{"role": "user", "content":
 for i, (p, tag) in enumerate(STRUCT[:2]):
     CELLS.append({"cell": f"structured-d0-{i}", "messages": [{"role": "user", "content": p}], "max_tokens": 160})
 
-results = []
-for c in CELLS:
-    body = {"model": None, "temperature": 0, "stream": False,
-            "max_tokens": c["max_tokens"], "messages": c["messages"]}
-    t0 = time.time()
-    req = urllib.request.Request(URL.rstrip("/") + "/v1/chat/completions",
-                                 data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=600) as r:
-            resp = json.load(r)
-        spec = (resp.get("metrics") or {}).get("speculative_decoding") or {}
-        usage = resp.get("usage") or {}
-        results.append({
-            "cell": c["cell"], "ok": True, "wall_s": round(time.time() - t0, 2),
-            "prompt_tokens": usage.get("prompt_tokens"),
-            "completion_tokens": usage.get("completion_tokens"),
-            "draft_acceptance_rate": spec.get("draft_acceptance_rate"),
-            "mean_acceptance_length": spec.get("mean_acceptance_length"),
-            "acceptance_histogram": spec.get("acceptance_histogram"),
-        })
-    except Exception as e:  # noqa
-        results.append({"cell": c["cell"], "ok": False, "error": repr(e)})
-    with open(OUT, "w") as f:
-        json.dump(results, f, indent=1)
 
-for r in results:
-    if r.get("ok"):
-        print(f"{r['cell']:>16}  α={r['draft_acceptance_rate']!s:>7.4}  τ={r['mean_acceptance_length']!s:>7.4}  "
-              f"ptok={r['prompt_tokens']} ctok={r['completion_tokens']} wall={r['wall_s']}s")
-    else:
-        print(f"{r['cell']:>16}  ERROR {r['error']}")
+def run(url, out, model=None, cells=None):
+    URL = url.rstrip("/")
+    results = []
+    for c in (cells if cells is not None else CELLS):
+        body = {"model": model, "temperature": 0, "stream": False,
+                "max_tokens": c["max_tokens"], "messages": c["messages"]}
+        t0 = time.time()
+        req = urllib.request.Request(URL + "/v1/chat/completions",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as r:
+                resp = json.load(r)
+            spec = (resp.get("metrics") or {}).get("speculative_decoding") or {}
+            usage = resp.get("usage") or {}
+            results.append({
+                "cell": c["cell"], "ok": True, "wall_s": round(time.time() - t0, 2),
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "draft_acceptance_rate": spec.get("draft_acceptance_rate"),
+                "mean_acceptance_length": spec.get("mean_acceptance_length"),
+                "acceptance_histogram": spec.get("acceptance_histogram"),
+            })
+        except Exception as e:  # noqa
+            results.append({"cell": c["cell"], "ok": False, "error": repr(e)})
+        with open(out, "w") as f:
+            json.dump(results, f, indent=1)
+
+    for r in results:
+        if r.get("ok"):
+            print(f"{r['cell']:>16}  α={r['draft_acceptance_rate']!s:>7.4}  τ={r['mean_acceptance_length']!s:>7.4}  "
+                  f"ptok={r['prompt_tokens']} ctok={r['completion_tokens']} wall={r['wall_s']}s")
+        else:
+            print(f"{r['cell']:>16}  ERROR {r['error']}")
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="vLLM side of the paired spec probe (the corpus both sides send).")
+    ap.add_argument("url", help="the vLLM engine's base URL")
+    ap.add_argument("out", help="where to write the per-cell JSON")
+    ap.add_argument("--model", default=None,
+                    help="the model field to send; vLLM routes on it, so name one when the engine serves several")
+    a = ap.parse_args()
+    run(a.url, a.out, a.model)
