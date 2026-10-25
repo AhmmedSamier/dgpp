@@ -466,8 +466,9 @@ __global__ void moe_slot_order_kernel(const int32_t* __restrict__ ids,
                                       int32_t* __restrict__ order, int32_t* __restrict__ runs,
                                       int slots, int top_k, int n_experts, int shared_early) {
   dgpp_pdl_wait();
-  extern __shared__ int32_t keys[];  // [slots] by slot, then (runs) [slots] by position
+  extern __shared__ int32_t keys[];  // [slots] by slot, then (runs) [slots] by position, [slots] group counts
   int32_t* sorted = keys + slots;
+  int32_t* groups = sorted + slots;
   const int s = threadIdx.x;
   if (s < slots) {
     const int t = s / (top_k + 1);
@@ -490,13 +491,28 @@ __global__ void moe_slot_order_kernel(const int32_t* __restrict__ ids,
   }
   if (!runs) return;
   __syncthreads();
+  int L = 0;
   if (s < slots) {
-    int L = 0;
     if (s == 0 || sorted[s - 1] != sorted[s]) {
       L = 1;
       while (s + L < slots && sorted[s + L] == sorted[s]) ++L;
     }
     runs[s] = L;
+    groups[s] = L > kMoeRunTileRows ? (L + kMoeRunGroupRows - 1) / kMoeRunGroupRows : 0;
+  }
+  __syncthreads();
+  // The long runs' 64-row groups as a launch list after the run lengths
+  // (glm_moe_launch.hpp): position | rows << 16, -1 past the last entry.
+  if (s < slots) {
+    int base = 0;
+    for (int o = 0; o < s; ++o) base += groups[o];
+    int32_t* list = runs + slots;
+    for (int g = 0; g < groups[s]; ++g) {
+      const int r0 = g * kMoeRunGroupRows;
+      list[base + g] = (s + r0) | (min(kMoeRunGroupRows, L - r0) << 16);
+    }
+    if (s == slots - 1)
+      for (int i = base + groups[s]; i < moe_run_groups_max(slots); ++i) list[i] = -1;
   }
 }
 
@@ -829,8 +845,13 @@ void launch_router_mode(const uint16_t* hidden, const uint16_t* gate,
                         bool allow_tiled) {
   const int vector_loads =
       (cfg.hidden % 8 == 0 && aligned16(hidden) && aligned16(gate)) ? 1 : 0;
-  if (counters == nullptr && allow_tiled && vector_loads &&
-      tokens >= kRouterTileTokens) {
+  // The tiled dots from kRouterTileTokens rows whatever the caller's
+  // fusion (bitwise the warp form: moe_router_tiled_dots_are_bitwise_the_
+  // warp_form): decode batches of sixteen rows and more re-read the gate
+  // per (token, expert) warp otherwise — 76 us a layer at forty rows
+  // against the tile's ~15 (2026-10-23). The fused select's counters stay
+  // at rest when this branch runs.
+  if (allow_tiled && vector_loads && tokens >= kRouterTileTokens) {
     const dim3 grid(
         static_cast<unsigned>((cfg.n_experts + kRouterTileExperts - 1) / kRouterTileExperts),
         static_cast<unsigned>((tokens + kRouterTileTokens - 1) / kRouterTileTokens));
@@ -1691,7 +1712,7 @@ void launch_moe_slot_order(const int32_t* ids, int32_t* order, int slots,
   if (slots > 1024)
     throw std::invalid_argument("moe_slot_order: more slots than one block");
   moe_slot_order_kernel<<<1, static_cast<unsigned>(slots),
-                          static_cast<size_t>(slots) * sizeof(int32_t) * (runs ? 2 : 1),
+                          static_cast<size_t>(slots) * sizeof(int32_t) * (runs ? 3 : 1),
                           stream>>>(ids, order, runs, slots, top_k, n_experts, shared_early ? 1 : 0);
   DGPP_CUDA_OK(cudaGetLastError());
 }

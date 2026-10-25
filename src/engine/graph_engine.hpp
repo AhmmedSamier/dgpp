@@ -732,9 +732,11 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   // `min_depth`: never verify fewer drafts than this (>= 1).
   // The depth options: every depth in [min_depth, depth] when the bus's
   // graph-variant budget (kBusMaxGraphVariants: two per slot per option
-  // plus two per batch family) holds them, else an even spread that always
-  // keeps the full block; a policy depth rounds UP to the next option
-  // (never fewer drafts than the policy asked — exact either way).
+  // plus two per batch family) holds them — and `max_options`
+  // (engine.mtp_schedule_options, 0 = the budget's count) caps them — else
+  // an even spread that always keeps the full block; a policy depth rounds
+  // UP to the next option (never fewer drafts than the policy asked —
+  // exact either way).
   // base_ms + adapt: lambda follows the modeled throughput (an EWMA of
   // committed / (base + rows.row) over the MTP steps, floored at
   // lambda_tok_per_ms; verify_schedule.hpp) instead of standing at the
@@ -881,7 +883,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
     sched_sampled_scale_ = scale;
   }
   void configure_verify_schedule(bool on, float row_ms, float lambda_tok_per_ms,
-                                 int min_depth = 1, float base_ms = 0.f, bool adapt = false) {
+                                 int min_depth = 1, float base_ms = 0.f, bool adapt = false,
+                                 int max_options = 0) {
     drain();
     for (const std::array<cudaGraphExec_t, 2>& e : scalar_execs_)
       if (e[0] != nullptr)
@@ -927,7 +930,13 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
         throw std::invalid_argument(
             "engine.mtp_schedule=true requires engine.mtp_schedule_min_depth < engine.mtp_depth; "
             "set engine.mtp_schedule=false to use a fixed verify depth.");
-      const int options = std::min(span, fit);
+      // engine.mtp_schedule_options (2026-10-23): at most this many
+      // options, the same spread — a budget raised for sixteen slots made
+      // every depth an option, and the depth-2 option on the DSpark block
+      // cost the C1 code class 8 % of its tokens a step (the confidence
+      // under-reads the third row there; the three-option set rounds a
+      // policy depth of 2 up to 3).
+      const int options = std::max(1, max_options > 0 ? std::min({span, fit, max_options}) : std::min(span, fit));
       if (block_) {
         if constexpr (requires { model_->dflash2_confidence(); }) {
           if (model_->dflash2_confidence() == nullptr)

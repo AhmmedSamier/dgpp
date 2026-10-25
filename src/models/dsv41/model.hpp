@@ -192,7 +192,7 @@ class Dsv41Model : public SessionModel<Dsv41Model> {
   // slots at DSpark depth 4 (60 rows) in one batched replay — the
   // aggregate past six streams, where the step's fixed costs (collectives,
   // the small kernels) amortize over more rows; kDecodeRowsMax bounds it.
-  static constexpr int decode_rows_cap() { return 64; }
+  static constexpr int decode_rows_cap() { return 96; }
   // The group prefill (session_prefill_group): a span's longest prompt —
   // each span fits the walk. Bounded prefill packs the spans' final
   // windows into decoder space before projecting their last rows.

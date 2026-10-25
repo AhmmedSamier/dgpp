@@ -190,6 +190,64 @@ DGPP_TEST(mma_gemv_fp8_wide_forms_match_oracle_and_the_scalar_form) {
   std::printf("[ OK ] mma_gemv fp8: fixture-sized shapes at every form match the oracle\n");
 }
 
+// The wide forms' bf16 epilogue (the shared expert aside at sixteen DSpark
+// slots is an 80-row fp8 -> bf16 launch, 2026-10-23): bf16(f32) at 4 and 8
+// tiles, and every row bitwise its m = 64 / m = 16 launch.
+DGPP_TEST(mma_gemv_fp8_wide_bf16_epilogue_matches_f32_and_is_m_invariant) {
+  for (int m : {80, 100}) {
+    const Problem p = make(m, 512, 1024, 5, 5, 0x6A09E667F3BCC909ull + m);
+    Dev d(p);
+    dgpp::launch_mma_gemv_fp8_f32(d.act, p.k, d.w8, d.scales, d.outf, p.m, p.n, p.k, 0, p.rs, p.cs, nullptr);
+    dgpp::launch_mma_gemv_fp8_bf16(d.act, p.k, d.w8, d.scales, d.outb, p.m, p.n, p.k, 0, p.rs, p.cs, nullptr);
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+    const std::vector<float> full = fetch_f(d.outf, size_t(p.m) * p.n);
+    const std::vector<uint16_t> fullb = fetch_b(d.outb, size_t(p.m) * p.n);
+    size_t bad = 0, first = 0;
+    for (size_t i = 0; i < fullb.size(); ++i)
+      if (fullb[i] != dgpp::float_to_bf16_bits(full[i])) { if (!bad) first = i; ++bad; }
+    if (bad) std::printf("[ .. ] fp8 wide bf16 m=%d: %zu of %zu elements differ from bf16(f32); first at row %zu col %zu\n", m, bad, fullb.size(), first / p.n, first % p.n);
+    require(bad == 0, "fp8 wide bf16 epilogue != bf16(f32 epilogue) at m=" + std::to_string(m));
+    for (int m2 : {16, 64}) {
+      for (int r0 = 0; r0 + m2 <= p.m; r0 += m2) {
+        dgpp::launch_mma_gemv_fp8_bf16(d.act + size_t(r0) * p.k, p.k, d.w8, d.scales, d.outb, m2, p.n, p.k, 0, p.rs, p.cs, nullptr);
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        const std::vector<uint16_t> part = fetch_b(d.outb, size_t(m2) * p.n);
+        for (int i = 0; i < m2; ++i)
+          require(std::memcmp(part.data() + size_t(i) * p.n, fullb.data() + size_t(r0 + i) * p.n, size_t(p.n) * 2) == 0,
+                  "fp8 wide bf16: row " + std::to_string(r0 + i) + " differs at m=" + std::to_string(m2) + " from m=" + std::to_string(m));
+      }
+    }
+    std::printf("[ OK ] mma_gemv fp8 wide bf16 epilogue at m=%d: bf16(f32), bitwise the 16/64-row launches\n", m);
+  }
+}
+
+// With a split workspace, every tile form keeps one chain: rows of an
+// 80-row launch (the eight-tile form, 2026-10-23) bitwise their 5-row and
+// 40-row launches at a small n that splits (n = 128 -> 2 blocks at the
+// decode width).
+DGPP_TEST(mma_gemv_fp8_split_chain_is_the_same_at_80_rows) {
+  const Problem p = make(80, 128, 2048, 5, 5, 0xBB67AE8584CAA73Bull);
+  Dev d(p);
+  const size_t ws_bytes = size_t(64) << 20;
+  void* ws = nullptr;
+  DGPP_CUDA_OK(cudaMalloc(&ws, ws_bytes));
+  dgpp::launch_mma_gemv_fp8_bf16(d.act, p.k, d.w8, d.scales, d.outb, p.m, p.n, p.k, 0, p.rs, p.cs, nullptr, ws, ws_bytes);
+  DGPP_CUDA_OK(cudaDeviceSynchronize());
+  const std::vector<uint16_t> full = fetch_b(d.outb, size_t(p.m) * p.n);
+  for (int m2 : {5, 40, 64}) {
+    for (int r0 = 0; r0 + m2 <= p.m; r0 += m2) {
+      dgpp::launch_mma_gemv_fp8_bf16(d.act + size_t(r0) * p.k, p.k, d.w8, d.scales, d.outb, m2, p.n, p.k, 0, p.rs, p.cs, nullptr, ws, ws_bytes);
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      const std::vector<uint16_t> part = fetch_b(d.outb, size_t(m2) * p.n);
+      for (int i = 0; i < m2; ++i)
+        require(std::memcmp(part.data() + size_t(i) * p.n, full.data() + size_t(r0 + i) * p.n, size_t(p.n) * 2) == 0,
+                "split chain: row " + std::to_string(r0 + i) + " differs at m=" + std::to_string(m2) + " from m=80");
+    }
+  }
+  cudaFree(ws);
+  std::printf("[ OK ] mma_gemv fp8 with a split workspace: the 80-row launch's rows are bitwise their 5/40/64-row launches\n");
+}
+
 DGPP_TEST(mma_gemv_bf16_matches_oracle_and_is_m_invariant) {
   const Problem p = make(30, 1024, 512, 7, 7, 0xD1B54A32D192ED03ull);
   Dev d(p);
@@ -249,14 +307,14 @@ DGPP_TEST(dense_mma_bf16w_matches_oracle_and_is_row_invariant) {
 
 // The swiglu form: bitwise the clamp launch followed by the plain fp8 GEMV.
 DGPP_TEST(mma_gemv_fp8_swiglu_form_is_bitwise_the_clamp_then_the_gemv) {
-  const Problem p = make(6, 1024, 512, 7, 7, 0x7F4A7C159E3779B9ull);
+  const Problem p = make(100, 1024, 512, 7, 7, 0x7F4A7C159E3779B9ull);  // rows for the 8-tile form too
   Dev d(p);
   // gate = the problem's activations, up = a second set (the weights' first rows reused as bf16 values).
   uint16_t* up; uint16_t* act;
   DGPP_CUDA_OK(cudaMalloc(&up, size_t(p.m) * p.k * 2)); DGPP_CUDA_OK(cudaMalloc(&act, size_t(p.m) * p.k * 2));
   DGPP_CUDA_OK(cudaMemcpy(up, p.w16.data(), size_t(p.m) * p.k * 2, cudaMemcpyHostToDevice));
   for (const float limit : {10.0f, 0.25f}) {
-    for (int m : {1, 4, 6}) {
+    for (int m : {1, 4, 6, 80, 100}) {
       dgpp::launch_moe_swiglu_clamp(d.act, up, act, int64_t(m) * p.k, limit, nullptr);
       dgpp::launch_mma_gemv_fp8_f32(act, p.k, d.w8, d.scales, d.outf, m, p.n, p.k, 0, p.rs, p.cs, nullptr);
       DGPP_CUDA_OK(cudaDeviceSynchronize());

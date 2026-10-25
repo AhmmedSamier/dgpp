@@ -351,6 +351,18 @@ one stream's time, §7). Per row the core chain is the one-row form's, so
 the act rows and the down rows (stored at their logical slots for the
 accumulation) are bitwise the per-slot form's at any duplication.
 
+The run groups (2026-10-23 evening): the order kernel also writes the
+runs longer than 16 rows as a launch list after the run lengths — each
+run cut into groups of up to 64 rows, an entry `position | rows << 16`,
+−1 past the last (`glm_moe_launch.hpp`: `kMoeRunTileRows`,
+`kMoeRunGroupRows`, `moe_run_groups_max`) — and the 64-row launch's grid
+is that list's bound (`slots / 17 + 1` entries), not every position: at
+forty rows the launch had put 1,400 blocks of a 64 KB-smem kernel on the
+GPU to return at once, ~240 us a layer (the C8 trace, §7), and a run of
+80 or 96 rows (sixteen slots' shared expert) is now two groups. The
+16-row tile's launch is unchanged. The decode slot path at 80 and 96 rows
+stays bitwise the host path (the MoE test's cases).
+
 ### 3.4 Prefill
 
 The grouped expert GEMM over the route's segments
@@ -369,6 +381,124 @@ The L2 prefetch windows span the tile bytes; the head reads its EXL3
 matrix with the fp32-logit epilogue (no bf12 companion: the head is 6-bit
 already); `main_proj`, the Engram `wkv`, the compressors and the indexer
 projections take the dense launcher.
+
+### 3.6 The decode batch past sixteen rows (2026-10-23 evening)
+
+The template ships at sixteen slots on the family's 96-row decode batch
+(`Dsv41Model::decode_rows_cap`, the engine's `kDecodeRowsMax` and the
+pick, GEMM, CSA2 select and upload bounds that mirror it; sixteen
+five-row DSpark blocks are 80 rows, the six-row block's 96). The
+step's cost past a few rows is not expert bytes: at forty rows with one
+stream's experts (the counting prompt's eight identical streams, the C8
+trace of §7) the step was 91 ms against 38 at C1 — ~1.2 ms a row in
+kernels that read no expert — and the forms below take it down. Every
+form is bitwise its predecessor per row or a fixed function of the
+request alone, so a row's chain does not depend on the rows beside it
+(the engine gates: the group prefill's first step bitwise the prefills
+alone, the 40-step decode's budget, the sixteen-slot loopback world).
+
+* **The attention split groups** (`kernels/dsa.cu` `attn_flash_kernel<…,
+  kGroup>`, `kAttnSplitGroup` 8; `kernels/dsa.hpp`): the decode window's
+  eight splits and the main source's thirty-two publish a partial per
+  split — 16 heads × 512 fp32 each, fifty megabytes a layer at forty
+  rows, written by the kernel and read back by the finish at the DRAM
+  rate (160 us each way). The eight split blocks of a group now take a
+  ticket, and the last to arrive folds the eight partials from L2 with
+  the finish's own formula (`mhat = max m_s`, `w_s = exp(m_s − mhat)`,
+  `l = Σ w_s l_s`, `c = Σ w_s c_s`, in split order, the eight vectors of
+  a column loaded together) into the group's partial
+  (`m_grp_* / l_grp_* / c_grp_*` in the CSA2 layer's scratch, one per
+  group) and `discard.global.L2`s the eight dead rows after a block
+  barrier, so they never write back. The finish reads four main and one
+  window partial per row instead of forty. The grouping is per request,
+  so a row's merge is the same whatever the batch — a one-time change of
+  the decode attention's rounding class (the two-level merge: relative
+  l2 5e-8 against the flat combine; `dsa_test`'s split-group case pins
+  repeat and first-rows-alone bitwise). A thread-block-cluster form
+  (distributed shared memory; the GB10 runs clusters of eight) was
+  measured first and kept out: clusters beyond the twelve co-resident
+  ones schedule in coarse waves, +35 us a layer at ten to twenty rows.
+  Standalone (cold partials, 300 keys, 32 splits), flat against grouped
+  flash + combine: 5 rows 65 / 73 us, 20 rows 171 / 167, 40 rows 454 /
+  315, 80 rows 917 / 744.
+* **The router's tiled dots from sixteen rows** (`glm_moe.cu`): the
+  decode form streamed the gate matrix once per (token, expert) warp, 76
+  us a layer at forty rows; the prefill's 16 × 16 tile — bitwise the
+  warp form, its own test — now serves decode batches of sixteen rows and
+  more with the select as its second launch (44 + 4.5 us).
+* **The mHC dots' token tile from sixteen decode rows** (`glm_mhc.cu`
+  `kMhcDecodeTileMinTokens`): the per-coefficient fused form re-reads the
+  coefficient matrix per token (80 us a site at forty rows); the four-
+  token tile — bitwise the fused form, its deferred comb kept
+  (`mhc_finish_block`'s flag), the tensor-core prefill form excluded —
+  takes decode batches of sixteen rows and more. Level at forty rows (78
+  us: ten blocks of four tokens are latency-bound where the fused form
+  was L2-feed-bound); the many-row mHC form is open (§7).
+* **One split chain for the tensor-core GEMV to 128 rows**
+  (`mma_gemv.hpp` `kMmaGemvSplitRows`, `mma_gemv.cu`): the 65–128-row
+  form had launched unsplit while rows up to 64 split by shape; past 64
+  rows a row's reduction chain changed with its batch — sixteen slots'
+  transcripts diverged at near-ties where twelve matched, caught by the
+  sixteen-slot engine gate and bisected with the dispatch trace. The
+  eight-tile form now splits like the narrower ones; the split count was
+  already a function of the shape alone.
+* **The graph-variant budget** (`bus_kernel.hpp` `kBusMaxGraphVariants`
+  256): sixteen slots with eight batch families kept two of the three
+  scheduled verify depths at 128 and paid a fifth row on code and prose
+  at C1 (+2 ms a step); 150 variants keep three, 250 all five.
+* The batch-map upload's word bound follows `kPickMaxRows`.
+* **The verify schedule's cost curve, measured on the pack**
+  (`engine.mtp_schedule_row_ms` 2.95, `engine.mtp_schedule_base_ms` 19.9;
+  the template had carried the release pack's 5.2 / 31.1). With four depth
+  options the schedule took depth 2 on steps where depth 3 accepted more
+  — the C1 code class's tokens a step fell 3.15 → 2.90 at a level step in
+  the first sixteen-slot campaign — because the curve overstated a row.
+  The mode boots give the curve directly: C1 steps at 1 / 2 / 3 / 4 / 6
+  rows are 18.5 / 25.8 / 28.8 / 31.9 / 37.6 ms on the code prompt (prose
+  18.5 / 25.4 / 28.4 / 31.3 / 37.0), ~2.95 ms a row over a 19.9 ms base;
+  the threshold the schedule applies falls from a 0.234 to a 0.133 prefix
+  survival at the same value of time. The curve alone did not return the
+  code class's tokens a step (2.93 at the lower threshold too): with every
+  depth an option the policy's depth-2 decisions stand, and the confidence
+  under-reads the third row on code; the morning's three-option set had
+  rounded them up to depth 3. The new key `engine.mtp_schedule_options`
+  (`docs/configuration.md`) caps the options at the same even spread the
+  budget used to impose, and the template pins three — (1, 3, 4) through
+  the evening's campaign of record, (1, 3, 5) since.
+- **The fifth draft** (2026-10-23, late evening). The counting, code,
+  table and JSON classes saturate the four-draft block: the head's prefix
+  survivals stay high through all five positions (counting accepts
+  4.96 tokens a step at depth 4, the most five rows can give) and the
+  schedule had no deeper option. With `engine.mtp_depth` 5 and the same
+  three-option spread (1, 3, 5), C1 legs on the sixteen-slot binary
+  (`9a179b15`): counting 4.96 → 5.95 tokens a step, code 4.37 → 5.17,
+  tables 4.73 → 5.20, JSON 3.45 → 3.60, math 3.83 → 4.23, prose and
+  narrative unchanged (2.25, 1.88: the schedule stays at 1–3 rows there),
+  at a 6-row step of 38.0–38.6 ms (2.95 ms a row over the 4-draft step).
+  Per-stream decode: code +8 %, counting +11 %, tables +2 %, math +2 %,
+  prose −1 %, narrative −1 %; the eight-class C1 mean +1.5 % and the
+  two-stream mean +2.7 %. On the campaign classes: JSON 120.8 → 133.1
+  tok/s, code 91.1 → 92.0, prose 68.5 → 67.2. Four options (1, 2, 4, 5)
+  and five (every depth) measure the same within the repeat spread; the
+  template keeps three (the variant budget: 44 captures an option at
+  sixteen slots). Memory: the sixteen slots' six-row blocks are the
+  96-row batch exactly.
+- **The listed attention's split floor — measured, withdrawn** (2026-10-23,
+  late evening). The decode attention splits a row's selected keys 32
+  ways whatever their count, and a decode selection is at most
+  `engine.index_topk` (512) keys, so every split holds a tile or less and
+  the kernel pays for its partials (6 MB a source through L2 at six rows,
+  merged by the group's last block and read again by the finish). A
+  32-key floor on the chunk (the live splits ceil(count / 32), the rest
+  publishing the identity and no c row) cut the kernel pair 30–50 % at
+  3–40 rows standalone and read, on the fabric, C2 +2.7 %, C4 +7 %, C8
+  JSON 276 tok/s — and on the C1 prose and chat prompts it changed the
+  greedy transcript (a rounding class moves with the merge order) to one
+  that drafts 7 % fewer tokens a pass at the same pass cost. A C1 prose
+  or chat regression is not acceptable whatever the aggregate buys, so
+  the floor is not in the tree; the partial traffic it exposed is the
+  attention item of the step program below (one kernel a layer over both
+  key sources), to be built with its transcript gates in place.
 
 ## 4. Loader, binding, config
 
@@ -544,11 +674,10 @@ model id, resolved through the HF cache like `model`). World 4 only.
   work); HumanEval 159/164, GSM8K 294/300, extraction 100/100 against
   157 / 295 / 100. The rows are in docs/benchmarks.md and the card's
   Measured section. Production (the Qwen FP8 world) restored at 06:43 UTC.
-- The decode and prefill program (2026-10-23 from 07:00 UTC; the user's
-  mandate: the published third-party rates on this pack as the floor for
-  decode and prefill throughput, every lever judged inside the step's
-  schedule; the comparison itself lives in the session, not here). Ours
-  from the morning's campaign: C1 67.0 / 91.5 / 105.0 / 93.1 / 65.0 by
+- The decode and prefill program (2026-10-23 from 07:00 UTC; the
+  mandate: decode and prefill throughput on this pack, every lever judged
+  inside the step's schedule rather than one kernel at a time). The
+  morning's campaign: C1 67.0 / 91.5 / 105.0 / 93.1 / 65.0 by
   class (decode-only), C2 90.9-141.8, C4 115.5-156.4, C8 (six live)
   91.1-137.9; prefill 1,650 / 2,280 / 2,350 / 2,340 tok/s at 2K / 8K /
   32K / 128K — the aggregate past four streams and the short-prompt
@@ -745,13 +874,13 @@ model id, resolved through the HF cache like `model`). World 4 only.
   (232 us each, 11 % of a 48-row step), the Engram decode prestage
   (0.2–0.5 ms), the short-prompt prefill floor and the dense prefill GEMM
   form, the 64-row cap at sixteen streams.
-- The expert-run slot form (2026-10-23 afternoon, §3.3). The third-party
-  harness this program measures against sends, in a cell at concurrency C,
-  C copies of ONE prompt behind a per-stream tag (greedy, thinking off,
-  200-token answers; its aggregate is tokens over the batch wall with the
-  first token's wait in — the wall table's definition). A scratch replica
-  of that cell method on our endpoint (the pack's nine prompts, C1..C16,
-  two repeats) read, on binary dde85abf, a step of 166 ms at C8 and 240 at
+- The expert-run slot form (2026-10-23 afternoon, §3.3). A cell method
+  worth measuring beside the campaign's independent streams sends, at
+  concurrency C, C copies of ONE prompt behind a per-stream tag (greedy,
+  thinking off, 200-token answers; its aggregate is tokens over the batch
+  wall with the first token's wait in — the wall table's definition),
+  so its streams route identically. A scratch replica of that cell method
+  on our endpoint (nine prompts, C1..C16, two repeats) read, on binary dde85abf, a step of 166 ms at C8 and 240 at
   C12 on the counting prompt — the one whose eight streams stay identical
   token for token — against 38 at C1: the same distinct experts, 4.3x the
   time. The C8 trace of that cell (rank 0, nsys): the slot kernels 90 ms a
@@ -792,3 +921,106 @@ model id, resolved through the HF cache like `model`). World 4 only.
   136.8–174.8; the plain pass 18.9 ms; prefill 1.166 / 3.398 / 13.326 s
   (level); the context matrix 33.18 → 50.58 ms a pass to 512K (35.34 →
   52.48); quality 159 / 293 / 100 (unchanged).
+- The multi-row program (2026-10-23 evening, §3.3's run groups and §3.6).
+  The forty-row trace of the counting prompt's identical streams named the
+  step's cost past a few rows: the attention's split partials 20 ms a
+  step (the window and main flash kernels writing fifty megabytes a
+  layer, the finish reading them: 8.2 + 3.8 + 8.1), the collective 11.8
+  (123 us each: 100 us of transport for 423 KB a peer at ~12.7 GB/s a
+  direction, the ranks' skew under 1 us on identical work), the 64-row
+  dense tile 8.5 (32.8 us a launch against 18 at one row), the mHC dots
+  6.9 (80 us a site), the 64-row slot launches 9.6 doing nothing (1,400
+  returning blocks), the router 3.3 (76 us). Built: the run-group launch
+  list, the 96-row decode batch, the attention split groups (first as
+  thread-block clusters — the kernels ran 50 / 85 us against 20 / 19 at
+  five rows, C1 +2 ms a step, and the standalone bench showed the merge's
+  barriers losing 35 us a layer at ten to twenty rows — then as the
+  last-block merge in L2 with the dead rows discarded), the tiled router
+  and mHC dots from sixteen rows. Two defects the gates caught and the
+  bisections named: the discard racing the merge's own reads (a thread
+  ahead discarded lines a thread behind was loading — the group prefill's
+  first-step gate and the 40-step budget; the unit test and the memory
+  checker had passed on timing) and, at sixteen slots on the release
+  fixture only, the tensor-core GEMV's 65–128-row form launched unsplit
+  (the dispatch trace: fp8 CSA2 sites at m = 80 on the eight-tile form;
+  fourteen slots matched, fifteen were flaky, sixteen diverged at slot 0's
+  fourth token). The incast probe (`ib_write_bw`, 212 KB writes into one
+  node): one flow per PCIe function 105 Gb/s, three into one function 112
+  aggregate, the bus's six-flow pattern 184 Gb/s — forty rows' 1.27 MB
+  lands in ~55 us of wire and the collective's other ~45 us is fixed
+  cost, so a reduce-scatter form (a second fixed round for half the bytes)
+  is closed on the numbers at these payloads. Measured on binary
+  `0196c9a4ca11f004` (one boot per template): the campaign-method legs C1
+  code 32.09 / JSON 35.12 / prose 28.59 ms a pass (the morning's 32.18 /
+  35.35 / 28.51 — level at equal rows), C8 code 122.2 → 111.5 ms a step
+  (191.1 → 206.1 tok/s), JSON 117.9 → 112.3 (227.9 → 240.7), prose 73.6 →
+  72.2; the forty-row counting step 91 → 82.5 ms and the sixty-row 118 →
+  102 (the second trace's reconciliation: the finish 8.1 → 0.5 ms a step,
+  the router 3.3 → 2.1, the down's empty launch 4.1 → 1.8; the mHC tile
+  level — ten blocks of four tokens latency-bound where the fused form
+  was L2-feed-bound — and the gate-up's long-run launch unchanged because
+  its cost is the shared expert's forty-row run streamed by its five
+  output blocks, not the empty ones: the next two multi-row levers, with
+  the 64-row dense tile's rate); on the sixteen-slot template sixteen
+  identical streams decode at 128 ms a step (the first token in 0.7 s)
+  where the twelve-slot template queued four. The sixteen-slot
+  template's C1 ran 2 ms a step slower until the variant budget kept its
+  third depth option (§3.6). The C1 trace on the finished binary: 35.2 ms
+  a step on the counting prompt (35.4 before the program), the two
+  attention kernels +10 us a layer against the flat form (the group's
+  last block reading 512 KB from L2 — 16 loads in flight a thread since)
+  against the finish's −6 and the write-back the discard spares.
+- **The fifth draft (2026-10-23, late evening; §3.6).** The five-draft
+  block with the schedule's three options (1, 3, 5), measured on the
+  sixteen-slot binary: C1 tokens a step on
+  the per-class legs counting 4.96 → 5.95, code 4.37 → 5.17, tables 4.73
+  → 5.20, JSON 3.45 → 3.60, math 3.83 → 4.23 (prose and narrative stay at
+  2.25 and 1.88 — the schedule holds them at one to three rows), the
+  eight-class C1 per-stream mean +1.5 %, two streams +2.7 %; campaign C1
+  JSON 120.8 → 133.1 tok/s, code 91.1 → 92.0, prose 68.5 → 67.2 (the
+  prose and chat passes unchanged at 29.3–29.5 ms, four or five drafts
+  alike); the eight-class means C1 agg 85.7 → 86.6 (per-stream 98.2 →
+  99.7), C2 130.6 → 134.2. The attention split floor measured the same
+  night is recorded in §3.6 and withdrawn (a C1 prose transcript that
+  drafts 7 % less). The campaign of record on the shipped template
+  (binary `9a179b15a6de02fa`, 2026-10-24 00:06–00:54 UTC, all gates
+  green; the record `dsv41-1017-exl3-3.5bpw-16slots-d5_2026-10-23`):
+  C1 prose 70.7 / code 92.0 / JSON 134.2 / math 111.4 / chat 70.1 tok/s
+  (the depth-4 sixteen-slot campaign on the same binary: 71.0 / 91.6 /
+  121.5 / 112.1 / 71.5), C2 95.7–182.4, C4 127.8–206.6, C8 165.0–247.7,
+  cold prefill 1.188 / 3.446 / 13.331 s, context 34.70 → 52.38 ms a pass
+  to 512K, HumanEval 160/164, GSM8K 295/300, extraction 100/100. The rows
+  are in docs/benchmarks.md and the card's Measured section.
+  **Where the one-stream step's time sits now** (the C1 traces of
+  2026-10-23 at one and five to six rows, the kernels on the main
+  stream, which is kernel-time-bound: its busy time equals the step):
+  at one row (18.9 ms) the slot experts 5.6 ms, the dense GEMVs 4.9
+  (251 launches a step at 17 µs), the collectives 3.8 (84 at 45 µs), the
+  mixes 1.6 (three launches a mix: dots 8.5 µs, comb 8.9, update 2.2),
+  attention 1.4, the router 0.4, rotations 1.1; at five to six rows
+  (38 ms) the experts 15–17, dense 6, collectives 4.4–5.5 (95 at 46–58
+  µs), mixes 2.2, attention 2.5 (before the floor), the draft stages
+  and picks ~1.5. The fixed part — what the step costs beyond its
+  expert and dense bytes — is the collectives' per-call latency and the
+  mixes, and both have physical floors well below where they sit: a
+  one-hop RDMA write lands in 2.9 µs plus 0.11 µs a KiB (the fabric's
+  transport floors, measured 2026-10-19; the bus's claim, post, doorbell
+  and acknowledgement round trips are the 45 µs), and a mix's dots are
+  2 MB of weights in L2. The levers, in the order of their size at
+  one row, each with its mechanism: (1) the collective's fixed latency —
+  a pre-posted receive ring with sequence numbers in place of the
+  per-collective claim and acknowledgement, the fold done by the
+  consumer kernel as it reads, the consumer launched as a programmatic
+  dependent so its wait overlaps the producer's tail: ~2 ms a step at
+  every row count; (2) the mix's stream dots issued on the side stream
+  under the collective and only the gathered partial's contribution
+  added after it (the dots are linear in the streams; a rounding-class
+  change for every token, so a gate with a control): ~1 ms; (3) one
+  attention kernel a layer over both key sources (the window ring and
+  the selected keys as two segments of one list, the finish folded into
+  the last block's merge): ~0.7 ms at one row, ~1 ms at six; (4) the
+  per-layer dense projections as one grouped launch (wq_a, wkv and the
+  compressor; wq_b and the indexer's) instead of 6.3 launches a layer:
+  ~1 ms; (5) the short prompt's prefill — 150–190 ms for 47–67 tokens,
+  GPU-busy throughout, its bytes the touched experts' — and the first
+  token's emission at admission rather than after the first step.

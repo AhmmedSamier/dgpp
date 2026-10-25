@@ -182,6 +182,7 @@ struct WorldSettings {
   double mtp_schedule_base_ms = 28.0;
   double mtp_schedule_lambda = 0.0;
   int mtp_schedule_min_depth = 1;
+  int mtp_schedule_options = 0;
   bool mtp_schedule_adapt = true;
   double mtp_schedule_sampled_scale = 0.93;  // engine.mtp_schedule_sampled_scale
   std::string mtp_draft = "auto";  // engine.mtp_draft: every rank resolves the same rule

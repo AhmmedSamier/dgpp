@@ -276,7 +276,8 @@ mapping its n-gram table from NVMe and encoding the dense stack to FP8 at load.
 The Qwen sixteen-slot decode graphs and prefill continuation are implemented as
 opt-in controls; the shipped Qwen templates retain four slots and monolithic
 admission. DeepSeek ships at six slots with DSpark depth 4 (the EXL3
-re-pack at twelve on the 64-row decode batch since 2026-10-23), confidence
+re-pack at sixteen on the family's 96-row decode batch with the five-draft
+block since 2026-10-23), confidence
 scheduling, bounded grouped prefill and the stream-ordered eager collective.
 Full GLM-5.3 ships at eight slots and uses packed tensor-core prefill from 128
 rows. MiMo-V2.6-Flash ships at four slots with MTP depth 1 on two or four
