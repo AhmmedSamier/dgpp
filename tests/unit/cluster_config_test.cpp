@@ -341,6 +341,12 @@ DGPP_TEST(cluster_config_parses_fills_defaults_and_derives_the_world) {
   require(table.engine.ngram_table_model == "Qwen/Qwen3.8-Flash-Next-FP8", "ngram_table_model parses");
   require(!refusal(R"({"model":"m","nodes":["h"],"engine":{"ngram_table_model":"nope"}})").empty(),
           "ngram_table_model must be ORG/NAME");
+  require(fp8.engine.engram_source.empty(), "engram_source empty by default");
+  const dgpp::serve::ClusterConfig engram = dgpp::serve::parse_cluster_config(
+      R"({"model":"m","nodes":["h"],"engine":{"engram_source":"deepseek-ai/DeepSeek-V4.1-Flash-1017"}})", "t");
+  require(engram.engine.engram_source == "deepseek-ai/DeepSeek-V4.1-Flash-1017", "engram_source parses");
+  require(!refusal(R"({"model":"m","nodes":["h"],"engine":{"engram_source":"nope"}})").empty(),
+          "engram_source must be ORG/NAME");
   // The bf16 weights' resident form: named by the config, off by default.
   const dgpp::serve::ClusterConfig bf12 = dgpp::serve::parse_cluster_config(
       R"({"model":"m","nodes":["h"],"engine":{"bf16_weights":"bf12"}})", "t");

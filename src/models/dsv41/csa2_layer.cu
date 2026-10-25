@@ -6,9 +6,11 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "common/cuda_check.hpp"
 #include "kernels/dsa.hpp"
+#include "kernels/exl3_gemv.hpp"
 #include "kernels/mma_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 
@@ -44,8 +46,13 @@ Csa2Layer::Layout Csa2Layer::layout(const Csa2Config& cfg, int max_tokens, int64
                                     int max_decode_rows, int decode_n_split, size_t dot_budget) {
   Csa2Config::validate(cfg);
   if (max_tokens <= 0 || max_cache_tokens <= 0) throw std::invalid_argument("csa2 layer: max_tokens / max_cache_tokens");
-  if (max_decode_rows <= 0 || max_decode_rows > 32 || max_decode_rows > max_tokens)
-    throw std::invalid_argument("csa2 layer: max_decode_rows must be in [1, min(32, max_tokens)]");
+  // The decode batch's bound mirrors the engine's (dgpp::kDecodeRowsMax, 96
+  // — sixteen DSpark slots at the five-row block since 2026-10-23, twelve
+  // at 64 earlier that day; the header stays out of this CUDA unit); the
+  // select workspace scales with it.
+  constexpr int kCsa2MaxDecodeRows = 96;
+  if (max_decode_rows <= 0 || max_decode_rows > kCsa2MaxDecodeRows || max_decode_rows > max_tokens)
+    throw std::invalid_argument("csa2 layer: max_decode_rows must be in [1, min(96, max_tokens)]");
   if (decode_n_split <= 0 || dot_budget == 0) throw std::invalid_argument("csa2 layer: decode_n_split / dot_budget");
   const int lh = cfg.local_heads(), lg = cfg.local_groups();
   const size_t T = static_cast<size_t>(max_tokens);
@@ -107,12 +114,39 @@ Csa2Layer::Layout Csa2Layer::layout(const Csa2Config& cfg, int max_tokens, int64
   L.m_win = alloc(size_t(L.ws_slots) * lh * 4);
   L.l_win = alloc(size_t(L.ws_slots) * lh * 4);
   L.c_win = alloc(size_t(L.ws_slots) * lh * kCsa2Latent * 4);
+  // The split groups' partials (one per kAttnSplitGroup splits) and the
+  // groups' tickets per row pair (the listed kernel's 32 M-rows), both
+  // sources (2026-10-23).
+  const size_t grp_slots = size_t(L.ws_slots) / kAttnSplitGroup + 1;
+  L.m_grp_main = alloc(grp_slots * lh * 4);
+  L.l_grp_main = alloc(grp_slots * lh * 4);
+  L.c_grp_main = alloc(grp_slots * lh * kCsa2Latent * 4);
+  L.m_grp_win = alloc(grp_slots * lh * 4);
+  L.l_grp_win = alloc(grp_slots * lh * 4);
+  L.c_grp_win = alloc(grp_slots * lh * kCsa2Latent * 4);
+  const size_t row_pairs = (size_t(std::max(max_decode_rows, 8)) * lh + 31) / 32;
+  L.tickets_per_source = row_pairs * (size_t(std::max(decode_n_split, 8)) / kAttnSplitGroup + 1);
+  L.tickets = alloc(2 * L.tickets_per_source * 4);
   L.gather_k = alloc(size_t(L.max_entries) * kCsa2IndexDim);
   L.gather_scale = alloc(size_t(L.max_entries) * 4);
   L.logits = alloc(size_t(tile_cap) * size_t(L.max_entries) * 4);
   L.select_ws = alloc(dsa_select_workspace_bytes(max_decode_rows, L.max_entries));
   L.counter = alloc(16);
   L.violations = alloc(16);
+  if (cfg.exl3) {
+    // The EXL3 launchers' workspace: the widest of the layer's sites (the
+    // rotated rows at 64 x k fp16 and the split partials the narrow shapes
+    // take; kernels/exl3_gemv.hpp exl3_gemm_ws_bytes_for).
+    const int hpg = cfg.heads_per_group();
+    const std::pair<int, int> sites[] = {
+        {cfg.q_lora, cfg.hidden},          {kCsa2Latent, cfg.hidden},           {lh * kCsa2Latent, cfg.q_lora},
+        {cfg.index_heads * kCsa2IndexDim, cfg.q_lora}, {cfg.o_lora, hpg * kCsa2Latent}, {cfg.hidden, lg * cfg.o_lora},
+        {kCsa2IndexDim, kCsa2Latent}};
+    size_t bytes = 0;
+    for (const auto& nk : sites) bytes = std::max(bytes, exl3_gemm_ws_bytes_for(nk.first, nk.second));
+    L.exl3_ws_bytes = bytes;
+    L.exl3_ws = alloc(bytes);
+  }
   L.total = align256(off);
   return L;
 }
@@ -176,12 +210,24 @@ Csa2Layer::Csa2Layer(IGemm& gemm, const Csa2Config& cfg, int max_tokens, int64_t
   m_win_ = reinterpret_cast<float*>(at(L.m_win));
   l_win_ = reinterpret_cast<float*>(at(L.l_win));
   c_win_ = reinterpret_cast<float*>(at(L.c_win));
+  m_grp_main_ = reinterpret_cast<float*>(at(L.m_grp_main));
+  l_grp_main_ = reinterpret_cast<float*>(at(L.l_grp_main));
+  c_grp_main_ = reinterpret_cast<float*>(at(L.c_grp_main));
+  m_grp_win_ = reinterpret_cast<float*>(at(L.m_grp_win));
+  l_grp_win_ = reinterpret_cast<float*>(at(L.l_grp_win));
+  c_grp_win_ = reinterpret_cast<float*>(at(L.c_grp_win));
+  tickets_main_ = reinterpret_cast<int32_t*>(at(L.tickets));
+  tickets_win_ = tickets_main_ + L.tickets_per_source;
   gather_k_ = at(L.gather_k);
   gather_scale_ = reinterpret_cast<float*>(at(L.gather_scale));
   logits_ = reinterpret_cast<float*>(at(L.logits));
   select_ws_ = at(L.select_ws);
   counter_ws_ = reinterpret_cast<int32_t*>(at(L.counter));
   violations_ = reinterpret_cast<unsigned*>(at(L.violations));
+  if (cfg.exl3) {
+    exl3_ws_ = at(L.exl3_ws);
+    exl3_ws_bytes_ = L.exl3_ws_bytes;
+  }
   // The constants: the iota, the zero request ids, the one-block table,
   // the select workspace and counters (zeroed once).
   std::vector<int64_t> iota(static_cast<size_t>(max_tokens));
@@ -191,33 +237,63 @@ Csa2Layer::Csa2Layer(IGemm& gemm, const Csa2Config& cfg, int max_tokens, int64_t
   DGPP_CUDA_OK(cudaMemset(one_block_, 0, 16));
   DGPP_CUDA_OK(cudaMemset(select_ws_, 0, dsa_select_workspace_bytes(max_decode_rows, max_entries_)));
   DGPP_CUDA_OK(cudaMemset(counter_ws_, 0, 16));
+  DGPP_CUDA_OK(cudaMemset(tickets_main_, 0, 2 * L.tickets_per_source * 4));  // the group tickets start at zero
   DGPP_CUDA_OK(cudaMemset(violations_, 0, 16));
+  if (cfg.exl3) DGPP_CUDA_OK(cudaMemset(exl3_ws_, 0, exl3_ws_bytes_));  // the GEMV's arrival counters start at zero
   DGPP_CUDA_OK(cudaMemset(wscratch_, 0, (size_t(cfg.window) - 1 + size_t(max_tokens)) * latent_row_bytes(Csa2StatePool::kRingFormat, kCsa2Latent)));
 }
 
 void Csa2Layer::rebind(const Csa2LayerWeights& w, int layer) {
-  if (w.wq_a.payload == nullptr || w.wkv.payload == nullptr || w.wq_b.payload == nullptr || w.wo_a.payload == nullptr ||
-      w.wo_b.payload == nullptr || w.q_norm == nullptr || w.kv_norm == nullptr || w.attn_sink == nullptr ||
-      w.inv_freq == nullptr)
-    throw std::invalid_argument("csa2 layer: a null projection, norm, sink or rotary table");
+  const bool exl3 = w.exl3();
+  if (exl3 != cfg_.exl3)
+    throw std::invalid_argument("csa2 layer: the weights' format (EXL3 / fp8) disagrees with the layer's config");
+  if (w.q_norm == nullptr || w.kv_norm == nullptr || w.attn_sink == nullptr || w.inv_freq == nullptr)
+    throw std::invalid_argument("csa2 layer: a null norm, sink or rotary table");
+  if (exl3) {
+    if (w.wkv_x.tiles == nullptr || w.wq_b_x.tiles == nullptr || w.wo_b_x.tiles == nullptr ||
+        w.wo_a_x.size() != size_t(cfg_.local_groups()))
+      throw std::invalid_argument("csa2 layer: a null EXL3 projection (or the wo_a groups are not the rank's)");
+    for (const Exl3Matrix& g : w.wo_a_x)
+      if (g.tiles == nullptr || g.rows != cfg_.o_lora || g.cols != int64_t(cfg_.heads_per_group()) * kCsa2Latent)
+        throw std::invalid_argument("csa2 layer: an EXL3 wo_a group is null or off the config's geometry");
+    if (w.wq_a_x.rows != cfg_.q_lora || w.wq_a_x.cols != cfg_.hidden || w.wkv_x.rows != kCsa2Latent ||
+        w.wkv_x.cols != cfg_.hidden || w.wq_b_x.rows != int64_t(cfg_.local_heads()) * kCsa2Latent ||
+        w.wq_b_x.cols != cfg_.q_lora || w.wo_b_x.rows != cfg_.hidden ||
+        w.wo_b_x.cols != int64_t(cfg_.local_groups()) * cfg_.o_lora)
+      throw std::invalid_argument("csa2 layer: EXL3 projection geometry disagrees with the config");
+    if (w.kv_source && (w.comp_wkv_x.tiles == nullptr || w.comp_wkv_x.rows != kCsa2Latent ||
+                        w.comp_wkv_x.cols != cfg_.hidden || w.idx_wk_x.tiles == nullptr ||
+                        w.idx_wk_x.rows != kCsa2IndexDim || w.idx_wk_x.cols != kCsa2Latent ||
+                        (w.ratio == 2 && (w.comp_wgate_x.tiles == nullptr || w.comp_wgate_x.rows != kCsa2Latent ||
+                                          w.comp_wgate_x.cols != cfg_.hidden))))
+      throw std::invalid_argument("csa2 layer: a kv source needs its EXL3 compressor and index-key matrices");
+    if (w.index_source && (w.idx_wq_b_x.tiles == nullptr || w.idx_wq_b_x.rows != int64_t(cfg_.index_heads) * kCsa2IndexDim ||
+                           w.idx_wq_b_x.cols != cfg_.q_lora))
+      throw std::invalid_argument("csa2 layer: an index source needs its EXL3 indexer query matrix");
+  } else if (w.wq_a.payload == nullptr || w.wkv.payload == nullptr || w.wq_b.payload == nullptr ||
+             w.wo_a.payload == nullptr || w.wo_b.payload == nullptr) {
+    throw std::invalid_argument("csa2 layer: a null projection");
+  }
   if (w.ratio != 0 && w.ratio != 1 && w.ratio != 2) throw std::invalid_argument("csa2 layer: ratio must be 0, 1 or 2");
   if (w.ratio > 0 && w.cache_ord < 0) throw std::invalid_argument("csa2 layer: a compressing layer needs its cache");
   if (w.ratio == 0 && (w.kv_source || w.index_source || w.candidate_source || w.uses_candidates))
     throw std::invalid_argument("csa2 layer: a window-only layer owns no compressor, indexer or candidates");
-  if (w.kv_source && (w.comp_wkv == nullptr || w.comp_norm == nullptr || w.idx_wk == nullptr || w.idx_k_norm == nullptr ||
-                      (w.ratio == 2 && (w.comp_wgate == nullptr || w.tail_ord < 0))))
+  if (w.kv_source && ((!exl3 && (w.comp_wkv == nullptr || w.idx_wk == nullptr)) || w.comp_norm == nullptr ||
+                      w.idx_k_norm == nullptr || (w.ratio == 2 && ((!exl3 && w.comp_wgate == nullptr) || w.tail_ord < 0))))
     throw std::invalid_argument("csa2 layer: a kv source needs its compressor and index-key weights");
-  if (w.index_source && (w.idx_wq_b.payload == nullptr || w.idx_wp == nullptr))
+  if (w.index_source && ((!exl3 && w.idx_wq_b.payload == nullptr) || w.idx_wp == nullptr))
     throw std::invalid_argument("csa2 layer: an index source needs its indexer weights");
   if ((w.candidate_source || w.uses_candidates) && !w.index_source)
     throw std::invalid_argument("csa2 layer: the candidate stages belong to index sources");
   if (w.candidate_source && w.uses_candidates) throw std::invalid_argument("csa2 layer: a candidate source uses no pool");
-  if (w.wq_a.rows != cfg_.q_lora || w.wq_a.cols != cfg_.hidden || w.wkv.rows != kCsa2Latent || w.wkv.cols != cfg_.hidden ||
-      w.wq_b.rows != int64_t(cfg_.local_heads()) * kCsa2Latent || w.wq_b.cols != cfg_.q_lora ||
-      w.wo_a.rows != int64_t(cfg_.local_groups()) * cfg_.o_lora || w.wo_a.cols != int64_t(cfg_.heads_per_group()) * kCsa2Latent ||
-      w.wo_b.rows != cfg_.hidden || w.wo_b.cols != int64_t(cfg_.local_groups()) * cfg_.o_lora)
+  if (!exl3 && (w.wq_a.rows != cfg_.q_lora || w.wq_a.cols != cfg_.hidden || w.wkv.rows != kCsa2Latent ||
+                w.wkv.cols != cfg_.hidden || w.wq_b.rows != int64_t(cfg_.local_heads()) * kCsa2Latent ||
+                w.wq_b.cols != cfg_.q_lora || w.wo_a.rows != int64_t(cfg_.local_groups()) * cfg_.o_lora ||
+                w.wo_a.cols != int64_t(cfg_.heads_per_group()) * kCsa2Latent || w.wo_b.rows != cfg_.hidden ||
+                w.wo_b.cols != int64_t(cfg_.local_groups()) * cfg_.o_lora))
     throw std::invalid_argument("csa2 layer: projection geometry disagrees with the config");
-  if (w.index_source && (w.idx_wq_b.rows != int64_t(cfg_.index_heads) * kCsa2IndexDim || w.idx_wq_b.cols != cfg_.q_lora))
+  if (!exl3 && w.index_source &&
+      (w.idx_wq_b.rows != int64_t(cfg_.index_heads) * kCsa2IndexDim || w.idx_wq_b.cols != cfg_.q_lora))
     throw std::invalid_argument("csa2 layer: indexer geometry disagrees with the config");
   w_ = w;
   layer_ = layer;
@@ -272,8 +348,12 @@ void Csa2Layer::validate_pool(const Csa2StatePool& pool) const {
 // whatever rows ride in the launch.
 void Csa2Layer::project_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
   const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
-  launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wkv.payload, w_.wkv.scales, kv_, tokens, kCsa2Latent,
-                              cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
+  if (w_.exl3())
+    launch_exl3_gemm_bf16(h, size_t(cfg_.hidden), w_.wkv_x, kv_, tokens, kCsa2Latent, cfg_.hidden, 0, stream, exl3_ws_,
+                          exl3_ws_bytes_);
+  else
+    launch_scale_gemm_grid_bf16(h, size_t(cfg_.hidden), w_.wkv.payload, w_.wkv.scales, kv_, tokens, kCsa2Latent,
+                                cfg_.hidden, stream, 0, 5, 5, cfg_.dense_mma, gemm_ws_, gemm_ws_bytes_, prefill_tile_);
   csa2_rmsnorm_bf16(kv_, kCsa2Latent, w_.kv_norm, kv_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
   csa2_rope_apply(kv_ + (kCsa2Latent - kCsa2Rope), kCsa2Latent, kCsa2Latent, 1, kCsa2Rope, pos, w_.inv_freq, false,
                   tokens, stream);
@@ -286,10 +366,16 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
   // pair form holds (mma_gemv_pair_ok: the same split alone, whole blocks),
   // each row's chain its own launch's — one ramp and drain instead of two
   // (2026-10-20); otherwise the two launches.
-  const bool paired = cfg_.dense_mma && !prefill_tile_ &&
+  const bool paired = !w_.exl3() && cfg_.dense_mma && !prefill_tile_ &&
                       mma_gemv_pair_ok(w_.wq_a.payload, w_.wkv.payload, h, h, size_t(cfg_.hidden), tokens, cfg_.q_lora,
                                        kCsa2Latent, cfg_.hidden, gemm_ws_, gemm_ws_bytes_);
-  if (paired) {
+  if (w_.exl3()) {
+    // The EXL3 launchers: wq_a, its norm, then wkv's chain (project_kv).
+    launch_exl3_gemm_bf16(h, size_t(cfg_.hidden), w_.wq_a_x, qr_, tokens, cfg_.q_lora, cfg_.hidden, 0, stream, exl3_ws_,
+                          exl3_ws_bytes_);
+    csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
+    project_kv(hidden_in, tokens, pos, stream);
+  } else if (paired) {
     launch_mma_gemv_fp8_bf16_pair(h, w_.wq_a.payload, w_.wq_a.scales, qr_, cfg_.q_lora, size_t(cfg_.q_lora), h,
                                   w_.wkv.payload, w_.wkv.scales, kv_, kCsa2Latent, size_t(kCsa2Latent), size_t(cfg_.hidden),
                                   tokens, cfg_.hidden, 5, 5, stream, gemm_ws_, gemm_ws_bytes_);
@@ -302,8 +388,12 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
     csa2_rmsnorm_bf16(qr_, cfg_.q_lora, w_.q_norm, qr_, cfg_.q_lora, tokens, cfg_.q_lora, cfg_.eps, stream);
     project_kv(hidden_in, tokens, pos, stream);
   }
-  launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b.payload, w_.wq_b.scales, q_, tokens,
-                              lh * kCsa2Latent, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
+  if (w_.exl3())
+    launch_exl3_gemm_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b_x, q_, tokens, lh * kCsa2Latent, cfg_.q_lora, 0, stream,
+                          exl3_ws_, exl3_ws_bytes_);
+  else
+    launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.wq_b.payload, w_.wq_b.scales, q_, tokens,
+                                lh * kCsa2Latent, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   if (rope_q)
     csa2_rope_apply(q_ + (kCsa2Latent - kCsa2Rope), int64_t(lh) * kCsa2Latent, kCsa2Latent, lh, kCsa2Rope, pos,
                     w_.inv_freq, false, tokens, stream);
@@ -311,8 +401,12 @@ void Csa2Layer::project_q_kv(const void* hidden_in, int tokens, const int64_t* p
 
 void Csa2Layer::indexer_query(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream) {
   const int heads = cfg_.index_heads;
-  launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.idx_wq_b.payload, w_.idx_wq_b.scales, idx_q_, tokens,
-                              heads * kCsa2IndexDim, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
+  if (w_.exl3())
+    launch_exl3_gemm_bf16(qr_, size_t(cfg_.q_lora), w_.idx_wq_b_x, idx_q_, tokens, heads * kCsa2IndexDim, cfg_.q_lora, 0,
+                          stream, exl3_ws_, exl3_ws_bytes_);
+  else
+    launch_scale_gemm_grid_bf16(qr_, size_t(cfg_.q_lora), w_.idx_wq_b.payload, w_.idx_wq_b.scales, idx_q_, tokens,
+                                heads * kCsa2IndexDim, cfg_.q_lora, stream, 0, 5, 5, cfg_.dense_mma, nullptr, 0, prefill_tile_);
   csa2_rope_apply(idx_q_ + (kCsa2IndexDim - kCsa2Rope), int64_t(heads) * kCsa2IndexDim, kCsa2IndexDim, heads,
                   kCsa2Rope, pos, w_.inv_freq, false, tokens, stream);
   csa2_index_q_quant(idx_q_, tokens, heads, q_fp8_, q_scale_, violations_, stream);
@@ -321,14 +415,46 @@ void Csa2Layer::indexer_query(const void* hidden_in, int tokens, const int64_t* 
   csa2_fold_weights(iw_, q_scale_, w_folded_, int64_t(tokens) * heads, stream);
 }
 
+// The compressor's projections: the kv and score rows (fp32, ratio 2) or
+// the latent rows (bf16, ratio 1) of `tokens` hidden rows — the bf16
+// matmul of the release weights or the EXL3 launchers.
+void Csa2Layer::compress_project(const void* hidden_in, int tokens, float* kv, float* score, cudaStream_t stream) {
+  if (w_.exl3()) {
+    const uint16_t* h = static_cast<const uint16_t*>(hidden_in);
+    launch_exl3_gemm_f32(h, size_t(cfg_.hidden), w_.comp_wkv_x, kv, tokens, kCsa2Latent, cfg_.hidden, 0, stream, exl3_ws_,
+                         exl3_ws_bytes_);
+    launch_exl3_gemm_f32(h, size_t(cfg_.hidden), w_.comp_wgate_x, score, tokens, kCsa2Latent, cfg_.hidden, 0, stream,
+                         exl3_ws_, exl3_ws_bytes_);
+    return;
+  }
+  gemm_.matmul(hidden_in, w_.comp_wkv, kv, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::F32,
+               size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
+  gemm_.matmul(hidden_in, w_.comp_wgate, score, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::F32,
+               size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
+}
+
+void Csa2Layer::compress_latent(const void* hidden_in, int tokens, cudaStream_t stream) {
+  if (w_.exl3()) {
+    launch_exl3_gemm_bf16(static_cast<const uint16_t*>(hidden_in), size_t(cfg_.hidden), w_.comp_wkv_x, latent_, tokens,
+                          kCsa2Latent, cfg_.hidden, 0, stream, exl3_ws_, exl3_ws_bytes_);
+    return;
+  }
+  gemm_.matmul(hidden_in, w_.comp_wkv, latent_, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::BF16,
+               size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
+}
+
 void Csa2Layer::publish_entries(Csa2StatePool& pool, const int32_t* req_ids, int n, cudaStream_t stream) {
   if (n <= 0) return;
   const int ord = w_.cache_ord;
   const int epb = pool.entries_per_block(ord);
   // The index keys from the unrotated latents: wk -> RMSNorm -> the tail
   // rotated at the entry's position -> the planar form.
-  gemm_.matmul(latent_, w_.idx_wk, ik_, n, kCsa2IndexDim, kCsa2Latent, DType::BF16, GemmOut::BF16,
-               size_t(kCsa2Latent), gemm_ws_, gemm_ws_bytes_, stream);
+  if (w_.exl3())
+    launch_exl3_gemm_bf16(latent_, size_t(kCsa2Latent), w_.idx_wk_x, ik_, n, kCsa2IndexDim, kCsa2Latent, 0, stream,
+                          exl3_ws_, exl3_ws_bytes_);
+  else
+    gemm_.matmul(latent_, w_.idx_wk, ik_, n, kCsa2IndexDim, kCsa2Latent, DType::BF16, GemmOut::BF16,
+                 size_t(kCsa2Latent), gemm_ws_, gemm_ws_bytes_, stream);
   csa2_rmsnorm_bf16(ik_, kCsa2IndexDim, w_.idx_k_norm, ik_, kCsa2IndexDim, n, kCsa2IndexDim, cfg_.eps, stream);
   csa2_rope_apply(ik_ + (kCsa2IndexDim - kCsa2Rope), kCsa2IndexDim, kCsa2IndexDim, 1, kCsa2Rope, ent_pos_, w_.inv_freq,
                   false, n, stream);
@@ -390,40 +516,69 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   // scalar kernel's 29; prefill keeps one split, its row tile fills the
   // GPU).
   const int n_split_win = split_window ? std::min(n_split_main, kWinDecodeSplit) : 1;
+  // The decode splits in groups (2026-10-23, kernels/dsa.hpp
+  // kAttnSplitGroup): each group of eight consecutive splits publishes one
+  // merged partial (the last block of the group folds the eight from L2
+  // and discards them), so the finish reads n_split / 8 per source and the
+  // per-split partials — fifty megabytes a layer at forty rows — never
+  // write back. The scalar fallback keeps one per split.
+  const int group = split_window && n_split_win % kAttnSplitGroup == 0 && n_split_main % kAttnSplitGroup == 0
+                        ? kAttnSplitGroup : 1;
   // The window table has one entry per request (the ring: request r's
   // region r; the prefill scratch: block 0): the physical bound is the
   // ring's region count, not the row width.
   const int win_blocks_total = split_window ? pool.shape().max_requests : 1;
-  if (!(flash_try &&
-        dsa_attn_listed(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
-                        n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
-                        wstream, Csa2StatePool::kRingFormat, nullptr, 0, win_blocks_total))) {
+  int n_win_pub = n_split_win;
+  const float *m_win_pub = m_win_, *l_win_pub = l_win_, *c_win_pub = c_win_;
+  if (flash_try &&
+      dsa_attn_listed(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
+                      n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
+                      wstream, Csa2StatePool::kRingFormat, nullptr, 0, win_blocks_total, group, tickets_win_, m_grp_win_,
+                      l_grp_win_, c_grp_win_)) {
+    n_win_pub = n_split_win / group;
+    if (group > 1) {
+      m_win_pub = m_grp_win_;
+      l_win_pub = l_grp_win_;
+      c_win_pub = c_grp_win_;
+    }
+  } else {
     dsa_attn_partial(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
                      n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
                      wstream, Csa2StatePool::kRingFormat, nullptr, 0);
   }
-  int n_main = 0;
+  int n_main_pub = 0;
+  const float *m_main_pub = m_main_, *l_main_pub = l_main_, *c_main_pub = c_main_;
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
     const int epb = pool.entries_per_block(ord);
     const int32_t* topk = topk_ + size_t(sel_base + row0) * cfg_.index_topk;
     const int32_t* counts = counts_ + sel_base + row0;
-    n_main = n_split_main;
-    if (!(lh >= 16 && lh % 16 == 0 &&
-          dsa_attn_listed(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
-                          epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
-                          stream, Csa2StatePool::kMainFormat, nullptr, 0)))
+    const int n_main = n_split_main;
+    if (lh >= 16 && lh % 16 == 0 &&
+        dsa_attn_listed(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
+                        epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
+                        stream, Csa2StatePool::kMainFormat, nullptr, 0, -1, group, tickets_main_, m_grp_main_,
+                        l_grp_main_, c_grp_main_)) {
+      n_main_pub = n_main / group;
+      if (group > 1) {
+        m_main_pub = m_grp_main_;
+        l_main_pub = l_grp_main_;
+        c_main_pub = c_grp_main_;
+      }
+    } else {
       dsa_attn_partial(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
                        epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
                        stream, Csa2StatePool::kMainFormat, nullptr, 0);
+      n_main_pub = n_main;
+    }
   }
   if (beside) {
     DGPP_CUDA_OK(cudaEventRecord(side_join_, side_stream_));
     DGPP_CUDA_OK(cudaStreamWaitEvent(stream, side_join_, 0));
   }
-  csa2_attn_finish(n_main ? m_main_ : nullptr, n_main ? l_main_ : nullptr, n_main ? c_main_ : nullptr, n_main, m_win_,
-                   l_win_, c_win_, n_split_win, w_.attn_sink, rows, lh, pos, w_.inv_freq,
-                   o_ + size_t(row0) * lh * kCsa2Latent, stream);
+  csa2_attn_finish(n_main_pub ? m_main_pub : nullptr, n_main_pub ? l_main_pub : nullptr,
+                   n_main_pub ? c_main_pub : nullptr, n_main_pub, m_win_pub, l_win_pub, c_win_pub, n_win_pub,
+                   w_.attn_sink, rows, lh, pos, w_.inv_freq, o_ + size_t(row0) * lh * kCsa2Latent, stream);
 }
 
 void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {
@@ -433,6 +588,15 @@ void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {
   // Two groups take one decode launch (the pair form, 2026-10-20: the same
   // k, each group's chain its own launch's); otherwise one launch per group.
   const size_t act_stride = size_t(lh) * kCsa2Latent;
+  if (w_.exl3()) {
+    // One EXL3 launch per group (its matrix is its own pack tensor), then wo_b.
+    for (int g = 0; g < lg; ++g)
+      launch_exl3_gemm_bf16(o_ + size_t(g) * K, act_stride, w_.wo_a_x[size_t(g)], oa_ + size_t(g) * cfg_.o_lora, tokens,
+                            cfg_.o_lora, K, size_t(lg) * cfg_.o_lora, stream, exl3_ws_, exl3_ws_bytes_);
+    launch_exl3_gemm_bf16(oa_, size_t(lg) * cfg_.o_lora, w_.wo_b_x, static_cast<uint16_t*>(out), tokens, cfg_.hidden,
+                          lg * cfg_.o_lora, 0, stream, exl3_ws_, exl3_ws_bytes_);
+    return;
+  }
   const size_t row_off1 = size_t(cfg_.o_lora), scale_off1 = (row_off1 / 32) * (size_t(K) / 32);
   const bool paired = lg == 2 && cfg_.dense_mma && !prefill_tile_ &&
                       mma_gemv_pair_ok(w_.wo_a.payload, w_.wo_a.payload + row_off1 * K, o_, o_ + K, act_stride, tokens,
@@ -472,9 +636,18 @@ void Csa2Layer::window_fp8(const GlmQuantMatrix& m) {
   if (m.scales) prefetch_->add(m.scales, m.scale_bytes());
 }
 
+void Csa2Layer::window_exl3(const Exl3Matrix& m) {
+  if (m.tiles) prefetch_->add(m.tiles, m.tiles_bytes());
+}
+
 void Csa2Layer::open_output_window(cudaStream_t stream) {
   if (!windows()) return;
   prefetch_->open_window(stream, kWindowBudget, prefetch_->layer_rate());
+  if (w_.exl3()) {
+    for (const Exl3Matrix& g : w_.wo_a_x) window_exl3(g);
+    window_exl3(w_.wo_b_x);
+    return;
+  }
   window_fp8(w_.wo_a);
   window_fp8(w_.wo_b);
 }
@@ -511,7 +684,8 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
   // lines when it starts reads them beside it (measured 2026-10-19).
   if (windows() && !(w_.ratio > 0 && w_.index_source)) {
     prefetch_->open_window(stream, kWindowBudget, prefetch_->layer_rate());
-    window_fp8(w_.wo_b);
+    if (w_.exl3()) window_exl3(w_.wo_b_x);
+    else window_fp8(w_.wo_b);
   }
   // A window-only layer opens no output window (2026-10-19): with the
   // decode window beside the main source its attention is 12-20 us, and
@@ -536,16 +710,12 @@ void Csa2Layer::enqueue_decode(const void* hidden_in, Csa2StatePool& pool, const
     const int ord = w_.cache_ord;
     if (w_.kv_source) {
       if (w_.ratio == 2) {
-        gemm_.matmul(hidden_in, w_.comp_wkv, comp_kv_, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::F32,
-                     size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
-        gemm_.matmul(hidden_in, w_.comp_wgate, comp_score_, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::F32,
-                     size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
+        compress_project(hidden_in, tokens, comp_kv_, comp_score_, stream);
         csa2_compress_decode_update(comp_kv_, comp_score_, req_ids, pos, req_spans, num_requests, w_.comp_norm, cfg_.eps,
                                     pool.tails(w_.tail_ord), latent_, entries_, tokens, tail_snapshots, stream);
         csa2_scaled_positions(entries_, ent_pos_, tokens, 2, 0, stream);
       } else {
-        gemm_.matmul(hidden_in, w_.comp_wkv, latent_, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::BF16,
-                     size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
+        compress_latent(hidden_in, tokens, stream);
         csa2_rmsnorm_bf16(latent_, kCsa2Latent, w_.comp_norm, latent_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
         csa2_scaled_positions(pos, entries_, tokens, 1, 0, stream);
         csa2_scaled_positions(pos, ent_pos_, tokens, 1, 0, stream);
@@ -647,18 +817,14 @@ void Csa2Layer::publish_rows(const void* hidden_in, Csa2StatePool& pool, int req
                              cudaStream_t stream) {
   int n_entries = 0;
   if (w_.ratio == 2) {
-    gemm_.matmul(hidden_in, w_.comp_wkv, comp_kv_, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::F32,
-                 size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
-    gemm_.matmul(hidden_in, w_.comp_wgate, comp_score_, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::F32,
-                 size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
+    compress_project(hidden_in, tokens, comp_kv_, comp_score_, stream);
     csa2_compress_pairs_prefill(comp_kv_, comp_score_, tokens, w_.comp_norm, cfg_.eps, latent_,
                                 pool.tails(w_.tail_ord) + size_t(req) * 2 * kCsa2Latent, stream);
     n_entries = tokens / 2;
     csa2_scaled_positions(iota_, entries_, n_entries, 1, pos0 / 2, stream);
     csa2_scaled_positions(entries_, ent_pos_, n_entries, 2, 0, stream);
   } else {
-    gemm_.matmul(hidden_in, w_.comp_wkv, latent_, tokens, kCsa2Latent, cfg_.hidden, DType::BF16, GemmOut::BF16,
-                 size_t(cfg_.hidden), gemm_ws_, gemm_ws_bytes_, stream);
+    compress_latent(hidden_in, tokens, stream);
     csa2_rmsnorm_bf16(latent_, kCsa2Latent, w_.comp_norm, latent_, kCsa2Latent, tokens, kCsa2Latent, cfg_.eps, stream);
     n_entries = tokens;
     csa2_scaled_positions(pos_, entries_, tokens, 1, 0, stream);

@@ -108,6 +108,13 @@ struct GlmMoeHostWeights {
   // (the represented values code x scale) for every format-3 expert, and
   // feeds a format-0 (existing) expert the plain rows.
   int routed_input_transform = 0;
+  // The EXL3 format (2026-10-22, docs/deepseek_v41_flash_exl3_plan.md): every
+  // matrix as a host EXL3 matrix in index order, the shared triple last
+  // ((E + 1) * 3 entries; gate/up rows I cols H, down rows H cols I). The
+  // oracle multiplies the full reconstruct (every rotation in double); the
+  // fp8 / fp4 / packed vectors are unused when set.
+  std::vector<Exl3HostMatrix> exl3;
+  bool exl3_set() const { return !exl3.empty(); }
 };
 
 // Expert payload layout inside GlmMoeHostWeights: expert e's matrix m at

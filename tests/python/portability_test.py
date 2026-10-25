@@ -242,6 +242,7 @@ class PortabilityTest(unittest.TestCase):
             "RadixArk/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-radixark",
             "deepseek-ai/DeepSeek-V4.1-Flash": "deepseek-v4.1-flash_mxfp4-fp8",
             "deepseek-ai/DeepSeek-V4.1-Flash-1017": "deepseek-v4.1-flash-1017_mxfp4-fp8",
+            "LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw": "deepseek-v4.1-flash-1017_exl3-3.5bpw",
             "XiaomiMiMo/MiMo-V2.6-Flash-RL": "mimo-v2.6-flash_mxfp4-fp8",
             "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-v4-flash_mxfp4-fp8",
             "Saren/Qwen3.8-Flash-Next-W4A16-AutoRound-hybrid-MTP_int4RTN": "qwen-3.8-flash-next_autoround-int4",
@@ -286,7 +287,11 @@ class PortabilityTest(unittest.TestCase):
                 # that shape in one documented engine setting (today the Qwen
                 # 512K YaRN ramp) instead of in its size. A base shape stays
                 # unique, and a variant may repeat one only with its suffix;
-                # deploy/README.md carries the rule and the catalogue.
+                # deploy/README.md carries the rule and the catalogue. The
+                # draft mechanism is never a fork of the shape: a model's
+                # drafter world is the same template with --dflash-model, so a
+                # drafter template and an MTP template of one model, quant and
+                # world share a stem and the rule below refuses the pair.
                 shape = re.fullmatch(
                     rf"cluster_{re.escape(models[cfg['model']])}_w([0-9]+)(_[a-z0-9]+)?",
                     path.name.removesuffix(".example.json"))

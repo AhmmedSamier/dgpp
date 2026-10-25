@@ -35,6 +35,7 @@
 #include "kernels/gemm.hpp"
 #include "kernels/l2_prefetch.hpp"
 #include "models/dsv41/csa2_state.hpp"
+#include "models/exl3_matrix.hpp"
 #include "models/quant_matrix.hpp"
 
 namespace dgpp {
@@ -44,6 +45,9 @@ struct Csa2Config {
   // (rows 1..32 in one launch, the weights read once) or the 4-row GEMV
   // chunks. Tolerance-equal forms; the model sets every site alike.
   bool dense_mma = true;
+  // An EXL3 pack (docs/deepseek_v41_flash_exl3_plan.md): the projections
+  // take the EXL3 launchers and the layer carries their workspace.
+  bool exl3 = false;
   int hidden = 5120;
   int q_lora = 1280;
   int o_lora = 1024;
@@ -66,6 +70,13 @@ struct Csa2Config {
 
 struct Csa2LayerWeights {
   GlmQuantMatrix wq_a, wkv, wq_b, wo_a, wo_b;  // fp8, 32 x 32 grids
+  // The EXL3 pack's projections (docs/deepseek_v41_flash_exl3_plan.md §3):
+  // set instead of the fp8 / bf16 members (wo_a one matrix per local
+  // group; the compressors and the indexer's wq_b / wk EXL3 too). Every
+  // site then runs the EXL3 launchers (kernels/exl3_gemv.hpp).
+  Exl3Matrix wq_a_x, wkv_x, wq_b_x, wo_b_x, idx_wq_b_x, idx_wk_x, comp_wkv_x, comp_wgate_x;
+  std::vector<Exl3Matrix> wo_a_x;
+  bool exl3() const { return wq_a_x.tiles != nullptr; }
   const uint16_t* q_norm = nullptr;
   const uint16_t* kv_norm = nullptr;
   const float* attn_sink = nullptr;    // f32 [local_heads]
@@ -210,7 +221,10 @@ class Csa2Layer {
     size_t pos, req_ids, req_zero, slots, pos_sel, entries, ent_pos, scratch_pos, iota, one_block;
     size_t wlist, wcounts, wscratch, dlist, dcounts, topk, counts, cand, cand_counts;
     size_t m_main, l_main, c_main, m_win, l_win, c_win;
+    size_t m_grp_main, l_grp_main, c_grp_main, m_grp_win, l_grp_win, c_grp_win, tickets;
+    size_t tickets_per_source = 0;  // ints per source (the window's follow the main's)
     size_t gather_k, gather_scale, logits, select_ws, counter, violations;
+    size_t exl3_ws = 0, exl3_ws_bytes = 0;
     int tile_cap = 0;
     int64_t max_entries = 0;
     int ws_slots = 0;
@@ -233,6 +247,9 @@ class Csa2Layer {
   // rope_q false: the q rope is left to the decode tail kernel (enqueue_decode).
   void project_q_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream, bool rope_q = true);
   void project_kv(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
+  // The compressor's projections (bf16 matmul or the EXL3 launchers).
+  void compress_project(const void* hidden_in, int tokens, float* kv, float* score, cudaStream_t stream);
+  void compress_latent(const void* hidden_in, int tokens, cudaStream_t stream);
   void indexer_query(const void* hidden_in, int tokens, const int64_t* pos, cudaStream_t stream);
   // The index keys and the main rows of `n` entries (entries_ / ent_pos_
   // set; latent_ holds the normed, unrotated latents).
@@ -295,6 +312,12 @@ class Csa2Layer {
   int64_t dbg_logits_stride_ = 0, dbg_logits_entries_ = 0;
   void* gemm_ws_ = nullptr;
   size_t gemm_ws_bytes_ = 0;
+  // The EXL3 launchers' workspace (the rotated rows and the narrow sites'
+  // split partials; kernels/exl3_gemv.hpp): a span of the scratch sized
+  // for the widest site (Layout::exl3_ws).
+  void* exl3_ws_ = nullptr;
+  size_t exl3_ws_bytes_ = 0;
+  void window_exl3(const Exl3Matrix& m);
   std::vector<int64_t> host_i64_;
   std::vector<int32_t> host_i32_;
 
@@ -338,6 +361,16 @@ class Csa2Layer {
   float* m_win_ = nullptr;        // [ws_win_rows, lh]
   float* l_win_ = nullptr;
   float* c_win_ = nullptr;        // [ws_win_rows, lh, 512]
+  // The decode split groups' partials (kernels/dsa.hpp kAttnSplitGroup):
+  // one per group of eight splits, per source, and the groups' tickets.
+  float* m_grp_main_ = nullptr;   // [ws_slots / 8, lh]
+  float* l_grp_main_ = nullptr;
+  float* c_grp_main_ = nullptr;   // [ws_slots / 8, lh, 512]
+  float* m_grp_win_ = nullptr;
+  float* l_grp_win_ = nullptr;
+  float* c_grp_win_ = nullptr;
+  int32_t* tickets_main_ = nullptr;  // [row pairs x groups], zero at rest
+  int32_t* tickets_win_ = nullptr;
   uint8_t* gather_k_ = nullptr;   // [max_entries, 128]
   float* gather_scale_ = nullptr; // [max_entries]
   float* logits_ = nullptr;       // [tile_cap, max_entries]: the fused scorer's row tile (the budget)

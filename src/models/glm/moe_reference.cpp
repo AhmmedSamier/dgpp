@@ -387,6 +387,11 @@ void glm_moe_ref_forward(const uint16_t* hidden, const GlmMoeHostWeights& w,
     double divisor;
   };
   auto weights_for = [&](int index) -> Mat {
+    if (w.exl3_set()) {
+      if (index < 0 || static_cast<size_t>(index) >= w.exl3.size())
+        throw std::invalid_argument("glm_moe_ref_forward: EXL3 matrix index out of range");
+      return Mat{exl3_reconstruct(w.exl3[static_cast<size_t>(index)]), 1.0};
+    }
     if (w.fp4_of(index, E)) {
       const GlmFp4MatrixHost v = glm_moe_host_view_fp4(w, cfg, index);
       return Mat{dequant_fp4_weights(v), static_cast<double>(v.global_scale)};
