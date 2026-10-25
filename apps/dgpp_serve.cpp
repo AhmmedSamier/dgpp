@@ -1613,7 +1613,10 @@ int main(int argc, char** argv) {
       "    [--mtp-depth N]  draft tokens per step (1..5; the verify runs 1+N rows)\n"
       "    [--prefill-fp8-per-tensor]  Qwen3.8-27B: prefill GEMMs on cuBLASLt's per-tensor e4m3 kernels\n"
       "      (engine.prefill_fp8_per_tensor; ~2x the prefill rate, +23 GiB, changes greedy output)\n"
-      "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint (replaces --mtp; past world 1 on the decode graph)\n"
+      "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint: the drafter's world. It\n"
+      "      replaces the MTP draft on an MTP template (the draft's own settings go with the switch\n"
+      "      unless named; --mtp beside it is a contradiction and refused); past world 1 it runs on\n"
+      "      the decode graph\n"
       "    [--no-dflash]  run plain from a drafter template on the decode graph (the A/B knob; add --mtp for the MTP world)\n"
       "    [--no-dflash-verify-graph]  the multi-slot verify as an eager batch (engine.dflash_verify_graph)\n"
       "    [--no-prefill-group]  one cold prompt per prefill walk (engine.prefill_group false)\n"
@@ -1763,7 +1766,8 @@ int main(int argc, char** argv) {
   bool no_eos = false, decode_graph = false, mtp = false;
   int mtp_depth = 1;  // draft tokens per step (needs --mtp; 1..5)
   bool no_mtp_cli = false, mtp_depth_cli = false, mtp_schedule_cli = false;  // given on the command line
-  bool no_dflash_cli = false;
+  bool no_dflash_cli = false, dflash_model_cli = false, mtp_cli = false;
+  bool lookup_draft_cli = false, lookup_tail_cli = false, draft_head_cli = false;
   bool mtp_depth_explicit = false;  // named by the flag or the file (else the family's default)
   bool mtp_schedule = false;  // the confidence-scheduled verify depth (needs --mtp)
   double mtp_schedule_row_ms = 8.0;
@@ -1982,8 +1986,10 @@ int main(int argc, char** argv) {
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
-    else if (a == "--draft-head") draft_head = next();
-    else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
+    else if (a == "--draft-head") {
+      draft_head = next();
+      draft_head_cli = true;
+    } else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
     else if (a == "--mtp-expert-format") mtp_expert_format = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--draft-vocab") draft_vocab = next();
@@ -2010,15 +2016,20 @@ int main(int argc, char** argv) {
     else if (a == "--decode-graph") decode_graph = true;
     else if (a == "--graph-batch-min-live")
       graph_batch_min_live = std::stoi(next());
-    else if (a == "--mtp") mtp = true;
-    else if (a == "--dflash-model") dflash_model = next();
-    else if (a == "--no-dflash") {
+    else if (a == "--mtp") {
+      mtp = true;
+      mtp_cli = true;
+    } else if (a == "--dflash-model") {
+      dflash_model = next();
+      dflash_model_cli = true;
+    } else if (a == "--no-dflash") {
       // The plain world from a drafter template (the A/B knob): the drafter
       // runs on the eager engine, whose plain world without a drafter would
       // stream its layers (0.65 tok/s measured), so the knob lands on the
       // decode graph — the same resident plain world the MTP templates'
       // --no-mtp gives; --mtp [--mtp-depth N] beside it is the MTP world.
       dflash_model.clear();
+      dflash_model_cli = false;  // --no-dflash wins a --dflash-model on the same line
       decode_graph = true;
       no_dflash_cli = true;
     }
@@ -2063,13 +2074,19 @@ int main(int argc, char** argv) {
     else if (a == "--mtp-draft-temperature") mtp_draft_temperature = std::stod(next());
     else if (a == "--mtp-verify") mtp_verify = next();
     else if (a == "--dflash-batch-rows") dflash_batch_rows = std::stoi(next());
-    else if (a == "--lookup-draft") lookup_draft = true;
-    else if (a == "--no-lookup-draft") lookup_draft = false;
-    else if (a == "--lookup-nmin") lookup_nmin = std::stoi(next());
+    else if (a == "--lookup-draft") {
+      lookup_draft = true;
+      lookup_draft_cli = true;
+    } else if (a == "--no-lookup-draft") {
+      lookup_draft = false;
+      lookup_draft_cli = true;
+    } else if (a == "--lookup-nmin") lookup_nmin = std::stoi(next());
     else if (a == "--lookup-nstrong") lookup_nstrong = std::stoi(next());
     else if (a == "--lookup-agree") lookup_agree = std::stoi(next());
-    else if (a == "--lookup-tail") lookup_tail = std::stoi(next());
-    else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
+    else if (a == "--lookup-tail") {
+      lookup_tail = std::stoi(next());
+      lookup_tail_cli = true;
+    } else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
     else if (a == "--admission") admission_mode = next();
@@ -2173,6 +2190,27 @@ int main(int argc, char** argv) {
   // the MTP world beside it (--mtp --mtp-depth N), run without it unless
   // the command line asked for it.
   if (no_dflash_cli && !mtp_schedule_cli) mtp_schedule = false;
+  // --dflash-model on the command line replaces the template's MTP world, as
+  // its usage has claimed since the drafter landed (until 2026-10-24 the flag
+  // only worked on a template that already set mtp false; on an MTP template
+  // it tripped the "not both" refusal below, which is why RadixArk NVFP4
+  // carried a second drafter template instead of a knob). The MTP group is the
+  // draft it replaces, so it goes with the switch the way --no-mtp's does: the
+  // depth, the schedule, the lookup drafts and the tail (the block drafter
+  // refuses a tail outright, engine/graph_engine.hpp), and the screened head
+  // — unless the command line named them. So an MTP template plus the flag is
+  // the drafter world the standalone template carried, setting for setting.
+  if (dflash_model_cli && !dflash_model.empty() && !mtp_cli) {
+    mtp = false;
+    if (!mtp_depth_cli) {
+      mtp_depth = 1;
+      mtp_depth_explicit = false;
+    }
+    if (!mtp_schedule_cli) mtp_schedule = false;
+    if (!lookup_draft_cli) lookup_draft = false;
+    if (!lookup_tail_cli) lookup_tail = 0;
+    if (!draft_head_cli) draft_head = "exact";
+  }
   // The DFlash2 block drafter (models/dflash2/drafter.hpp): a standalone
   // checkpoint (a directory or a cached HF id) that replaces the MTP
   // draft. World 1 without the decode graph is the eager engine's drafter

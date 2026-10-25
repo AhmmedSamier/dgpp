@@ -465,9 +465,14 @@ without a full decode graph on one node; the graph engine is required for
 multi-node DFlash2. Options marked eager-only do not tune the graph path.
 On the Qwen3.8-Flash-Next family (`qwen4_exp`) the recorded block draft runs
 on the graph engine, and the drafter's block confidence feeds the scheduler
-settings above; the template
-`deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark-dflash2_w1.example.json`
-ships this combination. With `mtp_schedule` true (the `--mtp-schedule` boot
+settings above. `engine.dflash_model` names it in a template (the
+Qwen3.8-27B releases) or `--dflash-model DIR_OR_ID` selects it at boot on a
+template that names MTP, as the measured RadixArk NVFP4 Flash-Next world
+does:
+`dgpp-serve --config deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark_w1_yarn512k.example.json --dflash-model incoai/Qwen3.8-Flash-Next-DFlash2 --mtp-schedule`
+(the drafter replaces the MTP draft, so the template's `mtp_depth`,
+`mtp_schedule`, `lookup_draft`, `lookup_tail` and `draft_head` revert to
+their defaults unless the command line names them). With `mtp_schedule` true (the `--mtp-schedule` boot
 flag) the scheduler
 verifies 2–4 drafts per step instead of the whole block, following
 the predicted acceptance of each row: measured on
