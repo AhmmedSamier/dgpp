@@ -4,6 +4,18 @@ The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
 ## Unreleased
+- **DFlash2 integration fixes** (2026-10-25): the shared drafter follows
+  the active eager/capture reducer, copies complete draft KV blocks during
+  prefix reuse, and arms sampled proposal distributions on Flash-Next.
+  Memory plans use the local vocabulary slice. Flash-Next now honors the
+  explicitly requested draft-head screen and uses recurrent-state replay
+  for DFlash2, avoiding full recurrent snapshots at every speculative row.
+  Regression tests cover both model families, two-rank graph execution,
+  prefix reuse, screening, sampling and all eight accepted prefix lengths.
+  The paired probe reconciles completed requests and includes the bonus
+  token in mean acceptance length; explicit `--no-dflash` wins in either
+  command-line order.
+
 - **The draft mechanism is a knob, not a template fork** (2026-10-25):
   `--dflash-model DIR_OR_ID` now replaces the template's MTP world the way its
   usage text always claimed. The flag only worked on a template that

@@ -28,6 +28,16 @@ std::vector<int64_t> prompt(int rows, int salt) {
   return out;
 }
 
+struct ReplaySetting {
+  const char* value = std::getenv("DGPP_QWEN_GDN_REPLAY");
+  bool present = value != nullptr;
+  std::string old = value ? value : "";
+  ~ReplaySetting() {
+    if (present) setenv("DGPP_QWEN_GDN_REPLAY", old.c_str(), 1);
+    else unsetenv("DGPP_QWEN_GDN_REPLAY");
+  }
+};
+
 template <class Model>
 auto draft_plane(Model& model, int layer) {
   if constexpr (requires { model.pool().draft_view(layer); })
@@ -264,15 +274,7 @@ DGPP_TEST(dflash2_flash_next_head_screen) {
 }
 
 DGPP_TEST(dflash2_flash_next_replay_matches_snapshots) {
-  struct Restore {
-    const char* value = std::getenv("DGPP_QWEN_GDN_REPLAY");
-    bool present = value != nullptr;
-    std::string old = value ? value : "";
-    ~Restore() {
-      if (present) setenv("DGPP_QWEN_GDN_REPLAY", old.c_str(), 1);
-      else unsetenv("DGPP_QWEN_GDN_REPLAY");
-    }
-  } restore;
+  ReplaySetting restore;
   const auto make = flash_factory();
   const auto cfg = qwenfx::tiny_config();
   const auto plan = [&] {
@@ -294,6 +296,47 @@ DGPP_TEST(dflash2_flash_next_replay_matches_snapshots) {
   require(replay == reference, "replay changes speculative transcripts");
   require(snapshot_states.size() >= 2, "too few aligned decode snapshots exercised replay");
   require(replay_states == snapshot_states, "replay changes materialized session state");
+}
+
+DGPP_TEST(dflash2_flash_next_replay_all_accept_lengths) {
+  ReplaySetting restore;
+  const auto make = flash_factory();
+  setenv("DGPP_QWEN_GDN_REPLAY", "off", 1);
+  auto reference = make(nullptr, 0, 1);
+  setenv("DGPP_QWEN_GDN_REPLAY", "on", 1);
+  auto replay = make(nullptr, 0, 1);
+  dgpp::PrefixArena<dgpp::QwenModel> old_cache(reference.get(), 1), new_cache(replay.get(), 1);
+  for (int accepted = 1; accepted <= 8; ++accepted) {
+    reference->session_prefill(0, prompt(48, accepted));
+    replay->session_prefill(0, prompt(48, accepted));
+    // Force every accepted prefix length, including all eight verified
+    // rows; random draft fixtures otherwise mostly reject the first draft.
+    const auto feeds = prompt(8, accepted + 10);
+    const auto want = reference->session_verify(0, feeds);
+    const auto got = replay->session_verify(0, feeds);
+    require(got.logits == want.logits, "replay changes block verify logits");
+    reference->session_rollback(0, accepted, 8);
+    replay->session_rollback(0, accepted, 8);
+    do {
+      const auto a = reference->session_step(0, 117);
+      const auto b = replay->session_step(0, 117);
+      require(a.logits == b.logits, "replay restores the wrong accepted prefix");
+    } while (reference->session_position(0) % reference->session_snapshot_align() != 0);
+    const auto pos = reference->session_position(0);
+    old_cache.snapshot(0, 0, pos);
+    new_cache.snapshot(0, 0, pos);
+    reference->session_close(0);
+    replay->session_close(0);
+    old_cache.attach(0, 0);
+    new_cache.attach(0, 0);
+    const auto a = reference->session_step(0, 211);
+    const auto b = replay->session_step(0, 211);
+    require(a.logits == b.logits, "replay changes continuation from a decoded prefix snapshot");
+    reference->session_close(0);
+    replay->session_close(0);
+    old_cache.release(0);
+    new_cache.release(0);
+  }
 }
 
 DGPP_TEST(dflash2_qwen35_plan_uses_local_vocabulary) {

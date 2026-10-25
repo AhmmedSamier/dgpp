@@ -469,13 +469,18 @@ on the graph engine, and the drafter's block confidence feeds the scheduler
 settings above. `engine.dflash_model` names it in a template (the
 Qwen3.8-27B releases) or `--dflash-model DIR_OR_ID` selects it at boot on a
 template that names MTP, for example:
-`dgpp-serve --config deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark_w1_yarn512k.example.json --dflash-model incoai/Qwen3.8-Flash-Next-DFlash2 --mtp-schedule`
+`dgpp-serve --config deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json --dflash-model incoai/Qwen3.8-Flash-Next-DFlash2 --dflash-weights fp8 --draft-head screen --mtp-schedule`
 (the drafter replaces the MTP draft, so the template's `mtp_depth`,
 `mtp_schedule`, `lookup_draft`, `lookup_tail` and `draft_head` revert to
 their defaults unless the command line names them). With `mtp_schedule` true,
 the scheduler chooses the verification depth from the drafter's confidence
 and the configured cost model. Measure those costs on the selected deployment;
 acceptance and throughput depend on its target weights and workload.
+Add `--draft-head screen` explicitly to screen DFlash2's proposal head;
+target verification keeps the full served head. Flash-Next also uses its
+recurrent-state checkpoint/replay path for DFlash2. See the
+[performance notes](optimizing_performance.md#flash-next-dflash2) for the
+pass-time and acceptance tradeoffs.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|

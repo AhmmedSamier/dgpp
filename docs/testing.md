@@ -64,6 +64,9 @@ and account for the requested head screen. Screened graph runs check the
 candidate-block bound. Flash-Next's recurrent-state replay is compared with
 full snapshots for scheduled scalar/batched transcripts and exact state
 bytes in prefix snapshots taken after speculative commits.
+A direct verify/rollback check forces every accepted prefix length from one
+through eight rows, then compares continuation logits before and after
+restoring a decoded prefix snapshot.
 Run them with `qwen_dflash2_test`, `dflash2_kernels_test`
 and `qwen35_tp_test` on idle hardware; the latter retains DFlash v1 coverage.
 `spec_ab_probe_test` checks bonus-inclusive mean acceptance length, delayed
