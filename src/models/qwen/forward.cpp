@@ -190,11 +190,11 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     gdn_rec_ = dev_alloc<float>(R * num_gdn_ * static_cast<size_t>(gdn_rec_elems_));
     gdn_conv_ = dev_alloc<uint16_t>(R * num_gdn_ * static_cast<size_t>(gdn_conv_elems_));
     spec_conv_ = dev_alloc<uint16_t>(rows * num_gdn_ * static_cast<size_t>(gdn_conv_elems_));
-    // MTP stacks keep no recurrent snapshot rows: the checkpoint-and-replay
+    // Speculative stacks keep no recurrent snapshot rows: the checkpoint-and-replay
     // form saves each pass's rows as their inputs (kernels/kda.hpp
     // KdaReplay) — two copies (the replay source and this pass's save,
     // the commit copies one over the other) of every slot's rows.
-    gdn_replay_ = mtp_ && !env_is_off_replay();
+    gdn_replay_ = (mtp_ || dflash2_) && !env_is_off_replay();
     if (gdn_replay_) {
       // A saved row padded to 16 bytes: the commit's copy (used rows x
       // layers x row) stays 16-byte-sized at every geometry.
@@ -344,7 +344,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   // The draft head's screen (engine.draft_head; kernels/draft_head.hpp):
   // the decode drafts' head reads, unless the opt-in vocabulary slice
   // (engine.draft_vocab) already replaces the draft head.
-  if (mtp_ && globals_.draft_head_packed.packed == nullptr)
+  if (dflash2_ || (mtp_ && globals_.draft_head_packed.packed == nullptr))
     draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
   if (const char* e = std::getenv("DGPP_QWEN_HEAD_DUMP"); e != nullptr && e[0] != '\0') {
     head_dump_path_ = e;
@@ -443,9 +443,9 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   const size_t ring_elems = static_cast<size_t>(cfg.indexer_compress_ratio) * cfg.indexer_head_dim;
   const size_t family_bytes = static_cast<size_t>(num_gdn) * (rec_elems * 4 + conv_elems * 2) + ple_elems * 2 + 16;
   plan.add("request slot state (GDN recurrent/conv, PLE conv, context)", R * family_bytes);
-  // MTP stacks replay the recurrent state (no recurrent snapshot rows;
+  // Speculative stacks replay the recurrent state (no recurrent snapshot rows;
   // kernels/kda.hpp KdaReplay): two copies of every slot's saved rows.
-  const bool replay = mtp && num_gdn > 0;
+  const bool replay = (mtp || dfcfg) && num_gdn > 0 && !env_is_off_replay();
   const size_t spec_family = replay ? family_bytes - static_cast<size_t>(num_gdn) * rec_elems * 4 : family_bytes;
   plan.add("spec snapshot rows", rows * spec_family + static_cast<size_t>(num_qsa) * rows * ring_elems * 2);
   if (replay)
@@ -505,7 +505,7 @@ QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_
   if (cfg.lm_head_gptq_int8)
     plan.add("head argmax bounds and candidate list (four rows x vocab fp32, vocab int32)",
              4 * static_cast<size_t>(geo.lm_vocab_count) * 4 + static_cast<size_t>(geo.lm_vocab_count) * 4 + 64);
-  if (mtp && QwenLayerStream::draft_vocab_count() == 0)
+  if (dfcfg || (mtp && QwenLayerStream::draft_vocab_count() == 0))
     plan.add("draft head screen (2-bit rotated head copy, scratch)",
              DraftHead::plan_bytes(geo.lm_vocab_count, cfg.hidden_size, static_cast<int>(rows)));
   if (cfg.lm_head_gptq_int8 && QwenLayerStream::draft_vocab_count() > 0) {
@@ -1824,7 +1824,7 @@ void QwenModel::finish_companions() {
   bf12_.log_summary(loader_.rank(), bf12_s_);
   // The draft head's screen from the companion when the bf16 bytes were
   // never device-resident (the 12-bit-only residency); a no-op once built.
-  if (mtp_ && globals_.draft_head_packed.packed == nullptr)
+  if (dflash2_ || (mtp_ && globals_.draft_head_packed.packed == nullptr))
     draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_);
 }
 
@@ -2183,15 +2183,18 @@ void QwenModel::apply_image_embeddings(uint16_t* dst, int64_t first, int rows, i
 // The shared drafter's family side: the target's runs feed the draft planes
 // (the mix-site taps above, df_.store_features), and a redraft / the
 // recorded block proposal run the component (df_) over this pool and the
-// exact head below. Everything else (the block forward, the mask-row
+// proposal head below. Everything else (the block forward, the mask-row
 // select, the staging and the pinned mirrors) is the component's.
 
 void QwenModel::df_head(const uint16_t* hidden, float* out, int rows) {
-  // The full head at the draft's rows: the served dispatch (packed / fp8 /
-  // bf16), no screen, no argmax-only flag — the selector walk reads top-K
-  // out of these logits, so every row must be the exact product.
+  // The selector reads top-K from the proposal logits. Honor the requested
+  // screen just as the native draft does: exact logits in candidate blocks,
+  // -inf elsewhere. Target verification always uses the full served head.
   const int H = cfg_.hidden_size;
   const int V = lm_vocab_count_;
+  if (draft_head_.logits(draft_head_matrix(), hidden, static_cast<size_t>(H), rows,
+                         out, static_cast<size_t>(V), stream_))
+    return;
   if (globals_.lm_head_packed.packed) {
     launch_packq_gemm_f32(hidden, static_cast<size_t>(H), globals_.lm_head_packed, out, rows,
                           V, H, stream_);

@@ -146,8 +146,8 @@ class QwenModel : public SessionModel<QwenModel> {
             const std::string& dflash2_dir = "");
   bool fp8_head_mma() const { return fp8_head_mma_; }
   // The draft head's screen (kernels/head_screen.hpp): the candidate cap
-  // the model was built with (QwenLayerStream::draft_head_blocks() under
-  // MTP), 0 = every draft reads the exact head.
+  // the model was built with (native MTP or DFlash2),
+  // 0 = every draft reads the exact head.
   int draft_head_blocks() const { return draft_head_.blocks(); }
   LatentFormat kv_format() const { return kv_format_; }
   static void set_native_attention(bool prefill, bool decode) {
@@ -387,7 +387,7 @@ class QwenModel : public SessionModel<QwenModel> {
   static QwenMoeWeights moe_view(const QwenMoeResident& m);
   float* gdn_rec(int req, int ordinal) const;
   uint16_t* gdn_conv(int req, int ordinal) const;
-  // The GDN recurrent state's checkpoint-and-replay form under MTP
+  // The GDN recurrent state's checkpoint-and-replay form under MTP or DFlash2
   // (kernels/kda.hpp KdaReplay, 2026-09-29): the live buffer holds the
   // state BEFORE the last pass's rows; the pass's rows are kept as their
   // inputs and the next pass replays the accepted ones (gdn_pending_).
@@ -463,7 +463,7 @@ class QwenModel : public SessionModel<QwenModel> {
 
   // The spec snapshot rows (every family, row-major by decode row).
   float* spec_rec_ = nullptr;      // [rows][num_gdn][rec]  (rows = max_decode_rows_; null under the replay form)
-  bool gdn_replay_ = false;             // the checkpoint-and-replay form (MTP stacks with GDN layers)
+  bool gdn_replay_ = false;             // checkpoint-and-replay (speculative stacks with GDN layers)
   uint16_t* gdn_replay_in_ = nullptr;   // [R][num_gdn][rows_cap][row]: the rows the next pass replays
   uint16_t* gdn_replay_save_ = nullptr; // [R][num_gdn][rows_cap][row]: this pass's rows (the commit copies them over `in`)
   int32_t* gdn_pending_ = nullptr;      // [R]: rows to replay (the commit writes the accepted count)

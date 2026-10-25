@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <barrier>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -86,7 +87,8 @@ void check_prefix(Factory make) {
 }
 
 template <class Model, class Factory>
-void check_graph(Factory make, uint16_t port, bool sampled = false) {
+auto check_graph(Factory make, uint16_t port, bool sampled = false, bool screened = false,
+                 std::vector<std::vector<uint8_t>>* states = nullptr) {
   constexpr int world = 2, slots = 2;
   std::vector<std::unique_ptr<dgpp::net::CollectiveBus>> buses;
   for (int rank = 0; rank < world; ++rank) {
@@ -119,6 +121,9 @@ void check_graph(Factory make, uint16_t port, bool sampled = false) {
     try {
       dgpp::BusBoundaryReducer reducer(*buses[rank]);
       auto model = make(&reducer, rank, world);
+      dgpp::PrefixArena<Model> snapshots(model.get(), states ? 1 : 0);
+      if constexpr (requires { model->draft_head_blocks(); })
+        if (screened) require(model->draft_head_blocks() == 1, "drafter did not initialize its requested head screen");
       DGPP_CUDA_OK(cudaHostAlloc(&scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(world),
                                   cudaHostAllocDefault));
       if (sampled) {
@@ -158,10 +163,35 @@ void check_graph(Factory make, uint16_t port, bool sampled = false) {
             auto& out = transcripts[rank][req];
             require(!generated[i].empty(), "graph made no progress");
             out.insert(out.end(), generated[i].begin(), generated[i].end());
+            if (screened) {
+              const int k = model->block_candidates();
+              const int32_t* ids = model->block_candidates_host(req);
+              for (int d = 0; d < 7; ++d) {
+                std::set<int> blocks;
+                for (int c = 0; c < k; ++c) {
+                  require(ids[d * k + c] >= 0 && ids[d * k + c] < 512, "invalid screened candidate");
+                  blocks.insert(ids[d * k + c] / 128);
+                }
+                require(blocks.size() <= world, "drafter bypassed its one-block-per-rank head screen");
+              }
+            }
             std::vector<int32_t> eager;
             require(model->dflash2_draft(req, out.back(), &eager), "eager draft after replay failed");
             require(sampled || std::equal(eager.begin(), eager.end(), model->block_drafts_host(req)),
                     "recorded draft differs from eager draft after restoring the reducer");
+          }
+          if (states && rank == 0 &&
+              model->session_position(live.back()) % model->session_snapshot_align() == 0) {
+            // Snapshot after speculative commits: replay must materialize
+            // exactly the accepted recurrent state, including after a
+            // batched-to-scalar transition and changing verify depths.
+            const int req = live.back();
+            snapshots.snapshot(req, 0, model->session_position(req));
+            DGPP_CUDA_OK(cudaStreamSynchronize(model->stream()));
+            states->emplace_back(snapshots.bytes());
+            DGPP_CUDA_OK(cudaMemcpy(states->back().data(), snapshots.slot_data(0), snapshots.bytes(),
+                                    cudaMemcpyDeviceToHost));
+            snapshots.release(0);
           }
           if (step == 3) {
             engine.close(0);
@@ -182,6 +212,7 @@ void check_graph(Factory make, uint16_t port, bool sampled = false) {
   for (auto& bus : buses) bus->stop();
   for (const auto& error : errors) require(error.empty(), error);
   require(transcripts[0] == transcripts[1], "ranks produced different transcripts");
+  return transcripts[0];
 }
 
 auto flash_factory() {
@@ -213,6 +244,57 @@ DGPP_TEST(dflash2_flash_next_graph_reducer_tp) { check_graph<dgpp::QwenModel>(fl
 DGPP_TEST(dflash2_qwen35_graph_reducer_tp) { check_graph<dgpp::Qwen35Model>(qwen35_factory(), 29979); }
 DGPP_TEST(dflash2_flash_next_sampled_graph_tp) { check_graph<dgpp::QwenModel>(flash_factory(), 29978, true); }
 DGPP_TEST(dflash2_qwen35_sampled_graph_tp) { check_graph<dgpp::Qwen35Model>(qwen35_factory(), 29979, true); }
+
+DGPP_TEST(dflash2_flash_next_head_screen) {
+  struct Restore {
+    dgpp::DraftHeadSettings old = dgpp::draft_head_settings();
+    ~Restore() { dgpp::draft_head_configure(old); }
+  } restore;
+  dgpp::draft_head_configure({1});
+  const auto make = flash_factory();
+  const auto cfg = qwenfx::tiny_config();
+  const auto plan = dgpp::QwenModel::plan_memory(cfg, 128, 1024, 0, 2,
+      dgpp::QwenResidency::Resident, 2, false, 16, false, dgpp::LatentFormat::kBf16,
+      "qwen_dflash2_draft_fixture");
+  const auto item = std::find_if(plan.items.begin(), plan.items.end(),
+      [](const auto& i) { return i.name.find("draft head screen") != std::string::npos; });
+  require(item != plan.items.end() && item->device > 0, "drafter plan omits the requested head screen");
+  check_graph<dgpp::QwenModel>(make, 29978, false, true);
+  check_graph<dgpp::QwenModel>(make, 29978, true, true);
+}
+
+DGPP_TEST(dflash2_flash_next_replay_matches_snapshots) {
+  struct Restore {
+    const char* value = std::getenv("DGPP_QWEN_GDN_REPLAY");
+    bool present = value != nullptr;
+    std::string old = value ? value : "";
+    ~Restore() {
+      if (present) setenv("DGPP_QWEN_GDN_REPLAY", old.c_str(), 1);
+      else unsetenv("DGPP_QWEN_GDN_REPLAY");
+    }
+  } restore;
+  const auto make = flash_factory();
+  const auto cfg = qwenfx::tiny_config();
+  const auto plan = [&] {
+    return dgpp::QwenModel::plan_memory(cfg, 128, 1024, 0, 2,
+        dgpp::QwenResidency::Resident, 2, false, 16, false, dgpp::LatentFormat::kBf16,
+        "qwen_dflash2_draft_fixture");
+  };
+  const auto has_replay = [](const auto& p) {
+    return std::any_of(p.items.begin(), p.items.end(),
+        [](const auto& i) { return i.name.find("GDN replay rows") != std::string::npos && i.device > 0; });
+  };
+  std::vector<std::vector<uint8_t>> replay_states, snapshot_states;
+  setenv("DGPP_QWEN_GDN_REPLAY", "off", 1);
+  require(!has_replay(plan()), "disabled replay remains in the memory plan");
+  const auto reference = check_graph<dgpp::QwenModel>(make, 29978, false, false, &snapshot_states);
+  setenv("DGPP_QWEN_GDN_REPLAY", "on", 1);
+  require(has_replay(plan()), "DFlash2 omits recurrent-state replay from its memory plan");
+  const auto replay = check_graph<dgpp::QwenModel>(make, 29978, false, false, &replay_states);
+  require(replay == reference, "replay changes speculative transcripts");
+  require(snapshot_states.size() >= 2, "too few aligned decode snapshots exercised replay");
+  require(replay_states == snapshot_states, "replay changes materialized session state");
+}
 
 DGPP_TEST(dflash2_qwen35_plan_uses_local_vocabulary) {
   const auto cfg = qwen35fx::tiny_config();
