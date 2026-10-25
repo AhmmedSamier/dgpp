@@ -152,7 +152,7 @@ dgpp_set_common(dgpp_rope_scaling)
 
 # Device ranges whose memory can be returned while the address stays reserved
 # (the CUDA virtual-memory API: the driver library, beside the runtime). The
-# weight loaders' side grants â€” bf12-only residency â€” are built on it.
+# weight loaders' side grants — bf12-only residency — are built on it.
 add_library(dgpp_device_ranges STATIC src/loaders/releasable_range.cpp)
 target_link_libraries(dgpp_device_ranges PUBLIC CUDA::cudart CUDA::cuda_driver)
 dgpp_set_common(dgpp_device_ranges)
@@ -335,7 +335,7 @@ target_include_directories(dgpp_models_mimo_loader PUBLIC ${CMAKE_CURRENT_SOURCE
 target_link_libraries(dgpp_models_mimo_loader PUBLIC dgpp_models_mimo dgpp_loaders CUDA::cudart dgpp_device_ranges)
 dgpp_set_common(dgpp_models_mimo_loader)
 
-# The Flint loader (docs/flint_plan.md Â§2): the shared resident stream over
+# The Flint loader (docs/flint_plan.md §2): the shared resident stream over
 # the family's bindings and TP geometry.
 add_library(dgpp_models_flint_loader STATIC
   src/models/flint/loader.cpp)
@@ -361,7 +361,7 @@ target_link_libraries(dgpp_models_mimo_layers
   PUBLIC dgpp_models_mimo dgpp_models_mimo_loader dgpp_models_mimo_kv dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_mimo_layers)
 
-# The Flint layers and model (docs/flint_plan.md Â§3): the sink-attention
+# The Flint layers and model (docs/flint_plan.md §3): the sink-attention
 # kernels at qk 128, the BF16 dense MLP, QwenMoeLayer's routed chain and
 # shared-expert tail, the MiMo paged pool at 128 / 128.
 add_library(dgpp_models_flint_layers STATIC
@@ -573,7 +573,7 @@ add_test(NAME qwen_forward_smoke_yarn
   COMMAND qwen_forward_test --smoke ${QWEN_FORWARD_FIXTURE} --rope-scaling 2.0:4096)
 set_tests_properties(qwen_forward_smoke_yarn PROPERTIES DEPENDS qwen_forward_fixture)
 # The YaRN ceiling actually crossed (the 2026-09-18 review): a synthetic
-# native limit of 8 under the factor-2 knob (the extended 16) â€” both
+# native limit of 8 under the factor-2 knob (the extended 16) — both
 # forward modes over the final valid position, the session's refusal of
 # work past the extended limit, and a pool below the ceiling.
 add_test(NAME qwen_forward_cross_limit
@@ -590,7 +590,7 @@ add_test(NAME qwen_forward_test
 set_tests_properties(qwen_forward_test PROPERTIES DEPENDS qwen_forward_generate)
 # The AutoRound hybrid's twin (docs/qwen38_autoround_int4_plan.md S2): GPTQ
 # int4 g128 experts, the int8 g128 head and the shipped fp8 dense stack
-# through the same fixture chain â€” the Python reference dequantizes the
+# through the same fixture chain — the Python reference dequantizes the
 # GPTQ triples exactly (no per-weight rounding, the packed core's policy).
 set(QWEN_GPTQ_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen_gptq_fixture)
 add_test(NAME qwen_gptq_fixture COMMAND qwen_forward_test --write-fixture ${QWEN_GPTQ_FIXTURE} --gptq)
@@ -609,7 +609,7 @@ set_tests_properties(qwen_gptq_forward_test PROPERTIES DEPENDS qwen_gptq_generat
 # The QAD export's twin (issue #113, local-inference-lab/Qwen3.8-Flash-Next-
 # NVFP4): the MXFP8 dense stack on the 1 x 32 grid, the NVFP4 n-gram table,
 # F32 norms and weight-only NVFP4 draft experts through the same fixture
-# chain â€” the Python reference dequantizes every form exactly (power-of-two
+# chain — the Python reference dequantizes every form exactly (power-of-two
 # scales, the e2m1 x e4m3 x global chain in modelopt's order).
 set(QWEN_QAD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/qwen_qad_fixture)
 add_test(NAME qwen_qad_fixture COMMAND qwen_forward_test --write-fixture ${QWEN_QAD_FIXTURE} --qad)
@@ -762,7 +762,7 @@ target_link_libraries(dsv4_bind_check PRIVATE dgpp_models_dsv4 dgpp_loaders)
 dgpp_set_common(dsv4_bind_check)
 
 # M5 d4 at real scale: the shard-parity gate (loader-vs-bind bitwise +
-# replicated digest + byte reconcile) as a deployment command â€” the same
+# replicated digest + byte reconcile) as a deployment command — the same
 # driver the CI glm_tp_test pins at the fixture, against the real
 # checkpoint via --model (HF hub cache). No bus dependency.
 add_executable(glm_shard_parity apps/glm_shard_parity.cpp)
@@ -775,7 +775,7 @@ target_link_libraries(glm_stream_check PRIVATE dgpp_models_glm_loader)
 dgpp_set_common(glm_stream_check)
 
   # The small-collective stall repro (engine hunt instrument, not a CI gate
-  # until the fix lands â€” see the file comment).
+  # until the fix lands — see the file comment).
   add_executable(bus_small_repro apps/bus_small_repro.cu)
   target_link_libraries(bus_small_repro PRIVATE dgpp_bus CUDA::cudart
                                                 Threads::Threads)
@@ -823,7 +823,7 @@ if(DGPP_ENABLE_IBV)
   target_link_libraries(bus_check PRIVATE dgpp_bus)
   dgpp_set_common(bus_check)
 
-  # M5 deliverable 5: the transport regression command (NICâ†’GPU visibility
+  # M5 deliverable 5: the transport regression command (NIC→GPU visibility
   # on every node pair after driver/firmware changes).
   add_executable(nic_regress apps/nic_regress.cpp)
   target_link_libraries(nic_regress PRIVATE dgpp_bus CUDA::cudart Threads::Threads)
@@ -873,7 +873,7 @@ if(DGPP_ENABLE_IBV)
                                             CUDA::cudart Threads::Threads)
   dgpp_set_common(glm_gen_check)
 
-  # M6 Stage 4a: the OpenAI-compatible serving app (world 1 â€” the local
+  # M6 Stage 4a: the OpenAI-compatible serving app (world 1 — the local
   # reference engine; Stage 4b adds the fabric journal + resident TP).
   # The server binary: target dgpp_serve_app, installed as dgpp-serve (the
   # layout split of 2026-09-06; dgpp_serve is the library it links).
@@ -996,9 +996,9 @@ add_test(NAME unit_tests COMMAND unit_tests)
 target_sources(unit_tests PRIVATE tests/unit/site_options_test.cpp)
 
 # The vLLM YaRN oracle, offline (2026-09-19): tests/python/qwen_yarn_oracle.py
-# --emit records the recipe's rope goldens â€” the YaRN table, the attention
+# --emit records the recipe's rope goldens — the YaRN table, the attention
 # mscale, the bf16 cos/sin cache rows and rotated Q/K at several positions,
-# for the recipe and four non-default parameter combinations â€” under the
+# for the recipe and four non-default parameter combinations — under the
 # digest of the container that produced them, and this gate compares the
 # engine's own table builder, mscale and rotation against that file. No vLLM,
 # no container, no GPU; refresh the fixture in the container when vLLM's yarn
@@ -1053,7 +1053,7 @@ add_test(NAME dsv41_prompt_test
 set_tests_properties(dsv41_prompt_test PROPERTIES SKIP_RETURN_CODE 2)
 # The EXL3 trellis host codec (models/exl3_matrix.hpp) against the numpy
 # reference's pins on the LibertAIDAI DeepSeek-V4.1-Flash-1017 pack
-# (docs/deepseek_v41_flash_exl3_plan.md Â§2.4). CUDA-free.
+# (docs/deepseek_v41_flash_exl3_plan.md §2.4). CUDA-free.
 add_executable(exl3_codec_test tests/host/exl3_codec_test.cpp)
 target_include_directories(exl3_codec_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(exl3_codec_test PRIVATE dgpp_common)
@@ -1108,9 +1108,9 @@ add_test(NAME flint_chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/flint_chat_template_goldens.jsonl)
 set_tests_properties(flint_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 
-# M6 Stage 4: the serving capstone â€” HTTP/SSE over epoll + the OpenAI
+# M6 Stage 4: the serving capstone — HTTP/SSE over epoll + the OpenAI
 # generation service (host-only; the engine adapters live in the apps,
-# dgpp_serve never links CUDA â€” CI runs the service gate with a fake
+# dgpp_serve never links CUDA — CI runs the service gate with a fake
 # engine and frontend, no model cache). Stage 4b adds the admission
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
 add_library(dgpp_serve STATIC
@@ -1136,7 +1136,7 @@ dgpp_set_common(http_server_test)
 add_test(NAME http_server_test COMMAND http_server_test)
 
 # M6 Stage 4 service gate: the REAL HTTP/SSE service over a fake engine
-# + fake frontend â€” the OpenAI surface, host-only, always runs.
+# + fake frontend — the OpenAI surface, host-only, always runs.
 add_executable(serve_test tests/host/serve_test.cpp)
 target_link_libraries(serve_test PRIVATE dgpp_serve Threads::Threads)
 dgpp_set_common(serve_test)
@@ -1145,7 +1145,7 @@ add_test(NAME serve_test_wake COMMAND serve_test)
 set_tests_properties(serve_test_wake PROPERTIES ENVIRONMENT "DGPP_TEST_STREAM_WAKE=1")
 
 # M6 Stage 4b gate: the admission journal (the metronome), both loops,
-# and the Â§11 identity â€” real localhost TCP + real HTTP, engine faked
+# and the §11 identity — real localhost TCP + real HTTP, engine faked
 # (host-only, always runs).
 add_executable(fabric_serve_test tests/host/fabric_serve_test.cpp)
 target_link_libraries(fabric_serve_test PRIVATE dgpp_serve
@@ -1155,7 +1155,7 @@ add_test(NAME fabric_serve_test COMMAND fabric_serve_test)
 add_test(NAME fabric_serve_test_wake COMMAND fabric_serve_test)
 set_tests_properties(fabric_serve_test_wake PROPERTIES ENVIRONMENT "DGPP_TEST_STREAM_WAKE=1")
 
-# M6 Stage 2b: the scheduler policy gate (host, no model, no skip path â€”
+# M6 Stage 2b: the scheduler policy gate (host, no model, no skip path —
 # the FakeEngine replaces the engine, so the policy is pinned everywhere
 # CI runs).
 add_executable(scheduler_test tests/host/scheduler_test.cpp)
@@ -1397,7 +1397,7 @@ function(dsv41_forward_chain S FIXTURE_ENV)
   add_test(NAME dsv41_forward_test${S}
     COMMAND ${ENV} $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${FIXTURE} --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_ref${S}.dump)
   set_tests_properties(dsv41_forward_test${S} PROPERTIES DEPENDS dsv41_forward_generate_teacher${S})
-  # The bounded prefill (plan Â§1.8, the production mode): the same chain
+  # The bounded prefill (plan §1.8, the production mode): the same chain
   # against the reference's --prefill bounded walk (the decoder over the
   # last window rows), end to end then teacher-forced.
   add_test(NAME dsv41_forward_generate_bounded${S}
@@ -1725,7 +1725,7 @@ set_tests_properties(mimo_forward_generate PROPERTIES DEPENDS mimo_forward_fixtu
 # fixture may flip and cascade: the rows from the first flip on are
 # reported, not judged), writing the engine's states; then the reference
 # teacher-forced on them (every layer fed the engine's own input) under the
-# strict budgets â€” the DeepSeek ladder's design.
+# strict budgets — the DeepSeek ladder's design.
 add_test(NAME mimo_forward_test_e2e
   COMMAND ${CMAKE_COMMAND} -E env DGPP_MIMO_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/mimo_engine_states.bin
           $<TARGET_FILE:mimo_forward_test> --checkpoint-dir ${MIMO_FORWARD_FIXTURE}
@@ -1868,7 +1868,7 @@ add_test(NAME glm_dsa_forward_smoke_attn4 COMMAND glm_dsa_forward_test --smoke $
 set_tests_properties(glm_dsa_forward_smoke_attn4 PROPERTIES DEPENDS glm_dsa_forward_fixture_attn4)
 # (No decode gate on this fixture: its random 4-bit attention leaves the
 # indexer at near-uniform logits, 10 of 13 decode rows flip their selection
-# and the kept rows sit downstream of the flips â€” the fixture lesson of
+# and the kept rows sit downstream of the flips — the fixture lesson of
 # docs/glm53_plan.md; the 4-bit decode path is gated on the real weights by
 # the teacher-forced forward check under --attention-weights int4.)
 add_test(NAME glm_dsa_forward_generate_attn4
@@ -2123,7 +2123,7 @@ add_test(NAME qwen_engine_row_independent
 # The graph engines with the bf16 decode weights' 12-bit companions on
 # (engine.bf16_weights; DGPP_BF12 overrides the process setting): the packed
 # multi launch and the packed GEMVs under capture and replay, against the
-# same references â€” the form is bitwise, so every gate holds unchanged.
+# same references — the form is bitwise, so every gate holds unchanged.
 add_test(NAME qwen_engine_bf12
   COMMAND ${CMAKE_COMMAND} -E env DGPP_BF12=both $<TARGET_FILE:qwen_engine_test>)
 # The draft head's screen (engine.draft_head screen; kernels/head_screen.hpp)
@@ -2255,7 +2255,7 @@ add_test(NAME glm_loader_test COMMAND glm_loader_test)
 set_tests_properties(glm_loader_test PROPERTIES SKIP_RETURN_CODE 2)
 
 # Scale-aware GEMM parity (M4): block edges, saturation, NaN policy;
-# --checkpoint-dir adds real-checkpoint slices (manual deployment test â€”
+# --checkpoint-dir adds real-checkpoint slices (manual deployment test —
 # the checkpoint-runner TU is host-only, minijson does not mix with nvcc).
 add_executable(bf16_gemv_test tests/cuda/bf16_gemv_test.cu)
 target_include_directories(bf16_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -2368,7 +2368,7 @@ dgpp_set_common(glm_mhc_test)
 add_test(NAME glm_mhc_test COMMAND glm_mhc_test)
 set_tests_properties(glm_mhc_test PROPERTIES SKIP_RETURN_CODE 2)
 
-# The on-device greedy pick (DESIGN Â§9): local top-2 vs glm_sample::local_max,
+# The on-device greedy pick (DESIGN §9): local top-2 vs glm_sample::local_max,
 # verdict vs merge_greedy/judge_verify over a simulated world, digest check.
 add_executable(det_math_test tests/cuda/det_math_test.cu)
 target_include_directories(det_math_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
