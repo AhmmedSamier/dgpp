@@ -321,7 +321,7 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
     host.gemm_ws = gemm_ws_;
     host.gemm_ws_bytes = gemm_ws_bytes_;
     host.gemm_rows = [this](int rows, bool decode) { qwen_configure_gemm_rows(gemm_, rows, decode); };
-    host.boundary = boundary_;
+    host.boundary = [this] { return boundary_; };
     host.head = [this](const uint16_t* hidden, float* out, int rows) { df_head(hidden, out, rows); };
     df_.init(host, dflash2_dir);
     // The tap site's staging: one tap's mean over the hc streams (the mix

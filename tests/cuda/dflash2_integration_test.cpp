@@ -1,0 +1,232 @@
+// Shared drafter lifecycle: prefix snapshots and eager/recorded reducer changes.
+#include <algorithm>
+#include <barrier>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "common/test.hpp"
+#include "engine/graph_engine.hpp"
+#include "engine/prefix_arena.hpp"
+#include "engine/tp_bus.hpp"
+#include "models/qwen/forward.hpp"
+#include "models/qwen/model35.hpp"
+#include "qwen35_fixture.hpp"
+#include "qwen_dflash2_fixture.hpp"
+
+namespace {
+void require(bool ok, const std::string& message) {
+  if (!ok) throw std::runtime_error(message);
+}
+
+std::vector<int64_t> prompt(int rows, int salt) {
+  std::vector<int64_t> out(rows);
+  for (int i = 0; i < rows; ++i) out[i] = 2 + (37 * i + salt * 101) % 509;
+  return out;
+}
+
+template <class Model>
+auto draft_plane(Model& model, int layer) {
+  if constexpr (requires { model.pool().draft_view(layer); })
+    return model.pool().draft_view(layer);
+  else
+    return model.pool().view(1 + layer);  // the tiny Qwen35 target has one full layer
+}
+
+template <class Model>
+std::vector<uint16_t> context(Model& model, int req) {
+  DGPP_CUDA_OK(cudaStreamSynchronize(model.stream()));
+  const int rows = static_cast<int>(model.session_position(req));
+  constexpr int width = 2 * 128;  // the fixture's two draft KV heads
+  const auto* table = model.pool().request_table_row(req);
+  const int block = model.kv_block_tokens();
+  std::vector<uint16_t> out;
+  for (int layer = 0; layer < 2; ++layer) {
+    const auto plane = draft_plane(model, layer);
+    for (const uint16_t* data : {plane.k_cache, plane.v_cache}) {
+      const size_t start = out.size();
+      out.resize(start + rows * width);
+      for (int r = 0; r < rows; ++r) {
+        const size_t physical = static_cast<size_t>(table[r / block]) * block + r % block;
+        DGPP_CUDA_OK(cudaMemcpy(out.data() + start + r * width, data + physical * width,
+                                width * sizeof(uint16_t), cudaMemcpyDeviceToHost));
+      }
+    }
+  }
+  return out;
+}
+
+template <class Model, class Factory>
+void check_prefix(Factory make) {
+  auto model = make(nullptr, 0, 1);
+  dgpp::PrefixArena<Model> arena(model.get(), 1);
+  for (int round = 0; round < 3; ++round) {
+    // A neighboring live request owns physical block zero. The snapshot
+    // includes both a shared full block and an independently copied tail.
+    model->session_prefill(0, prompt(40, 1 + round));
+    model->session_prefill(1, prompt(80, 4 + round));
+    const auto peer = context(*model, 0), original = context(*model, 1);
+    arena.snapshot(1, 0, 80);
+    require(context(*model, 0) == peer, "snapshot overwrote a neighboring request's draft context");
+    require(context(*model, 1) == original, "snapshot overwrote the source draft context");
+    model->session_close(1);
+    arena.attach(1, 0);
+    require(context(*model, 1) == original, "attached draft context differs from the cold prefix");
+    require(context(*model, 0) == peer, "attach overwrote a neighboring request's draft context");
+    // A subsequent eager redraft also exercises the restored table.
+    std::vector<int32_t> drafts;
+    require(model->dflash2_draft(1, 7, &drafts) && drafts.size() == 7, "attached prefix cannot draft");
+    model->session_close(0);
+    model->session_close(1);
+    arena.release(0);
+    require(model->kv_blocks_in_use() == 0, "snapshot or attach leaked draft blocks");
+  }
+}
+
+template <class Model, class Factory>
+void check_graph(Factory make, uint16_t port, bool sampled = false) {
+  constexpr int world = 2, slots = 2;
+  std::vector<std::unique_ptr<dgpp::net::CollectiveBus>> buses;
+  for (int rank = 0; rank < world; ++rank) {
+    dgpp::net::BusOptions o;
+    o.world_size = world;
+    o.my_rank = rank;
+    o.rendezvous_port = port;
+    o.rendezvous_host = rank ? "127.0.0.1" : "";
+    o.rendezvous_timeout_ms = 20000;
+    o.lat_slots = o.bulk_slots = 8;
+    o.lat_slot_bytes = o.bulk_slot_bytes = 262144;
+    o.qp_depth = 1024;
+    o.completion_timeout_ms = 10000;
+    o.consumer_deadline_s = 60;
+    o.launch_consumers = false;
+    buses.push_back(std::make_unique<dgpp::net::CollectiveBus>(o));
+  }
+  std::vector<std::string> errors(world);
+  std::vector<std::thread> workers;
+  for (int rank = 0; rank < world; ++rank)
+    workers.emplace_back([&, rank] { (void)buses[rank]->start(&errors[rank]); });
+  for (auto& worker : workers) worker.join();
+  for (const auto& error : errors) require(error.empty(), "start bus: " + error);
+  workers.clear();
+  std::barrier ready(world);
+  std::vector<std::vector<std::vector<int32_t>>> transcripts(world);
+  for (int rank = 0; rank < world; ++rank) workers.emplace_back([&, rank] {
+    uint16_t *scratch = nullptr, *prefix = nullptr, *gather = nullptr;
+    bool arrived = false;
+    try {
+      dgpp::BusBoundaryReducer reducer(*buses[rank]);
+      auto model = make(&reducer, rank, world);
+      DGPP_CUDA_OK(cudaHostAlloc(&scratch, sizeof(uint16_t) * dgpp::kPickScratchElems(world),
+                                  cudaHostAllocDefault));
+      if (sampled) {
+        DGPP_CUDA_OK(cudaHostAlloc(&prefix, 2 * dgpp::fabric_sampling_prefix_scratch_elems(world),
+                                    cudaHostAllocDefault));
+        DGPP_CUDA_OK(cudaHostAlloc(&gather, 2 * dgpp::sampling_gather_scratch_elems(512),
+                                    cudaHostAllocDefault));
+      }
+      {
+        dgpp::GraphEngineAdapter<Model> engine(model.get(), buses[rank].get(), rank, world,
+                                               scratch, 512, 60000, 2, prefix, gather);
+        require(model->dflash2_proposals_armed() == sampled, "engine did not arm sampled draft proposals");
+        engine.configure_verify_schedule(true, 8.f, 0.045f, 1, 28.f, false, 3);
+        int tick = 0;
+        engine.set_verify_depth_hook([&](int, int, const float*, int) {
+          const int depths[] = {1, 4, 7};
+          return depths[tick++ % 3];
+        });
+        arrived = true;
+        ready.arrive_and_wait();
+        engine.warm_captures(prompt(4, 0));
+        transcripts[rank].resize(slots);
+        std::vector<int> live{0, 1};
+        for (int req : live) {
+          dgpp::sample::Params params;
+          params.temperature = sampled ? .8f : 0.f;
+          params.top_k = 16;
+          engine.configure_sampling(req, params, 1234 + req);
+          transcripts[rank][req].push_back(engine.prefill(req, prompt(48 + req * 4, req)));
+        }
+        for (int step = 0; step < 8; ++step) {
+          for (int req : live) engine.reserve(req, model->session_position(req) + 8);
+          const auto generated = engine.step_batch(live);
+          engine.drain();
+          for (size_t i = 0; i < live.size(); ++i) {
+            const int req = live[i];
+            auto& out = transcripts[rank][req];
+            require(!generated[i].empty(), "graph made no progress");
+            out.insert(out.end(), generated[i].begin(), generated[i].end());
+            std::vector<int32_t> eager;
+            require(model->dflash2_draft(req, out.back(), &eager), "eager draft after replay failed");
+            require(sampled || std::equal(eager.begin(), eager.end(), model->block_drafts_host(req)),
+                    "recorded draft differs from eager draft after restoring the reducer");
+          }
+          if (step == 3) {
+            engine.close(0);
+            live.erase(live.begin());  // scalar replay after fixed-batch replays
+          }
+        }
+        for (int req : live) engine.close(req);
+      }
+    } catch (const std::exception& e) {
+      errors[rank] = e.what();
+      if (!arrived) ready.arrive_and_wait();
+    }
+    if (scratch) cudaFreeHost(scratch);
+    if (prefix) cudaFreeHost(prefix);
+    if (gather) cudaFreeHost(gather);
+  });
+  for (auto& worker : workers) worker.join();
+  for (auto& bus : buses) bus->stop();
+  for (const auto& error : errors) require(error.empty(), error);
+  require(transcripts[0] == transcripts[1], "ranks produced different transcripts");
+}
+
+auto flash_factory() {
+  const std::string dir = "qwen_dflash2_target_fixture", draft = "qwen_dflash2_draft_fixture";
+  const auto cfg = qwenfx::tiny_config();
+  qwenfx::write_fixture_for(cfg, dir);
+  qwenfx::write_dflash2_fixture(draft);
+  return [=](dgpp::BoundaryReducer* reducer, int rank, int world) {
+    return std::make_unique<dgpp::QwenModel>(cfg, dir, 128, 1024, dgpp::QwenResidency::Resident,
+        reducer, rank, world, 2, false, 16, false, false, dgpp::LatentFormat::kBf16, draft);
+  };
+}
+
+auto qwen35_factory() {
+  const std::string dir = "qwen35_dflash2_target_fixture", draft = "qwen_dflash2_draft_fixture";
+  const auto cfg = qwen35fx::tiny_config();
+  qwen35fx::write_fixture(dir);
+  qwenfx::write_dflash2_fixture(draft);
+  return [=](dgpp::BoundaryReducer* reducer, int rank, int world) {
+    return std::make_unique<dgpp::Qwen35Model>(cfg, dir, 128, 1024, dgpp::LoaderResidency::Resident,
+        reducer, rank, world, 2, 16, false, draft);
+  };
+}
+}  // namespace
+
+DGPP_TEST(dflash2_flash_next_prefix_snapshot) { check_prefix<dgpp::QwenModel>(flash_factory()); }
+DGPP_TEST(dflash2_qwen35_prefix_snapshot) { check_prefix<dgpp::Qwen35Model>(qwen35_factory()); }
+DGPP_TEST(dflash2_flash_next_graph_reducer_tp) { check_graph<dgpp::QwenModel>(flash_factory(), 29978); }
+DGPP_TEST(dflash2_qwen35_graph_reducer_tp) { check_graph<dgpp::Qwen35Model>(qwen35_factory(), 29979); }
+DGPP_TEST(dflash2_flash_next_sampled_graph_tp) { check_graph<dgpp::QwenModel>(flash_factory(), 29978, true); }
+DGPP_TEST(dflash2_qwen35_sampled_graph_tp) { check_graph<dgpp::Qwen35Model>(qwen35_factory(), 29979, true); }
+
+DGPP_TEST(dflash2_qwen35_plan_uses_local_vocabulary) {
+  const auto cfg = qwen35fx::tiny_config();
+  const std::string draft = "qwen_dflash2_draft_fixture";
+  qwenfx::write_dflash2_fixture(draft);
+  for (int world : {1, 2}) {
+    const auto plan = dgpp::Qwen35Model::plan_memory(cfg, 128, 1024, 0, world,
+        dgpp::LoaderResidency::Resident, 2, false, 16, draft);
+    const auto it = std::find_if(plan.items.begin(), plan.items.end(),
+        [](const auto& item) { return item.name == "dflash2 head logits"; });
+    require(it != plan.items.end(), "plan omits drafter head logits");
+    require(it->device == 16 * (cfg.vocab_size / world) * sizeof(float),
+            "plan does not shard drafter head logits with the target head");
+  }
+}
+
+int main() { return dgpp::test::run_all(); }

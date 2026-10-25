@@ -1637,6 +1637,15 @@ dgpp_set_common(qwen_dflash2_test)
 add_test(NAME qwen_dflash2_test COMMAND qwen_dflash2_test)
 set_tests_properties(qwen_dflash2_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
 
+add_executable(dflash2_integration_test tests/cuda/dflash2_integration_test.cpp)
+target_include_directories(dflash2_integration_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dflash2_integration_test PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(dflash2_integration_test)
+add_test(NAME dflash2_integration_test COMMAND dflash2_integration_test)
+set_tests_properties(dflash2_integration_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
+
+add_test(NAME spec_ab_probe_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/spec_ab_probe_test.py)
+
 add_executable(qwen35_loader_smoke tests/cuda/qwen35_loader_smoke.cpp)
 target_include_directories(qwen35_loader_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(qwen35_loader_smoke PRIVATE dgpp_models_qwen_loader dgpp_models_qwen dgpp_kernels CUDA::cudart Threads::Threads)
@@ -2638,7 +2647,7 @@ endforeach()
 set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
-set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
+set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test spec_ab_probe_test
   site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test cluster_process_swap_test PROPERTIES LABELS "host;python")
 set_tests_properties(cluster_process_swap_systemd_test PROPERTIES LABELS "systemd" TIMEOUT 180)
 if(TARGET dgpp_serve_app)

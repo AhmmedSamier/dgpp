@@ -51,6 +51,21 @@ use the existing session numerical tier and certify changed argmax near ties;
 same-shape isolation and graph token comparisons remain exact. Qwen4Exp retains
 its two-rank `qwen_engine_test` coverage. Run GPU checks serially with production
 stopped, then restore and verify the original deployment.
+`dflash2_integration_test` checks both Flash-Next and Qwen35 with the shared
+v2 drafter. Partial-block snapshots must preserve every draft K/V row of
+the restored request and its live neighbor, including repeated slot reuse.
+Two-rank graph tests alternate scalar and batched scheduled verification
+with eager redrafts, comparing the recorded proposals and cross-rank
+transcripts. These tests exercise both installation and restoration of the
+capture reducer. Sampled graph runs also require the engine to arm the
+selector's proposal distributions and agree across ranks. The memory-plan
+check requires the drafter's head logits to use the local vocabulary slice.
+Run them with `qwen_dflash2_test`, `dflash2_kernels_test`
+and `qwen35_tp_test` on idle hardware; the latter retains DFlash v1 coverage.
+`spec_ab_probe_test` checks bonus-inclusive mean acceptance length, delayed
+completion counters, idle-engine enforcement, model identity and the shared
+corpus without making network requests.
+
 `qwen35_moe_*` adds the ModelOpt MoE fixture, row/group invariance and
 independent reference/teacher comparisons. `qwen35_tp_test` covers MoE
 worlds 1/2/4, native MTP graphs at worlds 2/4, and DFlash v1 graph

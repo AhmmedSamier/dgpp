@@ -628,7 +628,7 @@ Qwen35Model::Qwen35Model(const Qwen35TextConfig& cfg, const std::string& checkpo
     host.gemm_ws = gemm_ws_;
     host.gemm_ws_bytes = gemm_ws_bytes_;
     host.gemm_rows = [this](int rows, bool decode) { configure_gemm_rows(rows, decode); };
-    host.boundary = boundary_;
+    host.boundary = [this] { return boundary_; };
     host.head = [this](const uint16_t* hidden, float* out, int rows) {
       head_gemv(hidden, out, rows, stream_, /*draft=*/true);
     };
@@ -1661,7 +1661,8 @@ MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens,
     // weights, the feature path and the block scratch exactly as the
     // component's init allocates them.
     std::vector<std::pair<std::string, size_t>> dflash2_entries;
-    DFlash2Drafter::plan_entries(*dfcfg, world, decode_rows, max_tokens, max_requests, cfg.vocab_size,
+    const auto vocab_count = Qwen35LocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count;
+    DFlash2Drafter::plan_entries(*dfcfg, world, decode_rows, max_tokens, max_requests, vocab_count,
                                  dflash2_fp8_, &dflash2_entries);
     for (const auto& e : dflash2_entries) plan.add(e.first, e.second);
   }
@@ -2726,7 +2727,7 @@ void Qwen35Model::dflash2_draft_batch(const std::vector<int>& reqs,
       (void)dflash1_draft(reqs[s], bonuses[s], &(*drafts)[s]);
     return;
   }
-    df_.draft_batch(reqs, bonuses, drafts);
+  df_.draft_batch(reqs, bonuses, drafts);
 }
 
 // The static padded layout the captured verify stages: every slot's fed rows

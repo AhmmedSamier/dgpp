@@ -241,7 +241,15 @@ class QwenModel : public SessionModel<QwenModel> {
   // replay's end event) and the mask rows' candidate lists (the
   // acceptance diagnostics).
   const int32_t* block_drafts_host(int req) const { return df_.drafts_host(req); }
+  int block_candidates() const { return df_.cfg().selector_top_k; }
   const int32_t* block_candidates_host(int req) const { return df_.candidates_host(req); }
+  // Let the engine arm the shared selector's sampled proposal distribution
+  // before capture, so verification can apply the proposal ratio rule.
+  void dflash2_arm_proposals(const SampleSpec* specs, DraftProposal* proposals,
+                             DraftProposal* proposals_host, int stride) {
+    df_.arm_proposals(specs, proposals, proposals_host, stride);
+  }
+  bool dflash2_proposals_armed() const { return df_.proposals_armed(); }
   // The selector's confidence per draft, [max_requests][drafts], written
   // by every walk (engine.mtp_schedule's input with a drafter).
   const float* dflash2_confidence() const { return df_.confidence(); }

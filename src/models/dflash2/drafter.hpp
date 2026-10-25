@@ -73,7 +73,9 @@ struct DFlash2Host {
   void* gemm_ws = nullptr;
   size_t gemm_ws_bytes = 0;
   std::function<void(int rows, bool decode)> gemm_rows = nullptr;
-  BoundaryReducer* boundary = nullptr;  // world > 1 (null at world 1)
+  // Read the model's current reducer: capture temporarily replaces the
+  // eager reducer, then restores it before the next eager redraft.
+  std::function<BoundaryReducer*()> boundary;
   // The mask rows' head rows into `out` (rows x vocab_count), the exact
   // product (the selector walk reads the top-K off it): the family's
   // served-head dispatch, with or without its draft screen.

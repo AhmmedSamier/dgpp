@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 #include <cuda_runtime.h>
 
@@ -91,13 +93,13 @@ class DraftKvPlanes {
   // (the pool's copy protocol).
   void copy_block(int32_t src, int32_t dst, cudaStream_t stream) const {
     if (layers_ == 0) return;
-    const size_t row = static_cast<size_t>(kv_heads_) * dim_;
-    const size_t span = static_cast<size_t>(block_tokens_) * row * 2;
+    const size_t block_elems = static_cast<size_t>(block_tokens_) * kv_heads_ * dim_;
+    const size_t span = block_elems * sizeof(uint16_t);
     for (int l = 0; l < layers_; ++l) {
       const View v = view(l);
-      DGPP_CUDA_OK(cudaMemcpyAsync(v.k + static_cast<size_t>(dst) * row, v.k + static_cast<size_t>(src) * row,
+      DGPP_CUDA_OK(cudaMemcpyAsync(v.k + static_cast<size_t>(dst) * block_elems, v.k + static_cast<size_t>(src) * block_elems,
                                    span, cudaMemcpyDeviceToDevice, stream));
-      DGPP_CUDA_OK(cudaMemcpyAsync(v.v + static_cast<size_t>(dst) * row, v.v + static_cast<size_t>(src) * row,
+      DGPP_CUDA_OK(cudaMemcpyAsync(v.v + static_cast<size_t>(dst) * block_elems, v.v + static_cast<size_t>(src) * block_elems,
                                    span, cudaMemcpyDeviceToDevice, stream));
     }
   }

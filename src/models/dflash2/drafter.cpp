@@ -50,6 +50,8 @@ void DFlash2Drafter::init(const DFlash2Host& h, const std::string& dir) {
   if (!cfg_.tp_divisible(h.world))
     throw std::invalid_argument(
         "DFlash2: the drafter's heads / kv heads / MLP rows must divide across the world");
+  if (h.world > 1 && (!h.boundary || h.boundary() == nullptr))
+    throw std::invalid_argument("DFlash2: a TP world needs the host's current boundary reducer");
   h_ = h;
   tap_.assign(h.num_target_layers + 1, -1);
   for (size_t t = 0; t < cfg_.target_layer_ids.size(); ++t)
@@ -320,20 +322,21 @@ void DFlash2Drafter::block_layers(int slots, const int* reqs, bool capture) {
   const int I = df_i_;
   const float eps = cfg_.rms_norm_eps;
   const int R = slots * QR;
+  BoundaryReducer* boundary = h_.boundary ? h_.boundary() : nullptr;
   // The sharded drafter's boundary folds (the host run's pattern): the o
   // and down projections' partial [R, H] outputs summed across the ranks
   // before the output-side convs read them.
   const auto stage = [&](uint16_t* fallback, int width) -> uint16_t* {
-    if (!h_.boundary) return fallback;
-    uint16_t* s = h_.boundary->stage(R, width);
+    if (!boundary) return fallback;
+    uint16_t* s = boundary->stage(R, width);
     if (s == nullptr && capture)
       throw std::runtime_error("dflash2 draft: a capture fold does not fit the recorder's staged buffer");
     return s ? s : fallback;
   };
   const auto fold = [&](uint16_t* buf, int width) {
-    if (!h_.boundary) return;
+    if (!boundary) return;
     if (!capture) DGPP_CUDA_OK(cudaStreamSynchronize(h_.stream));  // the host-driven fold's contract
-    h_.boundary->reduce(buf, R, width);
+    boundary->reduce(buf, R, width);
   };
   const int32_t* tables = h_.device_tables;
   const int bpr = h_.total_blocks;
@@ -441,9 +444,10 @@ void DFlash2Drafter::block_select(int slots, const int* reqs, bool capture) {
   h_.head(df_h_, df_logits_, R);
   dflash2_topk_f32(df_logits_, df_ids_, df_sc_, V, R, topk, h_.stream, df_topk_ws_, df_topk_ws_bytes_);
   if (h_.world > 1) {
+    BoundaryReducer* boundary = h_.boundary();
     const int rows = R;
     const size_t elems = dflash2_topk_table_elems(rows, topk, h_.world);
-    uint16_t* table = h_.boundary->stage(1, static_cast<int>(elems));
+    uint16_t* table = boundary->stage(1, static_cast<int>(elems));
     if (table == nullptr) {
       if (capture)
         throw std::runtime_error("dflash2 draft: the top-K gather does not fit the recorder's staged buffer");
@@ -451,7 +455,7 @@ void DFlash2Drafter::block_select(int slots, const int* reqs, bool capture) {
     }
     dflash2_topk_stage(df_ids_, df_sc_, rows, topk, h_.vocab_begin, h_.rank, h_.world, table, h_.stream);
     if (!capture) DGPP_CUDA_OK(cudaStreamSynchronize(h_.stream));  // the host-driven fold's contract
-    h_.boundary->reduce(table, 1, static_cast<int>(elems));
+    boundary->reduce(table, 1, static_cast<int>(elems));
     dflash2_topk_merge(table, rows, topk, h_.world, df_ids_, df_sc_, h_.stream);
   }
   h_.gemm->matmul(df_h_, w_.hidden_projection, df_hidden32_, R, rank, H, DType::BF16, GemmOut::F32,
