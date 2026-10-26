@@ -181,6 +181,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/bf12_gemv.cu
   src/kernels/bf12_companions.cpp
   src/kernels/mma_gemv.cu
+  src/kernels/exl3_gemv.cu
   src/kernels/dense_mma_bf16w.cu
   src/kernels/dense_fp4_decode.cu
   src/kernels/l2_prefetch.cu
@@ -462,6 +463,17 @@ target_include_directories(dgpp_models_dsv4_layers PUBLIC ${CMAKE_CURRENT_SOURCE
 target_link_libraries(dgpp_models_dsv4_layers PUBLIC dgpp_models_dsv4_loader dgpp_models_dsv4_attn dgpp_models_moe dgpp_models_glm dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_dsv4_layers)
 
+# The DFlash2 block drafter (family-agnostic): the drafter model's config,
+# the standalone weight load, the shared execution (models/dflash2/
+# drafter.hpp) and the pool's draft planes. The target families host one
+# drafter over their own pool planes, tap sites and head dispatch.
+add_library(dgpp_models_dflash2 STATIC
+  src/models/dflash2/dflash2.cpp
+  src/models/dflash2/drafter.cpp)
+target_include_directories(dgpp_models_dflash2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dflash2 PUBLIC dgpp_kernels dgpp_loaders dgpp_common CUDA::cudart)
+dgpp_set_common(dgpp_models_dflash2)
+
 # Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
   src/models/qwen/config.cpp
@@ -483,10 +495,9 @@ add_library(dgpp_models_qwen_loader STATIC
   src/models/qwen/vision.cpp
   src/models/qwen/loader.cpp
   src/models/qwen/loader35.cpp
-  src/models/qwen/dflash2.cpp
   src/models/qwen/dflash.cpp)
 target_include_directories(dgpp_models_qwen_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders dgpp_kernels CUDA::cudart dgpp_device_ranges)
+target_link_libraries(dgpp_models_qwen_loader PUBLIC dgpp_models_qwen dgpp_loaders dgpp_kernels CUDA::cudart dgpp_device_ranges dgpp_models_dflash2)
 dgpp_set_common(dgpp_models_qwen_loader)
 
 # The Qwen layers (Q3): the MoE on the shared MoE layer, with its oracle.
@@ -923,6 +934,8 @@ add_executable(unit_tests
   tests/unit/log_test.cpp
   tests/unit/process_memory_test.cpp
   tests/unit/minijson_test.cpp
+  tests/unit/chat_template_test.cpp
+  tests/unit/chat_template_limits_test.cpp
   tests/unit/prometheus_test.cpp
   tests/unit/utf8_test.cpp
   tests/unit/arena_test.cpp
@@ -1040,6 +1053,14 @@ dgpp_set_common(dsv41_prompt_test)
 add_test(NAME dsv41_prompt_test
   COMMAND dsv41_prompt_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/dsv41_prompt_goldens.jsonl)
 set_tests_properties(dsv41_prompt_test PROPERTIES SKIP_RETURN_CODE 2)
+# The EXL3 trellis host codec (models/exl3_matrix.hpp) against the numpy
+# reference's pins on the LibertAIDAI DeepSeek-V4.1-Flash-1017 pack
+# (docs/deepseek_v41_flash_exl3_plan.md §2.4). CUDA-free.
+add_executable(exl3_codec_test tests/host/exl3_codec_test.cpp)
+target_include_directories(exl3_codec_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(exl3_codec_test PRIVATE dgpp_common)
+dgpp_set_common(exl3_codec_test)
+add_test(NAME exl3_codec_test COMMAND exl3_codec_test)
 # The DeepSeek-V4 (DeepSeek-V4-Flash-0731) prompt renderer's differential
 # gate: the checkpoint's encoding_dsv4.py is the golden source; the same
 # corpus walks its DSML spelling through the tool grammar and parser.
@@ -1307,17 +1328,28 @@ target_link_libraries(csa2_layer_test PRIVATE dgpp_models_csa2 dgpp_kernels CUDA
 dgpp_set_common(csa2_layer_test)
 add_test(NAME csa2_layer_test COMMAND csa2_layer_test)
 
+# The dsv41 suites run twice: on the fp8 / MXFP4 release fixture and, as
+# the `_exl3` variants, on the EXL3 pack fixture (DGPP_DSV41_FIXTURE=exl3,
+# tests/cuda/dsv41_fixture.hpp) from their own working directory.
+set(DSV41_EXL3_WORKDIR ${CMAKE_CURRENT_BINARY_DIR}/dsv41_exl3)
+file(MAKE_DIRECTORY ${DSV41_EXL3_WORKDIR})
+set(DSV41_EXL3_ENV ${CMAKE_COMMAND} -E env DGPP_DSV41_FIXTURE=exl3)
+
 add_executable(dsv41_engram_layer_test tests/cuda/dsv41_engram_layer_test.cpp)
 target_include_directories(dsv41_engram_layer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(dsv41_engram_layer_test PRIVATE dgpp_models_dsv41_layers CUDA::cudart Threads::Threads)
 dgpp_set_common(dsv41_engram_layer_test)
 add_test(NAME dsv41_engram_layer_test COMMAND dsv41_engram_layer_test)
+add_test(NAME dsv41_engram_layer_test_exl3 COMMAND ${DSV41_EXL3_ENV} $<TARGET_FILE:dsv41_engram_layer_test>
+         WORKING_DIRECTORY ${DSV41_EXL3_WORKDIR})
 
 add_executable(dsv41_model_test tests/cuda/dsv41_model_test.cpp)
 target_include_directories(dsv41_model_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(dsv41_model_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(dsv41_model_test)
 add_test(NAME dsv41_model_test COMMAND dsv41_model_test)
+add_test(NAME dsv41_model_test_exl3 COMMAND ${DSV41_EXL3_ENV} $<TARGET_FILE:dsv41_model_test>
+         WORKING_DIRECTORY ${DSV41_EXL3_WORKDIR})
 
 # The forward against the python reference dump (numpy: the repo's .venv
 # when present, else the system python).
@@ -1325,59 +1357,72 @@ add_executable(dsv41_forward_test tests/cuda/dsv41_forward_test.cpp)
 target_include_directories(dsv41_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
 target_link_libraries(dsv41_forward_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(dsv41_forward_test)
-set(DSV41_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/dsv41_forward_fixture)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python3)
   set(DSV41_PYTHON ${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python3)
 else()
   set(DSV41_PYTHON ${Python3_EXECUTABLE})
 endif()
-add_test(NAME dsv41_forward_fixture COMMAND dsv41_forward_test --write-fixture ${DSV41_FORWARD_FIXTURE})
-add_test(NAME dsv41_forward_smoke COMMAND dsv41_forward_test --smoke ${DSV41_FORWARD_FIXTURE})
-set_tests_properties(dsv41_forward_smoke PROPERTIES DEPENDS dsv41_forward_fixture)
-add_test(NAME dsv41_forward_generate
-  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
-          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref.dump --tokens 40)
-set_tests_properties(dsv41_forward_generate PROPERTIES DEPENDS dsv41_forward_fixture)
-# End to end (the drift of eight layers with fp4 caches: relaxed budgets),
-# writing the engine's layer states; then the teacher-forced dump (every
-# reference layer fed the engine's input to it) under the strict budgets.
-add_test(NAME dsv41_forward_test_e2e
-  COMMAND ${CMAKE_COMMAND} -E env DGPP_DSV41_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states.bin
-          $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${DSV41_FORWARD_FIXTURE}
-          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref.dump --relaxed)
-set_tests_properties(dsv41_forward_test_e2e PROPERTIES DEPENDS dsv41_forward_generate)
-add_test(NAME dsv41_forward_generate_teacher
-  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
-          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_ref.dump --tokens 40
-          --teacher ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states.bin)
-set_tests_properties(dsv41_forward_generate_teacher PROPERTIES DEPENDS dsv41_forward_test_e2e)
-add_test(NAME dsv41_forward_test
-  COMMAND dsv41_forward_test --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_ref.dump)
-set_tests_properties(dsv41_forward_test PROPERTIES DEPENDS dsv41_forward_generate_teacher)
-# The bounded prefill (plan §1.8, the production mode): the same chain
-# against the reference's --prefill bounded walk (the decoder over the
-# last window rows), end to end then teacher-forced.
-add_test(NAME dsv41_forward_generate_bounded
-  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
-          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_bounded_ref.dump --tokens 40
-          --prefill bounded)
-set_tests_properties(dsv41_forward_generate_bounded PROPERTIES DEPENDS dsv41_forward_fixture)
-add_test(NAME dsv41_forward_test_bounded_e2e
-  COMMAND ${CMAKE_COMMAND} -E env DGPP_DSV41_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states_bounded.bin
-          $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${DSV41_FORWARD_FIXTURE}
-          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_bounded_ref.dump --relaxed --bounded
-          --exact-dump ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref.dump
-          --exact-states ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states.bin)
-set_tests_properties(dsv41_forward_test_bounded_e2e PROPERTIES DEPENDS "dsv41_forward_generate_bounded;dsv41_forward_test_e2e")
-add_test(NAME dsv41_forward_generate_teacher_bounded
-  COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
-          --checkpoint-dir ${DSV41_FORWARD_FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_bounded_ref.dump --tokens 40
-          --prefill bounded --teacher ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states_bounded.bin)
-set_tests_properties(dsv41_forward_generate_teacher_bounded PROPERTIES DEPENDS dsv41_forward_test_bounded_e2e)
-add_test(NAME dsv41_forward_test_bounded
-  COMMAND dsv41_forward_test --checkpoint-dir ${DSV41_FORWARD_FIXTURE}
-          --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_bounded_ref.dump --bounded)
-set_tests_properties(dsv41_forward_test_bounded PROPERTIES DEPENDS dsv41_forward_generate_teacher_bounded)
+# The forward chain on one fixture: S the test-name suffix ("" the release
+# fixture, "_exl3" the EXL3 pack), FIXTURE_ENV the fixture switch's
+# VAR=value (empty for the release).
+function(dsv41_forward_chain S FIXTURE_ENV)
+  set(FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/dsv41_forward_fixture${S})
+  if(FIXTURE_ENV STREQUAL "")
+    set(ENV "")
+  else()
+    set(ENV ${CMAKE_COMMAND} -E env ${FIXTURE_ENV})
+  endif()
+  add_test(NAME dsv41_forward_fixture${S} COMMAND ${ENV} $<TARGET_FILE:dsv41_forward_test> --write-fixture ${FIXTURE})
+  add_test(NAME dsv41_forward_smoke${S} COMMAND ${ENV} $<TARGET_FILE:dsv41_forward_test> --smoke ${FIXTURE})
+  set_tests_properties(dsv41_forward_smoke${S} PROPERTIES DEPENDS dsv41_forward_fixture${S})
+  add_test(NAME dsv41_forward_generate${S}
+    COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+            --checkpoint-dir ${FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref${S}.dump --tokens 40)
+  set_tests_properties(dsv41_forward_generate${S} PROPERTIES DEPENDS dsv41_forward_fixture${S})
+  # End to end (the drift of eight layers with fp4 caches: relaxed budgets),
+  # writing the engine's layer states; then the teacher-forced dump (every
+  # reference layer fed the engine's input to it) under the strict budgets.
+  add_test(NAME dsv41_forward_test_e2e${S}
+    COMMAND ${CMAKE_COMMAND} -E env ${FIXTURE_ENV} DGPP_DSV41_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states${S}.bin
+            $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${FIXTURE}
+            --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref${S}.dump --relaxed)
+  set_tests_properties(dsv41_forward_test_e2e${S} PROPERTIES DEPENDS dsv41_forward_generate${S})
+  add_test(NAME dsv41_forward_generate_teacher${S}
+    COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+            --checkpoint-dir ${FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_ref${S}.dump --tokens 40
+            --teacher ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states${S}.bin)
+  set_tests_properties(dsv41_forward_generate_teacher${S} PROPERTIES DEPENDS dsv41_forward_test_e2e${S})
+  add_test(NAME dsv41_forward_test${S}
+    COMMAND ${ENV} $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${FIXTURE} --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_ref${S}.dump)
+  set_tests_properties(dsv41_forward_test${S} PROPERTIES DEPENDS dsv41_forward_generate_teacher${S})
+  # The bounded prefill (plan §1.8, the production mode): the same chain
+  # against the reference's --prefill bounded walk (the decoder over the
+  # last window rows), end to end then teacher-forced.
+  add_test(NAME dsv41_forward_generate_bounded${S}
+    COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+            --checkpoint-dir ${FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_bounded_ref${S}.dump --tokens 40
+            --prefill bounded)
+  set_tests_properties(dsv41_forward_generate_bounded${S} PROPERTIES DEPENDS dsv41_forward_fixture${S})
+  add_test(NAME dsv41_forward_test_bounded_e2e${S}
+    COMMAND ${CMAKE_COMMAND} -E env ${FIXTURE_ENV} DGPP_DSV41_DUMP_ENGINE_STATES=${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states_bounded${S}.bin
+            $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${FIXTURE}
+            --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_bounded_ref${S}.dump --relaxed --bounded
+            --exact-dump ${CMAKE_CURRENT_BINARY_DIR}/dsv41_pure_ref${S}.dump
+            --exact-states ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states${S}.bin)
+  set_tests_properties(dsv41_forward_test_bounded_e2e${S} PROPERTIES DEPENDS "dsv41_forward_generate_bounded${S};dsv41_forward_test_e2e${S}")
+  add_test(NAME dsv41_forward_generate_teacher_bounded${S}
+    COMMAND ${DSV41_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tools/dsv41_reference_dump.py gen-pure
+            --checkpoint-dir ${FIXTURE} --out ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_bounded_ref${S}.dump --tokens 40
+            --prefill bounded --teacher ${CMAKE_CURRENT_BINARY_DIR}/dsv41_engine_states_bounded${S}.bin)
+  set_tests_properties(dsv41_forward_generate_teacher_bounded${S} PROPERTIES DEPENDS dsv41_forward_test_bounded_e2e${S})
+  add_test(NAME dsv41_forward_test_bounded${S}
+    COMMAND ${ENV} $<TARGET_FILE:dsv41_forward_test> --checkpoint-dir ${FIXTURE}
+            --dump-file ${CMAKE_CURRENT_BINARY_DIR}/dsv41_teacher_bounded_ref${S}.dump --bounded)
+  set_tests_properties(dsv41_forward_test_bounded${S} PROPERTIES DEPENDS dsv41_forward_generate_teacher_bounded${S})
+endfunction()
+dsv41_forward_chain("" "")
+dsv41_forward_chain("_exl3" "DGPP_DSV41_FIXTURE=exl3")
+set(DSV41_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/dsv41_forward_fixture)
 
 # The DeepSeek-V4.1 session surface: decode vs the re-forward, interleaved
 # slots, the chunked prefill, the prefix snapshots, the eager DSpark speculator.
@@ -1387,6 +1432,9 @@ target_link_libraries(dsv41_decode_test PRIVATE dgpp_models_dsv41_layers dgpp_bu
 dgpp_set_common(dsv41_decode_test)
 add_test(NAME dsv41_decode_test COMMAND dsv41_decode_test --fixture ${DSV41_FORWARD_FIXTURE})
 set_tests_properties(dsv41_decode_test PROPERTIES DEPENDS dsv41_forward_fixture)
+add_test(NAME dsv41_decode_test_exl3 COMMAND ${DSV41_EXL3_ENV} $<TARGET_FILE:dsv41_decode_test>
+         --fixture ${DSV41_FORWARD_FIXTURE}_exl3 WORKING_DIRECTORY ${DSV41_EXL3_WORKDIR})
+set_tests_properties(dsv41_decode_test_exl3 PROPERTIES DEPENDS dsv41_forward_fixture_exl3)
 
 add_executable(dsv41_engram_test tests/cuda/dsv41_engram_test.cu)
 target_include_directories(dsv41_engram_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -1583,6 +1631,22 @@ add_test(NAME qwen35_tp_test_draft_screen
   COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:qwen35_tp_test>)
 set_tests_properties(qwen35_tp_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
 set_tests_properties(qwen35_tp_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
+
+add_executable(qwen_dflash2_test tests/cuda/qwen_dflash2_test.cpp)
+target_include_directories(qwen_dflash2_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(qwen_dflash2_test PRIVATE dgpp_models_qwen_layers dgpp_models_qwen_loader dgpp_models_qwen dgpp_bus dgpp_loaders dgpp_kernels dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(qwen_dflash2_test)
+add_test(NAME qwen_dflash2_test COMMAND qwen_dflash2_test)
+set_tests_properties(qwen_dflash2_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
+
+add_executable(dflash2_integration_test tests/cuda/dflash2_integration_test.cpp)
+target_include_directories(dflash2_integration_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dflash2_integration_test PRIVATE dgpp_models_qwen_layers dgpp_bus dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
+dgpp_set_common(dflash2_integration_test)
+add_test(NAME dflash2_integration_test COMMAND dflash2_integration_test)
+set_tests_properties(dflash2_integration_test PROPERTIES RUN_SERIAL TRUE LABELS "gpu")
+
+add_test(NAME spec_ab_probe_test COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/spec_ab_probe_test.py)
 
 add_executable(qwen35_loader_smoke tests/cuda/qwen35_loader_smoke.cpp)
 target_include_directories(qwen35_loader_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -1971,6 +2035,8 @@ target_include_directories(dsv41_tp_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 target_link_libraries(dsv41_tp_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders CUDA::cudart Threads::Threads)
 dgpp_set_common(dsv41_tp_test)
 add_test(NAME dsv41_tp_test COMMAND dsv41_tp_test)
+add_test(NAME dsv41_tp_test_exl3 COMMAND ${DSV41_EXL3_ENV} $<TARGET_FILE:dsv41_tp_test> WORKING_DIRECTORY ${DSV41_EXL3_WORKDIR})
+set_tests_properties(dsv41_tp_test_exl3 PROPERTIES RUN_SERIAL TRUE)  # the same loopback ports as dsv41_tp_test
 
 # The DeepSeek-V4.1 decode engines: the graph engine's scalar and row-batched
 # replays (the Engram host node inside the walk) against the eager engine
@@ -1980,6 +2046,8 @@ target_include_directories(dsv41_engine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(dsv41_engine_test PRIVATE dgpp_models_dsv41_layers dgpp_bus dgpp_loaders dgpp_sched dgpp_text CUDA::cudart Threads::Threads)
 dgpp_set_common(dsv41_engine_test)
 add_test(NAME dsv41_engine_test COMMAND dsv41_engine_test)
+add_test(NAME dsv41_engine_test_exl3 COMMAND ${DSV41_EXL3_ENV} $<TARGET_FILE:dsv41_engine_test> WORKING_DIRECTORY ${DSV41_EXL3_WORKDIR})
+set_tests_properties(dsv41_engine_test_exl3 PROPERTIES RUN_SERIAL TRUE)  # the same loopback ports as dsv41_engine_test
 add_test(NAME dsv41_engine_test_draft_screen
   COMMAND ${CMAKE_COMMAND} -E env DGPP_TEST_DRAFT_SCREEN=2 $<TARGET_FILE:dsv41_engine_test>)
 set_tests_properties(dsv41_engine_test_draft_screen PROPERTIES RUN_SERIAL TRUE LABELS "gpu" SKIP_RETURN_CODE 2)
@@ -2243,6 +2311,12 @@ target_link_libraries(packq_gemv_test PRIVATE dgpp_kernels dgpp_loaders CUDA::cu
 dgpp_set_common(packq_gemv_test)
 add_test(NAME packq_gemv_test COMMAND packq_gemv_test)
 set_tests_properties(packq_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
+add_executable(exl3_gemv_test tests/cuda/exl3_gemv_test.cu)
+target_include_directories(exl3_gemv_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(exl3_gemv_test PRIVATE dgpp_kernels CUDA::cudart)
+dgpp_set_common(exl3_gemv_test)
+add_test(NAME exl3_gemv_test COMMAND exl3_gemv_test)
+set_tests_properties(exl3_gemv_test PROPERTIES SKIP_RETURN_CODE 2)
 add_executable(head_screen_test tests/cuda/head_screen_test.cu)
 target_include_directories(head_screen_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(head_screen_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
@@ -2575,7 +2649,7 @@ endforeach()
 set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
-set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test
+set_tests_properties(checkpoint_audit_test route_trace_test sampling_profile_test spec_ab_probe_test
   site_env_test script_reports_test timed_load_test serve_admission_bench_test qwen_yarn_release_check_test qwen_head_compare_test portability_test spark_cross_test setup_tools_test bootstrap_test launcher_test cluster_process_swap_test PROPERTIES LABELS "host;python")
 set_tests_properties(cluster_process_swap_systemd_test PROPERTIES LABELS "systemd" TIMEOUT 180)
 if(TARGET dgpp_serve_app)

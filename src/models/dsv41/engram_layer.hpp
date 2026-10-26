@@ -26,12 +26,14 @@
 #include "models/dsv41/config.hpp"
 #include "models/dsv41/engram_tables.hpp"
 #include "models/dsv41/loader.hpp"
+#include "models/exl3_matrix.hpp"
 #include "models/quant_matrix.hpp"
 
 namespace dgpp {
 
 struct Dsv41EngramLayerWeights {
   GlmQuantMatrix wkv;                   // fp8 [(hc + 1) * hidden, rows_local * head_dim] (this rank's K columns)
+  Exl3Matrix wkv_x;                     // the EXL3 pack's (the same K columns); set instead of wkv
   const uint16_t* q_weight = nullptr;   // bf16 [hc, hidden]
   const uint16_t* k_weight = nullptr;   // bf16 [hc, hidden]
   int table_index = -1;                 // the layer's ordinal among the Engram layers
@@ -107,6 +109,9 @@ class Dsv41EngramLayer {
 
  private:
   bool dense_mma_ = true;
+  // The EXL3 projection's workspace (kernels/exl3_gemv.hpp), allocated for an EXL3 pack.
+  void* exl3_ws_ = nullptr;
+  size_t exl3_ws_bytes_ = 0;
   struct StageArgs;
   static void stage_callback(void* user);
 

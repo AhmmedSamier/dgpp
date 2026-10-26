@@ -394,6 +394,17 @@ bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
 // dsa_attn_partial takes them, each 16-row slab (one query row) walking its
 // own list. Requires local_heads a multiple of 16 (returns false otherwise,
 // as for kv_lora outside 512/256); combine with dsa_attn_combine.
+// `group` (2026-10-23): kAttnSplitGroup merges each kAttnSplitGroup
+// consecutive splits of a row — the last of the group's blocks to arrive
+// folds the per-split partials from L2 with the finish's formula into the
+// group's partial (mg_ws / lg_ws / cg_ws, n_split / kAttnSplitGroup per
+// row) and discards the dead per-split rows from L2 — so the finish reads
+// eight times fewer partials and the per-split ones never write back. The
+// grouping is fixed per request, so a row's output is the same whatever
+// rows share the launch. n_split must be a multiple of the group;
+// `tickets` holds ceil(rows * local_heads / 32) * n_split / group ints,
+// zero at rest (each group's last block resets its own).
+constexpr int kAttnSplitGroup = 8;
 bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
                      const int32_t* req_ids, const int32_t* topk, int topk_stride,
                      const int32_t* counts, int rows, int n_split, int local_heads,
@@ -402,7 +413,8 @@ bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
                      float* c_ws, cudaStream_t stream,
                      LatentFormat format = LatentFormat::kBf16,
                      const float* latent_scale = nullptr, int rope = 0,
-                     int blocks_total = -1);
+                     int blocks_total = -1, int group = 1, int32_t* tickets = nullptr,
+                     float* mg_ws = nullptr, float* lg_ws = nullptr, float* cg_ws = nullptr);
 // blocks_total (2026-10-19): the pool's physical block count, the bound a
 // table entry must lie under; -1 = blocks_per_request (a table whose row
 // width is the pool: the paged main caches). The decode window's ring is

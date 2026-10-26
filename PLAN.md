@@ -58,6 +58,14 @@ and GPU recovery coverage for both resident loader implementations.
 
 ## Serving support
 
+Native templates have source, expression-token and parser-depth limits, plus
+per-render depth, dispatch, emitted-byte and selected string/range growth limits.
+Native tests cover refusal boundaries, file loading and repeat/concurrent render
+recovery. HTTP tests check refusal before tokenization and successful requests
+afterwards; six-family checkpoint goldens cover rendered bytes and token IDs.
+Shared-object cycle prevention and cumulative allocation/helper-work accounting
+remain deferred; these guards do not provide complete resource containment.
+
 Host sampling automatically omits neutral penalty preparation using the
 effective request parameters. Deployment defaults and request overrides
 are covered by config, sampler, HTTP and journal regressions, including
@@ -156,7 +164,7 @@ limitations, including the one-hour soak used for that release.
 | M3 — DSA/MLA | Pooled sparse selection, latent caches, tail rings and paged state | Selection fuzzing, attention oracles, continuation and snapshot tests |
 | M4 — assembled GLM | Config/binding validation, layer loading, full forward and reference tools | Synthetic and real-checkpoint layer/forward comparisons |
 | M5 — tensor parallelism | Roster, CollectiveBus, sliced loading, resident images and transport regression tools | Loopback protocol tests, shard parity and four-node forward checks |
-| M6 — generation and API | Decode sessions, tokenizer with bounded merge scans and optional word caching, templates, scheduler, journal, HTTP/SSE, sampling and constrained output | Host service tests, [tokenizer work bounds](docs/tokenization.md), tokenizer/template goldens and fabric API checks |
+| M6 — generation and API | Decode sessions, tokenizer with bounded merge scans and optional word caching, templates, scheduler, journal, HTTP/SSE, sampling and constrained output | Host service tests, [tokenizer work bounds](docs/tokenization.md), template integer/replacement boundary tests, tokenizer/template goldens and fabric API checks |
 | M7 — prefix cache | Pool-aligned snapshots, an earlier long-document cut for changed tails, shared cache blocks, deterministic lookup and LRU eviction; MTP lookahead identity | Cached/cold target and draft parity, continuation cleanup, small-arena retention and [recipe sizing](docs/prefix-cache.md) |
 | M8 — MTP | Transactional verification, rollback and on-device speculative steps | Greedy equality with plain decode, sampled-oracle comparisons and forced rejections |
 | M9 — optimization and hardening | Kernel and collective optimizations, memory planning, failure handling and drift detection | Numerical regression checks, failure drills, fuzzing and the mixed-workload soak |

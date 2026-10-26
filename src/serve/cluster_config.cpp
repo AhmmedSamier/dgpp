@@ -232,6 +232,11 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           if (e.ngram_table_model.empty() || std::count(e.ngram_table_model.begin(), e.ngram_table_model.end(), '/') != 1)
             fail(what, "'" + ek + "' must be a Hugging Face ORG/NAME repository id");
         }
+        else if (p.key == "engram_source") {
+          e.engram_source = text(x, ek, what);
+          if (e.engram_source.empty() || std::count(e.engram_source.begin(), e.engram_source.end(), '/') != 1)
+            fail(what, "'" + ek + "' must be a Hugging Face ORG/NAME repository id");
+        }
         else if (p.key == "dense_weights") {
           e.dense_weights = text(x, ek, what);
           if (e.dense_weights != "checkpoint" && e.dense_weights != "fp8")
@@ -428,6 +433,7 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.mtp_schedule_lambda = number(x, ek, what);
           if (!(e.mtp_schedule_lambda >= 0.0)) fail(what, "'" + ek + "' must be >= 0 (0: the reservation rate)");
         } else if (p.key == "mtp_schedule_min_depth") e.mtp_schedule_min_depth = static_cast<int>(integer(x, ek, what, 1, 5));
+        else if (p.key == "mtp_schedule_options") e.mtp_schedule_options = static_cast<int>(integer(x, ek, what, 0, 6));
         else if (p.key == "mtp_schedule_adapt") e.mtp_schedule_adapt = boolean(x, ek, what);
         else if (p.key == "mtp_schedule_sampled_scale") {
           e.mtp_schedule_sampled_scale = number(x, ek, what);

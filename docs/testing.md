@@ -58,6 +58,28 @@ use the existing session numerical tier and certify changed argmax near ties;
 same-shape isolation and graph token comparisons remain exact. Qwen4Exp retains
 its two-rank `qwen_engine_test` coverage. Run GPU checks serially with production
 stopped, then restore and verify the original deployment.
+`dflash2_integration_test` checks both Flash-Next and Qwen35 with the shared
+v2 drafter. Partial-block snapshots must preserve every draft K/V row of
+the restored request and its live neighbor, including repeated slot reuse.
+Two-rank graph tests alternate scalar and batched scheduled verification
+with eager redrafts, comparing the recorded proposals and cross-rank
+transcripts. These tests exercise both installation and restoration of the
+capture reducer. Sampled graph runs also require the engine to arm the
+selector's proposal distributions and agree across ranks. The memory-plan
+checks require the drafter's head logits to use the local vocabulary slice
+and account for the requested head screen. Screened graph runs check the
+candidate-block bound. Flash-Next's recurrent-state replay is compared with
+full snapshots for scheduled scalar/batched transcripts and exact state
+bytes in prefix snapshots taken after speculative commits.
+A direct verify/rollback check forces every accepted prefix length from one
+through eight rows, then compares continuation logits before and after
+restoring a decoded prefix snapshot.
+Run them with `qwen_dflash2_test`, `dflash2_kernels_test`
+and `qwen35_tp_test` on idle hardware; the latter retains DFlash v1 coverage.
+`spec_ab_probe_test` checks bonus-inclusive mean acceptance length, delayed
+completion counters, idle-engine enforcement, model identity and the shared
+corpus without making network requests.
+
 `qwen35_moe_*` adds the ModelOpt MoE fixture, row/group invariance and
 independent reference/teacher comparisons. `qwen35_tp_test` covers MoE
 worlds 1/2/4, native MTP graphs at worlds 2/4, and DFlash v1 graph
@@ -383,6 +405,21 @@ build. The suites cover:
   divergences rejected), and the TCP/roster control plane (seal, epoch
   bumps, eviction by death and by deadline, rejection reasons, coordinator
   loss).
+- native template unit cases (`DGPP_TEST_FILTER=chat_template_`) without model
+  data: empty-pattern replacement across UTF-8 codepoints, extreme list indexes,
+  finite range/slice results at integer boundaries, checked addition/subtraction
+  and line-numbered errors. `chat_template_limits_` covers compile limits,
+  recursion, dispatch exhaustion, preflight range cardinality, string growth,
+  cumulative emission across discarded captures/macros, file-loading boundaries,
+  and recovery after refusal, including concurrent calls on one compiled template.
+  Run these under the separate `asan` and `ubsan` presets as well as optimized builds.
+  Dispatch-exhaustion cases deliberately reach the production ten-million-step
+  budget, so allow for their instrumentation cost when setting external timeouts;
+  the checkpoint template goldens separately cover valid family renders and IDs.
+  `DGPP_TEST_FILTER=serve_templateLimits_ build-ci/serve_test` exercises the real
+  template interpreter through HTTP with a fake engine/tokenizer: limit errors
+  return HTTP 400 naming `messages` before tokenization or SSE headers, and a
+  subsequent valid request succeeds on the same compiled template and service.
 - the M6 host suites: the tokenizer (55 byte-exact goldens per family,
   hash-keyed — GLM-5.3, Qwen3.8-Flash-Next and GLM-4.7 corpora), the chat
   template (26 / 20 / 26 goldens + 8 refusal negatives, the tool-call

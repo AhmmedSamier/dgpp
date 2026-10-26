@@ -13,7 +13,7 @@ namespace dgpp {
 
 namespace {
 
-constexpr int kUploadMaxWords = 64;
+constexpr int kUploadMaxWords = kPickMaxRows;  // the batch map's requests x rows (16 slots x 5 rows = 80 since 2026-10-23)
 
 template <typename Word>
 __global__ void upload_words_kernel(const Word* __restrict__ src,

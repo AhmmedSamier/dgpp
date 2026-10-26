@@ -1,6 +1,7 @@
 #include "models/dsv41/model.hpp"
 
 #include "kernels/dsv41_dspark.hpp"
+#include "kernels/exl3_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 
 #include <algorithm>
@@ -39,6 +40,7 @@ Csa2Config Dsv41Model::csa2_config(const Dsv41TextConfig& cfg, int tp_world) {
   c.block_tokens = kBlockTokens;
   c.eps = cfg.rms_norm_eps;
   c.tp = tp_world;
+  c.exl3 = cfg.weights_exl3;
   Csa2Config::validate(c);
   return c;
 }
@@ -106,7 +108,7 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   // The Engram tables and their constants: mapped before the sources go.
   const bool has_engram = !cfg_.engram_layer_ids.empty();
   if (has_engram) {
-    sidecar_ = dsv41_load_engram_sidecar_for(checkpoint_dir, cfg_);
+    sidecar_ = dsv41_load_engram_sidecar_for(checkpoint_dir, cfg_, Dsv41LayerStream::engram_source_dir());
     (void)loader_.load_engram_tables();
   }
   if (residency == Dsv41Residency::Resident) {
@@ -148,6 +150,15 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
     throw std::logic_error("Dsv41Model: the session core widened the decode batch past the family's cap");
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
+  if (cfg_.weights_exl3) {
+    // The EXL3 GEMV's own workspace for the head and the DSpark main
+    // projection (its arrival counters must start at zero and stay the
+    // launcher's: the cuBLASLt workspace above is written by cuBLASLt).
+    exl3_ws_bytes_ = std::max(exl3_gemm_ws_bytes_for(lm_vocab_count_, H),
+                              exl3_gemm_ws_bytes_for(H, std::max(1, targets_) * H));
+    exl3_ws_ = dev_alloc<char>(exl3_ws_bytes_);
+    DGPP_CUDA_OK(cudaMemset(exl3_ws_, 0, exl3_ws_bytes_));
+  }
   gemm_.set_decode_rows(max_decode_rows_);
   const Dsv41LocalGeometry& geo = loader_.geometry();
   moe_cfg_ = cfg_.moe_config(static_cast<int>(geo.local_inter), /*draft=*/false);
@@ -297,7 +308,7 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   // the verify's. The bf16 bytes stay resident for the prefill forms (the
   // tensor-core instance refuses the release). Before the draft head's
   // screen, which takes the companion when the bf16 bytes are gone.
-  if (Bf12Companions::enabled()) {
+  if (Bf12Companions::enabled() && globals_.lm_head != nullptr) {
     const auto t0 = std::chrono::steady_clock::now();
     bf12_.pack_and_release(globals_.lm_head, lm_vocab_count_, cfg_.hidden_size, gemm_, stream_,
                            [&](const void* w) { return loader_.release_packed(-1, w); });
@@ -309,7 +320,21 @@ Dsv41Model::Dsv41Model(const Dsv41TextConfig& cfg, const std::string& checkpoint
   // The draft head's screen (engine.draft_head): from the served head, for
   // the decode drafts only; off (with a logged reason) when the setting or
   // the head's form says so.
-  if (mtp_) draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
+  // (The EXL3 head has no bf16 bytes: the screen reads the bf16 / bf12
+  // head alone and stays off — the draft takes the EXL3 head's logits.)
+  if (mtp_ && globals_.lm_head != nullptr)
+    draft_head_.init(draft_head_matrix(), max_decode_rows_, loader_.rank(), stream_, /*quiet=*/true);
+}
+
+void Dsv41Model::head_logits(const uint16_t* h, int rows, float* out, cudaStream_t stream) {
+  const int H = cfg_.hidden_size;
+  if (globals_.lm_head_x.tiles != nullptr) {
+    launch_exl3_gemm_f32(h, static_cast<size_t>(H), globals_.lm_head_x, out, rows, lm_vocab_count_, H, 0, stream,
+                         exl3_ws_, exl3_ws_bytes_);
+    return;
+  }
+  gemm_.matmul(h, globals_.lm_head, out, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H),
+               gemm_ws_, gemm_ws_bytes_, stream);
 }
 
 HeadMatrix Dsv41Model::draft_head_matrix() const {
@@ -330,6 +355,7 @@ Dsv41Model::~Dsv41Model() {
   moe_.reset();
   engram_.reset();
   cudaFree(gemm_ws_);
+  cudaFree(exl3_ws_);
   cudaFree(csa2_scratch_);
   cudaFree(inv_freq_window_);
   cudaFree(inv_freq_compressed_);
@@ -505,6 +531,15 @@ Csa2LayerWeights Dsv41Model::csa2_view(const Dsv41LayerResident& r, int layer) c
   w.wq_b = a.wq_b;
   w.wo_a = a.wo_a;
   w.wo_b = a.wo_b;
+  w.wq_a_x = a.wq_a_x;
+  w.wkv_x = a.wkv_x;
+  w.wq_b_x = a.wq_b_x;
+  w.wo_a_x = a.wo_a_x;
+  w.wo_b_x = a.wo_b_x;
+  w.idx_wq_b_x = a.idx_wq_b_x;
+  w.idx_wk_x = a.idx_wk_x;
+  w.comp_wkv_x = a.comp_wkv_x;
+  w.comp_wgate_x = a.comp_wgate_x;
   w.q_norm = a.q_norm;
   w.kv_norm = a.kv_norm;
   w.attn_sink = a.attn_sink;
@@ -530,6 +565,11 @@ GlmMoeWeights Dsv41Model::moe_view(const Dsv41MoeResident& m) {
   GlmMoeWeights w;
   w.router_gate = m.router;
   w.router_bias = m.router_bias;
+  if (m.exl3()) {
+    w.experts_exl3 = m.experts_x.data();
+    for (int i = 0; i < 3; ++i) w.shared_exl3[i] = m.shared_x[i];
+    return w;
+  }
   for (int i = 0; i < 3; ++i) w.shared[i] = m.shared[i];
   w.experts_fp4 = m.experts.data();
   return w;
@@ -538,6 +578,7 @@ GlmMoeWeights Dsv41Model::moe_view(const Dsv41MoeResident& m) {
 Dsv41EngramLayerWeights Dsv41Model::engram_view(const Dsv41EngramResident& e) const {
   Dsv41EngramLayerWeights w;
   w.wkv = e.wkv;
+  w.wkv_x = e.wkv_x;
   w.q_weight = e.q_weight;
   w.k_weight = e.k_weight;
   w.table_index = e.table_index;
@@ -731,9 +772,14 @@ void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_po
   }
   {
     const Dsv41DraftResident& d0 = draft_stage(0);
-    if (!d0.main_proj.payload || !d0.main_norm) throw std::runtime_error("mtp_run_rows: the DSpark main projection is unbound");
-    launch_scale_gemm_grid_bf16(src, static_cast<size_t>(W), d0.main_proj.payload, d0.main_proj.scales, main_x_, T, H, W,
-                                stream_, 0, 5, 5, dense_mma_, nullptr, 0, /*prefill_tile=*/!decode_row && prefill_dense_tile_);
+    if ((!d0.main_proj.payload && !d0.main_proj_x.tiles) || !d0.main_norm)
+      throw std::runtime_error("mtp_run_rows: the DSpark main projection is unbound");
+    if (d0.main_proj_x.tiles)
+      launch_exl3_gemm_bf16(src, static_cast<size_t>(W), d0.main_proj_x, main_x_, T, H, W, 0, stream_, exl3_ws_,
+                            exl3_ws_bytes_);
+    else
+      launch_scale_gemm_grid_bf16(src, static_cast<size_t>(W), d0.main_proj.payload, d0.main_proj.scales, main_x_, T, H, W,
+                                  stream_, 0, 5, 5, dense_mma_, nullptr, 0, /*prefill_tile=*/!decode_row && prefill_dense_tile_);
     csa2_rmsnorm_bf16(main_x_, H, d0.main_norm, main_x_, H, T, H, eps, stream_);
   }
   // ---- the draft rings: each stage's window latent of the real rows ------------
@@ -791,8 +837,7 @@ void Dsv41Model::draft_first(int req, const int64_t* tokens, const int64_t* d_po
   csa2_rmsnorm_bf16(collapsed_, H, dl.norm, h_, H, rows, H, eps, stream_);
   if (!(decode_row && draft_head_.logits(draft_head_matrix(), h_, static_cast<size_t>(H), rows, base_logits_,
                                          static_cast<size_t>(lm_vocab_count_), stream_)))
-    gemm_.matmul(h_, globals_.lm_head, base_logits_, rows, lm_vocab_count_, H, DType::BF16, GemmOut::F32,
-                 static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_, stream_);
+    head_logits(h_, rows, base_logits_, stream_);
   // ---- block row 0, biased by the Markov head of `next`, into the head rows ----
   const int rows_out = head_rows / groups;
   dsv41_dspark_markov_bias(base_logits_, static_cast<int64_t>(block) * lm_vocab_count_, 0, dl.markov_embed, dl.markov_head,
@@ -834,6 +879,9 @@ void Dsv41Model::prefetch_fp8(const GlmQuantMatrix& m) {
   if (m.payload) prefetch_.add(m.payload, static_cast<size_t>(m.rows) * static_cast<size_t>(m.cols));
   if (m.scales) prefetch_.add(m.scales, m.scale_bytes());
 }
+void Dsv41Model::prefetch_exl3(const Exl3Matrix& m) {
+  if (m.tiles) prefetch_.add(m.tiles, m.tiles_bytes());
+}
 
 // A bf16 weight into the open window through the GEMM's resident view —
 // the bytes a launch streams: the weight itself (this family packs no
@@ -858,6 +906,13 @@ void Dsv41Model::prefetch_mhc(const uint16_t* fn, const uint16_t* norm, int rows
 // The compressor and indexer projections behind wq_b are past the budget.
 void Dsv41Model::prefetch_attention_weights(const Dsv41LayerResident& r, int rows) {
   prefetch_mhc(r.mhc.attn_fn, r.attn_norm, rows);
+  if (r.attn.exl3()) {
+    prefetch_exl3(r.attn.wq_a_x);
+    prefetch_bf16(r.attn.q_norm, static_cast<size_t>(cfg_.q_lora_rank) * 2, rows);
+    prefetch_exl3(r.attn.wkv_x);
+    prefetch_exl3(r.attn.wq_b_x);
+    return;
+  }
   prefetch_fp8(r.attn.wq_a);
   prefetch_bf16(r.attn.q_norm, static_cast<size_t>(cfg_.q_lora_rank) * 2, rows);
   prefetch_fp8(r.attn.wkv);
@@ -878,6 +933,10 @@ void Dsv41Model::prefetch_ffn_side(const Dsv41LayerResident& r, int rows) {
   prefetch_mhc(r.mhc.ffn_fn, r.ffn_norm, rows);
   prefetch_bf16(r.moe.router, static_cast<size_t>(r.moe.n_experts) * H * 2, rows);
   if (r.moe.router_bias) prefetch_.add(r.moe.router_bias, static_cast<size_t>(r.moe.n_experts) * 4);
+  if (r.moe.exl3()) {
+    for (const Exl3Matrix& m : r.moe.shared_x) prefetch_exl3(m);
+    return;
+  }
   for (const GlmQuantMatrix& m : r.moe.shared) prefetch_fp8(m);
 }
 
@@ -889,7 +948,8 @@ void Dsv41Model::prefetch_attention_side(int layer, int rows) {
   const Dsv41LayerResident& r = loader_.load_layer(layer);
   prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());  // the budget: engine.l2_prefetch_window_mib
   if (r.engram.present) {
-    prefetch_fp8(r.engram.wkv);
+    if (r.engram.wkv_x.tiles) prefetch_exl3(r.engram.wkv_x);
+    else prefetch_fp8(r.engram.wkv);
     return;
   }
   prefetch_attention_weights(r, rows);
@@ -902,6 +962,10 @@ void Dsv41Model::prefetch_head(const uint16_t* norm, bool draft, int rows) {
   prefetch_.open_window(stream_, 0, prefetch_.boundary_rate());  // the budget: engine.l2_prefetch_window_mib
   prefetch_bf16(norm, H * 2, rows);
   if (draft && draft_head_.enabled()) return;
+  if (globals_.lm_head_x.tiles) {
+    prefetch_exl3(globals_.lm_head_x);
+    return;
+  }
   prefetch_bf16(globals_.lm_head, static_cast<size_t>(lm_vocab_count_) * H * 2, rows);
 }
 
@@ -1824,16 +1888,12 @@ Dsv41Model::Outputs Dsv41Model::run_rows(const RowRun& run) {
         const int source = input_row < run.decode_rows() ? input_row
                            : group && !dec_row0.empty() ? dec_row0[sp] + dec_lens[sp] - 1
                            : bounded ? row_off + walk_rows - 1 : input_row;
-        gemm_.matmul(h_ + static_cast<size_t>(source) * H, globals_.lm_head,
-                     logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, count,
-                     lm_vocab_count_, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H),
-                     gemm_ws_, gemm_ws_bytes_, stream_);
+        head_logits(h_ + static_cast<size_t>(source) * H, count, logits_ + static_cast<size_t>(output_row) * lm_vocab_count_,
+                    stream_);
       });
     } else {
-      gemm_.matmul(h_ + static_cast<size_t>(row_off) * H, globals_.lm_head,
-                   logits_ + static_cast<size_t>(row_off) * lm_vocab_count_, walk_rows,
-                   lm_vocab_count_, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_,
-                   gemm_ws_bytes_, stream_);
+      head_logits(h_ + static_cast<size_t>(row_off) * H, walk_rows, logits_ + static_cast<size_t>(row_off) * lm_vocab_count_,
+                  stream_);
     }
     if (!group && walk_rows > T) {
       const size_t src = static_cast<size_t>(walk_rows - 1);
