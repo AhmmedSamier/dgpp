@@ -58,6 +58,11 @@ and GPU recovery coverage for both resident loader implementations.
 
 ## Serving support
 
+Chat-template reference generation uses an immutable Jinja sandbox, with
+host Python regressions for private-attribute access, input mutation and
+valid rendering behavior. This change affects the golden generator;
+serving continues to use the native C++ template interpreter.
+
 Native templates have source, expression-token and parser-depth limits, plus
 per-render depth, dispatch, emitted-byte and selected string/range growth limits.
 Native tests cover refusal boundaries, file loading and repeat/concurrent render
