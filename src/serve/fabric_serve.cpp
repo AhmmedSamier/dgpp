@@ -485,6 +485,10 @@ std::string encode_journal_settings(const WorldSettings& s) {
                      s.mtp_schedule ? 1 : 0, s.mtp_schedule_row_ms, s.mtp_schedule_base_ms,
                      s.mtp_schedule_lambda, s.mtp_schedule_min_depth, s.mtp_schedule_adapt ? 1 : 0,
                      s.mtp_schedule_sampled_scale);
+  // The depth-option cap (2026-10-23): absent when 0 (an older peer decodes
+  // a missing key to 0; a peer without the key would differ in the digest
+  // and refuse the world, as every setting does).
+  if (s.mtp_schedule_options > 0) out += std::format(",\"msopt\":{}", s.mtp_schedule_options);
   out += ",\"mdr\":";
   append_json_string(&out, s.mtp_draft);
   out += std::format(",\"mdt\":{:.17g}", s.mtp_draft_temperature);
@@ -791,6 +795,8 @@ JournalRecord decode_journal_line(std::string_view line) {
       s.mtp_schedule_base_ms = field(v, "msbase", "settings").as_double();
       s.mtp_schedule_lambda = field(v, "mslam", "settings").as_double();
       s.mtp_schedule_min_depth = static_cast<int>(field(v, "msmin", "settings").as_int());
+      if (const dgpp::minijson::Value* msopt = v.find("msopt")) s.mtp_schedule_options = static_cast<int>(msopt->as_int());
+      else s.mtp_schedule_options = 0;
       // Records before the adaptive lambda (2026-09-14, later) carry no msad: fixed.
       if (const dgpp::minijson::Value* msad = v.find("msad")) s.mtp_schedule_adapt = msad->as_int() != 0;
       else s.mtp_schedule_adapt = false;

@@ -7,6 +7,7 @@
 
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
+#include "kernels/exl3_gemv.hpp"
 #include "kernels/scale_gemm.hpp"
 
 namespace dgpp {
@@ -113,6 +114,11 @@ Dsv41EngramLayer::Dsv41EngramLayer(const Dsv41TextConfig& cfg, const Dsv41Engram
   staged_layer_bytes_ = static_cast<size_t>(max_tokens) * tables.rows_local() * tables.tables[0]->row_bytes();
   DGPP_CUDA_OK(cudaHostAlloc(reinterpret_cast<void**>(&staged_), L * staged_layer_bytes_, cudaHostAllocMapped));
   DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&e_), static_cast<size_t>(max_tokens) * width_local() * 2));
+  if (cfg.weights_exl3) {
+    exl3_ws_bytes_ = exl3_gemm_ws_bytes_for((cfg.hc_mult + 1) * cfg.hidden_size, width_local());
+    DGPP_CUDA_OK(cudaMalloc(&exl3_ws_, exl3_ws_bytes_));
+    DGPP_CUDA_OK(cudaMemset(exl3_ws_, 0, exl3_ws_bytes_));  // the GEMV's arrival counters start at zero
+  }
   DGPP_CUDA_OK(cudaMalloc(reinterpret_cast<void**>(&kv_),
                           static_cast<size_t>(max_tokens) * (cfg.hc_mult + 1) * cfg.hidden_size * 2));
   DGPP_CUDA_OK(cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking));
@@ -154,6 +160,7 @@ Dsv41EngramLayer::Dsv41EngramLayer(const Dsv41TextConfig& cfg, const Dsv41Engram
 }
 
 Dsv41EngramLayer::~Dsv41EngramLayer() {
+  cudaFree(exl3_ws_);
   if (side_) cudaStreamSynchronize(side_);
   if (fork_) cudaEventDestroy(fork_);
   if (join_) cudaEventDestroy(join_);
@@ -327,10 +334,17 @@ void Dsv41EngramLayer::project(const Dsv41EngramLayerWeights& w, int rows, uint1
   if (rows <= 0) return;
   const int K = width_local();
   const int N = (cfg_.hc_mult + 1) * cfg_.hidden_size;
-  if (w.wkv.payload == nullptr || w.wkv.rows != N || w.wkv.cols != K)
+  const bool exl3 = w.wkv_x.tiles != nullptr;
+  if (exl3 ? (w.wkv_x.rows != N || w.wkv_x.cols != K) : (w.wkv.payload == nullptr || w.wkv.rows != N || w.wkv.cols != K))
     throw std::invalid_argument("Dsv41EngramLayer: wkv geometry disagrees with the rank's rows");
   if (r0 < 0 || r0 + rows > max_tokens_) throw std::invalid_argument("Dsv41EngramLayer: projection rows out of range");
   uint16_t* dst = (kv_dst ? kv_dst : kv_) + static_cast<size_t>(r0) * N;
+  if (exl3) {
+    if (exl3_ws_ == nullptr) throw std::logic_error("Dsv41EngramLayer: an EXL3 wkv on a layer built without its workspace");
+    launch_exl3_gemm_bf16(e_ + static_cast<size_t>(r0) * K, static_cast<size_t>(K), w.wkv_x, dst, rows, N, K, 0, stream,
+                          exl3_ws_, exl3_ws_bytes_);
+    return;
+  }
   launch_scale_gemm_grid_bf16(e_ + static_cast<size_t>(r0) * K, static_cast<size_t>(K), w.wkv.payload, w.wkv.scales, dst,
                               rows, N, K, stream, 0, 5, 5, dense_mma_, nullptr, 0, prefill_tile);
 }

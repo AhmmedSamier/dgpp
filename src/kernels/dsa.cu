@@ -2485,7 +2485,20 @@ constexpr int attn_flash_min_blocks() {
   return (kListed && SD == KV && 2 * block_smem <= size_t(100) * 1024) ? 2 : 1;  // the dense tile spills at 128 too
 }
 
-template <int KV, int SD, bool kListed, LatentFormat F>
+// kGroup (2026-10-23, the decode batch past a few rows): the kGroup
+// consecutive splits of a row pair also publish ONE merged partial per
+// group (the epilogue below: the last of the group's blocks to arrive
+// merges the eight per-split partials from L2 with the finish's formula,
+// writes the group's partial and discards the eight dead rows from L2 so
+// they never write back) — the per-split partials of forty rows at
+// thirty-two main and eight window splits were fifty megabytes a layer,
+// written by this kernel and read back by the finish, 160 us a layer each
+// way at the DRAM rate. A cluster form (distributed shared memory) was
+// measured first: it wins only past forty rows, since clusters beyond the
+// twelve co-resident ones schedule in coarse waves (+35 us a layer at ten
+// to twenty rows). 1 = a partial per split (the prefill tile and the
+// scalar form's layout).
+template <int KV, int SD, bool kListed, LatentFormat F, int kGroup = 1>
 __global__ __launch_bounds__(dense::kThreads, (attn_flash_min_blocks<KV, SD, kListed>())) void attn_flash_kernel(
     const uint16_t* __restrict__ q_tilde, const uint8_t* __restrict__ latent,
     const float* __restrict__ latent_scale,
@@ -2494,7 +2507,8 @@ __global__ __launch_bounds__(dense::kThreads, (attn_flash_min_blocks<KV, SD, kLi
     const int32_t* __restrict__ counts, int rows, int n_split, int local_heads,
     int block_tokens, const int32_t* __restrict__ block_tables,
     int blocks_per_request, int blocks_total, float scale, float* __restrict__ m_ws,
-    float* __restrict__ l_ws, float* __restrict__ c_ws) {
+    float* __restrict__ l_ws, float* __restrict__ c_ws, int32_t* __restrict__ tickets,
+    float* __restrict__ mg_ws, float* __restrict__ lg_ws, float* __restrict__ cg_ws) {
   dgpp_pdl_wait();
   constexpr int NTOK = kListed ? 16 : dense::kTile;  // tokens per tile (per slab when listed)
   using G = dense::Geo<KV, SD, NTOK>;
@@ -2814,6 +2828,122 @@ __global__ __launch_bounds__(dense::kThreads, (attn_flash_min_blocks<KV, SD, kLi
   };
   publish(m_lo, m_lo_run, l_lo, 0);
   publish(m_hi, m_hi_run, l_hi, 1);
+  if constexpr (kGroup > 1) {
+    // The group merge: splits s0 .. s0 + kGroup - 1 of this row pair take a
+    // ticket (tickets[blockIdx.x * n_groups + g], zero at rest, reset by
+    // the last — replay-safe), and the LAST block to arrive merges the
+    // group's partials from L2 with the finish kernel's formula — mhat =
+    // max m_s, w_s = exp(m_s - mhat), l = sum w_s l_s, c = sum w_s c_s in
+    // split order — into the group's partial at split index g of
+    // n_split / kGroup (mg_ws / lg_ws / cg_ws), then discards the eight
+    // dead c rows from L2. The grouping is fixed per request (kGroup
+    // splits a group whatever the batch), so a row's output does not
+    // depend on the rows beside it; an empty split (m = -inf, l = 0,
+    // c = 0) weighs nothing and an empty group publishes m = -inf, which
+    // the finish skips. The fence / ticket order is the router's: a block
+    // fences its partial before its ticket; the last fences again before
+    // reading them (L2 loads: the rows were written by other SMs).
+    __shared__ int s_last;
+    __shared__ float s_w[kGroup][M];
+    const int g = s / kGroup;
+    const int n_groups = n_split / kGroup;
+    const int s0 = g * kGroup;
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      int32_t* t = tickets + static_cast<int64_t>(blockIdx.x) * n_groups + g;
+      const int ticket = atomicAdd(t, 1);
+      s_last = ticket == kGroup - 1 ? 1 : 0;
+      if (s_last) *t = 0;
+    }
+    __syncthreads();
+    if (!s_last) return;
+    __threadfence();
+    for (int mrow = static_cast<int>(threadIdx.x); mrow < M; mrow += dense::kThreads) {
+      const int m = m0 + mrow;
+      if (m >= total_m) continue;
+      const int qr = m / local_heads, h = m % local_heads;
+      float mb[kGroup], lb[kGroup];
+      float mhat = -INFINITY;
+#pragma unroll
+      for (int b = 0; b < kGroup; ++b) {
+        const int64_t idx = (int64_t(qr) * n_split + s0 + b) * local_heads + h;
+        mb[b] = __ldcg(m_ws + idx);
+        lb[b] = __ldcg(l_ws + idx);
+        mhat = fmaxf(mhat, mb[b]);
+      }
+      float lsum = 0.f;
+#pragma unroll
+      for (int b = 0; b < kGroup; ++b) {
+        const float w = (mhat == -INFINITY || mb[b] == -INFINITY) ? 0.f : expf(mb[b] - mhat);
+        lsum += w * lb[b];
+        s_w[b][mrow] = w;
+      }
+      const int64_t gidx = (int64_t(qr) * n_groups + g) * local_heads + h;
+      mg_ws[gidx] = mhat;
+      lg_ws[gidx] = lsum;
+    }
+    __syncthreads();
+    // The c rows: M rows x KV columns as float4s over the block, kPer
+    // outputs a thread a round with every group vector of the round
+    // loaded before the first add — 16 L2 loads in flight a thread (one
+    // output a round left one block reading 512 KB at ~20 GB/s: a 25 us
+    // tail on every launch, 2026-10-23). A dead output (an M-row past the
+    // batch) loads the block's first row and stores nothing.
+    constexpr int V4 = KV / 4;
+    constexpr int kPer = 2;
+    const int qr0 = m0 / local_heads, h0 = m0 % local_heads;
+    for (int i0 = static_cast<int>(threadIdx.x); i0 < M * V4; i0 += kPer * dense::kThreads) {
+      float4 v[kPer][kGroup];
+      int mrow[kPer], col[kPer], qr[kPer], h[kPer];
+      bool live[kPer];
+#pragma unroll
+      for (int u = 0; u < kPer; ++u) {
+        const int i = i0 + u * dense::kThreads;
+        live[u] = i < M * V4 && m0 + i / V4 < total_m;
+        mrow[u] = live[u] ? i / V4 : 0;
+        col[u] = live[u] ? (i % V4) * 4 : 0;
+        const int m = m0 + mrow[u];
+        qr[u] = live[u] ? m / local_heads : qr0;
+        h[u] = live[u] ? m % local_heads : h0;
+#pragma unroll
+        for (int b = 0; b < kGroup; ++b)
+          v[u][b] = __ldcg(reinterpret_cast<const float4*>(
+              c_ws + ((int64_t(qr[u]) * n_split + s0 + b) * local_heads + h[u]) * KV + col[u]));
+      }
+#pragma unroll
+      for (int u = 0; u < kPer; ++u) {
+        if (!live[u]) continue;
+        float4 csum = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+        for (int b = 0; b < kGroup; ++b) {
+          const float w = s_w[b][mrow[u]];
+          csum.x += w * v[u][b].x;
+          csum.y += w * v[u][b].y;
+          csum.z += w * v[u][b].z;
+          csum.w += w * v[u][b].w;
+        }
+        const int64_t gidx = (int64_t(qr[u]) * n_groups + g) * local_heads + h[u];
+        *reinterpret_cast<float4*>(cg_ws + gidx * KV + col[u]) = csum;
+      }
+    }
+    // The group's per-split c rows are dead: discard their 128-byte lines
+    // from L2 (the rows are 2 KB on a 256-byte-aligned buffer) so the
+    // fifty megabytes a layer never write back to DRAM — after every
+    // thread's merge reads of them (a thread ahead discarded lines a
+    // thread behind was still loading: the group-prefill invariance gate
+    // and the 40-step decode budget caught it, 2026-10-23).
+    __syncthreads();
+    constexpr int kLines = KV * 4 / 128;
+    for (int i = static_cast<int>(threadIdx.x); i < kGroup * M * kLines; i += dense::kThreads) {
+      const int b = i / (M * kLines), rem = i % (M * kLines), mrow = rem / kLines, line = rem % kLines;
+      const int m = m0 + mrow;
+      if (m >= total_m) continue;
+      const int qr = m / local_heads, h = m % local_heads;
+      const float* row = c_ws + ((int64_t(qr) * n_split + s0 + b) * local_heads + h) * KV;
+      asm volatile("discard.global.L2 [%0], 128;" ::"l"(row + line * 32) : "memory");
+    }
+  }
 }
 
 constexpr int kCombineStagedSplits = 128;
@@ -3707,7 +3837,7 @@ void dsa_gather_index_pools(const int32_t* block_table, int pools_per_block,
 
 namespace {
 constexpr int kSelectMaxRows = 8;      // rows per launch: the kernel's shared-memory bound
-constexpr int kSelectLayoutRows = 32;  // rows the workspace is laid out for (the decode batch's cap; 32 since 2026-09-14 for DeepSeek-V4.1's six-slot batch)
+constexpr int kSelectLayoutRows = 96;  // rows the workspace is laid out for: the decode batch's cap (the engine's kDecodeRowsMax; 96 since 2026-10-23 for sixteen DSpark slots, 64 for twelve earlier that day, 32 from 2026-09-14 for six)
 constexpr int kSelectDefaultGrid = 96;  // measured optimum (dsa_select_bench, 2026-09-06)
 size_t select_align256(size_t b) { return (b + 255) / 256 * 256; }
 size_t select_keys_bytes(int rows, int64_t pools) {
@@ -3720,7 +3850,7 @@ size_t select_hist_bytes(int rows) {
 
 size_t dsa_select_workspace_bytes(int max_rows, int64_t max_pools) {
   if (max_rows <= 0 || max_rows > kSelectLayoutRows || max_pools <= 0)
-    throw std::invalid_argument("dsa_select_workspace_bytes: rows in [1, 32], pools > 0");
+    throw std::invalid_argument("dsa_select_workspace_bytes: rows in [1, 96], pools > 0");
   // Laid out for kSelectLayoutRows rows regardless of max_rows:
   // the histograms follow the keys at a FIXED offset the launcher derives
   // the same way, whatever row count a call brings. (They used to follow
@@ -4062,7 +4192,7 @@ void dsa_attn_partial(const void* q_tilde, const void* latent_cache,
 }
 
 namespace {
-template <int KV, int SD, bool kListed, LatentFormat F>
+template <int KV, int SD, bool kListed, LatentFormat F, int kGroup>
 void launch_attn_flash_variant(dim3 grid, const void* q_tilde,
                                const void* latent_cache, const float* latent_scale,
                                const int32_t* req_ids, const int64_t* pos,
@@ -4071,16 +4201,17 @@ void launch_attn_flash_variant(dim3 grid, const void* q_tilde,
                                int local_heads, int block_tokens,
                                const int32_t* block_tables, int blocks_per_request,
                                int blocks_total, float scale, float* m_ws, float* l_ws, float* c_ws,
+                               int32_t* tickets, float* mg_ws, float* lg_ws, float* cg_ws,
                                cudaStream_t stream) {
-  attn_flash_kernel<KV, SD, kListed, F><<<grid, dense::kThreads,
-                                          dense::Geo<KV, SD, kListed ? 16 : dense::kTile>::smem_bytes, stream>>>(
+  constexpr size_t kSmem = dense::Geo<KV, SD, kListed ? 16 : dense::kTile>::smem_bytes;
+  attn_flash_kernel<KV, SD, kListed, F, kGroup><<<grid, dense::kThreads, kSmem, stream>>>(
       static_cast<const uint16_t*>(q_tilde),
       static_cast<const uint8_t*>(latent_cache), latent_scale, req_ids, pos, topk,
       topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
-      blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws);
+      blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws);
 }
 
-template <int KV, int SD, bool kListed>
+template <int KV, int SD, bool kListed, int kGroup>
 void launch_attn_flash_format(LatentFormat format, dim3 grid, const void* q_tilde,
                               const void* latent_cache, const float* latent_scale,
                               const int32_t* req_ids, const int64_t* pos,
@@ -4089,37 +4220,38 @@ void launch_attn_flash_format(LatentFormat format, dim3 grid, const void* q_tild
                               int local_heads, int block_tokens,
                               const int32_t* block_tables, int blocks_per_request,
                               int blocks_total, float scale, float* m_ws, float* l_ws, float* c_ws,
+                              int32_t* tickets, float* mg_ws, float* lg_ws, float* cg_ws,
                               cudaStream_t stream) {
   switch (format) {
     case LatentFormat::kBf16:
-      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kBf16>(
+      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kBf16, kGroup>(
           grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
           counts, rows, n_split, local_heads, block_tokens, block_tables,
-          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
       break;
     case LatentFormat::kFp8:
-      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp8>(
+      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp8, kGroup>(
           grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
           counts, rows, n_split, local_heads, block_tokens, block_tables,
-          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
       break;
     case LatentFormat::kFp4:
-      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp4>(
+      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp4, kGroup>(
           grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
           counts, rows, n_split, local_heads, block_tokens, block_tables,
-          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
       break;
     case LatentFormat::kFp8Block:
-      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp8Block>(
+      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp8Block, kGroup>(
           grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
           counts, rows, n_split, local_heads, block_tokens, block_tables,
-          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
       break;
     case LatentFormat::kFp4Block:
-      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp4Block>(
+      launch_attn_flash_variant<KV, SD, kListed, LatentFormat::kFp4Block, kGroup>(
           grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk, topk_stride,
           counts, rows, n_split, local_heads, block_tokens, block_tables,
-          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
       break;
   }
 }
@@ -4133,9 +4265,16 @@ bool launch_attn_flash(const void* q_tilde, const void* latent_cache,
                        int blocks_per_request, float scale, float* m_ws,
                        float* l_ws, float* c_ws, cudaStream_t stream,
                        LatentFormat format, const float* latent_scale, int rope,
-                       int blocks_total) {
+                       int blocks_total, int group, int32_t* tickets, float* mg_ws, float* lg_ws,
+                       float* cg_ws) {
   if (rows <= 0) return true;
   if (blocks_total < 0) blocks_total = blocks_per_request;
+  // The split groups (listed form only): 1, or kAttnSplitGroup dividing
+  // n_split with the tickets and the group partials' buffers.
+  if (group != 1 && (!kListed || group != kAttnSplitGroup || n_split % kAttnSplitGroup != 0 || tickets == nullptr ||
+                     mg_ws == nullptr || lg_ws == nullptr || cg_ws == nullptr))
+    throw std::invalid_argument(
+        "dsa attention: the split group must be 1, or kAttnSplitGroup dividing n_split with tickets and group buffers (listed form)");
   // The compiled geometries: 512 and 256 without a tail, 512 + 64 with one.
   if (rope == 0 && kv_lora != 512 && kv_lora != 256) return false;  // caller falls back
   if (rope != 0 && !(kv_lora == 512 && rope == 64)) return false;
@@ -4147,21 +4286,32 @@ bool launch_attn_flash(const void* q_tilde, const void* latent_cache,
   dsa_prepare_kernel_smem();
   const int total_m = rows * local_heads;
   dim3 grid{unsigned((total_m + dense::kM - 1) / dense::kM), unsigned(n_split)};
-  if (rope == 64) {
-    launch_attn_flash_format<512, 576, kListed>(
-        format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
-        topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
-        blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
-  } else if (kv_lora == 512) {
-    launch_attn_flash_format<512, 512, kListed>(
-        format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
-        topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
-        blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
+  const auto dispatch = [&](auto group_tag) {
+    constexpr int kG = decltype(group_tag)::value;
+    if (rope == 64) {
+      launch_attn_flash_format<512, 576, kListed, kG>(
+          format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
+          topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
+    } else if (kv_lora == 512) {
+      launch_attn_flash_format<512, 512, kListed, kG>(
+          format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
+          topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
+    } else {
+      launch_attn_flash_format<256, 256, kListed, kG>(
+          format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
+          topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
+          blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, tickets, mg_ws, lg_ws, cg_ws, stream);
+    }
+  };
+  if constexpr (kListed) {
+    if (group == kAttnSplitGroup)
+      dispatch(std::integral_constant<int, kAttnSplitGroup>{});
+    else
+      dispatch(std::integral_constant<int, 1>{});
   } else {
-    launch_attn_flash_format<256, 256, kListed>(
-        format, grid, q_tilde, latent_cache, latent_scale, req_ids, pos, topk,
-        topk_stride, counts, rows, n_split, local_heads, block_tokens, block_tables,
-        blocks_per_request, blocks_total, scale, m_ws, l_ws, c_ws, stream);
+    dispatch(std::integral_constant<int, 1>{});
   }
   DGPP_CUDA_OK(cudaGetLastError());
   return true;
@@ -4179,7 +4329,7 @@ bool dsa_attn_dense(const void* q_tilde, const void* latent_cache,
                                   nullptr, rows, n_split, local_heads, kv_lora,
                                   block_tokens, block_tables, blocks_per_request,
                                   scale, m_ws, l_ws, c_ws, stream, format,
-                                  latent_scale, rope, -1);
+                                  latent_scale, rope, -1, 1, nullptr, nullptr, nullptr, nullptr);
 }
 
 bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
@@ -4188,12 +4338,13 @@ bool dsa_attn_listed(const void* q_tilde, const void* latent_cache,
                      int kv_lora, int block_tokens, const int32_t* block_tables,
                      int blocks_per_request, float scale, float* m_ws, float* l_ws,
                      float* c_ws, cudaStream_t stream, LatentFormat format,
-                     const float* latent_scale, int rope, int blocks_total) {
+                     const float* latent_scale, int rope, int blocks_total, int group, int32_t* tickets,
+                     float* mg_ws, float* lg_ws, float* cg_ws) {
   return launch_attn_flash<true>(q_tilde, latent_cache, req_ids, nullptr, topk,
                                  topk_stride, counts, rows, n_split, local_heads,
                                  kv_lora, block_tokens, block_tables,
                                  blocks_per_request, scale, m_ws, l_ws, c_ws, stream,
-                                 format, latent_scale, rope, blocks_total);
+                                 format, latent_scale, rope, blocks_total, group, tickets, mg_ws, lg_ws, cg_ws);
 }
 
 void dsa_attn_combine(const float* m_ws, const float* l_ws, const float* c_ws,

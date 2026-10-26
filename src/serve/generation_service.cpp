@@ -2764,6 +2764,10 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
             int64_t{policy.prefill_latency.idle_floor_tokens});
   out.gauge("dgpp_prefill_adaptive_limit_tokens", "Last leader-selected prefill ceiling; 0 means fixed budgeting.",
             m.prefill_adaptive_limit_tokens);
+  out.gauge("dgpp_prefill_decode_pass_ms",
+            "The decoders' own pass the controller takes out of the allowance before sizing a chunk, at the last "
+            "tick's load; 0 with no decoders, none measured or fixed budgeting.",
+            m.prefill_decode_pass_ms);
   out.counter("dgpp_first_token_target_misses_total", "Choices whose first token exceeded the configured latency target.",
               static_cast<int64_t>(st.first_token_target_misses));
   out.counter("dgpp_decode_gap_target_misses_total", "Token-producing passes exceeding a request's decode gap target.",
@@ -3051,6 +3055,11 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prefill_chunk_computed_tokens);
   out.append(",\"adaptive_limit_tokens\":");
   append_json_int(&out, m.prefill_adaptive_limit_tokens);
+  {
+    char dbuf[48];
+    std::snprintf(dbuf, sizeof(dbuf), ",\"decode_pass_ms\":%.1f", m.prefill_decode_pass_ms);
+    out.append(dbuf);
+  }
   out.append("}");
   out.append("}");
   out.append(",\"service\":{\"requests_total\":");

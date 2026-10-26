@@ -196,7 +196,7 @@ the others. Startup checks the combined memory plan before loading the model.
 | `engine.default_max_tokens` | Answer-token budget when a request omits `max_tokens`. Clients can set their own value. Under `full` admission, the prompt plus this budget must fit the context allowance or the request is rejected. Templates generally use much larger defaults to allow long answers and reasoning. | 256 tokens |
 | `engine.queue_limit` | Maximum requests waiting for a slot or memory. Further arrivals receive HTTP 503 `overloaded`. A larger queue absorbs bursts but allows longer waits without adding processing capacity. | 64 |
 | `engine.max_connections` | Maximum open HTTP connections on rank 0, including idle connections and streams. Excess connections receive HTTP 503. Size this separately from active request slots. | 64 |
-| `engine.admission` | When context memory is reserved. `full` reserves the prompt plus requested answer budget before starting. `grow` reserves less initially and expands during generation; if space runs out, the youngest request is stopped. `grow` can fit more work at once, with a risk of interrupting requests. | `full` |
+| `engine.admission` | When context memory is reserved. `full` reserves the prompt plus requested answer budget before starting: an agent client that asks for 32K tokens per call (opencode) pins prompt plus 32K per live session, about 160K tokens for five sessions, whatever the answers use, and that reservation rather than the prompts is what evicts idle sessions' cached prefixes from a pool sized for the prompts. `grow` reserves less initially and expands during generation; if space runs out, the youngest request is stopped. `grow` can fit more work at once, with a risk of interrupting requests. A larger pool (`kv_dtype: "fp8"` doubles the tokens per byte on the families that support it; keep `prefill_attention: "fp8"` with it where the family supports that, or the default bf16 arithmetic widens every code first and prefill slows) or a smaller client output cap are the other ways out. | `full` |
 | `engine.admission_window` | Number of answer tokens reserved at a time under `grow`; must be positive. Larger increments reserve more unused space but need fewer reservation updates. Has no effect with `full`. | 256 tokens |
 | `engine.kv_dtype` | Precision of cached model state. Lower precision saves memory but can change answers; weights are unaffected. GLM-5.3 supports `bf16`, `fp8` and `fp4` for its latent cache; its index cache stays FP8. MiMo and Flint support `bf16` and `fp8`. Qwen3.8-27B supports `fp8` on both releases: the Full layers' K/V as e4m3 codes at the mixed NVFP4 release's shipped cache scales, or at unit scales on the FP8 release, which ships none (the codes are the e4m3 rounding of K and V, the common scale-free fp8 cache; 2026-10-18, measured at the bf16 cache's floor in the [FP8 model card](model_cards/Qwen3.8-27B-FP8.md)); half the Full layers' pool bytes, decode at 256K 16 % faster. Qwen3.8-Flash-Next supports `bf16` and per-token/head scaled `fp8`; GLM-4.7 keeps BF16 caches, and DeepSeek uses its architecture's own formats. | `bf16` |
 
@@ -220,7 +220,7 @@ Its memory budget is separate from the KV token pool.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.prefix_cache_gib` | Memory budget per rank for saved prompt state. A larger cache can retain more reusable prefixes but leaves less memory for other uses. `0` disables it. See [cache sizing](prefix-cache.md). | 1.5 GiB |
+| `engine.prefix_cache_gib` | Memory budget per rank for saved prompt state. A larger cache can retain more reusable prefixes but leaves less memory for other uses. `0` disables it. A chat turn costs about two entries, an agent call about three, and eviction is LRU without time expiry, so an idle agent session survives about slots ÷ 3 other calls. See [cache sizing](prefix-cache.md). | 1.5 GiB |
 | `engine.prefix_min_tokens` | Earliest prompt position at which any snapshot may be saved. Higher values keep short probes and requests from replacing longer cached conversations. Shorter prompts can still reuse matching entries. `0` allows snapshots at every supported cut. | 1024 tokens |
 | `engine.prefix_head_snapshots` | Save an extra snapshot at the first structural prompt boundary, such as the end of the system prompt. This can help a new conversation or a client that shortened its history reuse that prefix. Uses another cache entry and obeys `prefix_min_tokens`. Disabled on DeepSeek's bounded prefill path, which cannot take extra cuts. | true |
 
@@ -236,14 +236,24 @@ give active streams and new arrivals a chance to run sooner.
 By default, the scheduler measures chunk cost and adjusts chunk size against
 two soft latency targets. These targets are not deadlines: long prompts, busy
 slots and memory pressure can make requests miss them. Set both targets to
-`0` to use fixed budgets. See [tuning automatic prefill](optimizing_performance.md#tuning-automatic-prefill)
+`0` to use fixed budgets; the startup line names the policy in force
+(`adaptive: …` or `fixed budgets (both latency targets 0)`). While requests
+decode, the controller takes their own pass out of the allowance and charges
+a chunk only for what it adds (since 2026-10-22; before that a small chunk
+looked dear per token and the limit could settle at 128 tokens beside
+several readers). On the mixed-prefill families, every serving family, the
+busy budget and the adaptive limit are one amount per pass shared by every
+prompt reading in it, not a per-prompt figure. For several concurrent agent
+sessions with long prompts, compare the defaults against fixed budgets
+(`1024` busy, `2048` idle, both targets `0`): the field evidence for that load
+is fixed. See [tuning automatic prefill](optimizing_performance.md#tuning-automatic-prefill)
 for examples and measurement guidance.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.prefill_budget_tokens` | Prompt work allowed while other requests are decoding. `-1` chooses automatically, starting at `prefill_initial_tokens`. A positive value sets an upper limit; adaptation may choose less. `0` disables budgeted interleaving during admission, so a long prompt can delay other work. Chunk sizes also obey the engine's alignment and capacity limits. | -1 (automatic) |
+| `engine.prefill_budget_tokens` | Prompt work allowed while other requests are decoding. `-1` chooses automatically, starting at `prefill_initial_tokens`. A positive value sets an upper limit; adaptation may choose less. `0` disables budgeted interleaving during admission, so a long prompt can delay other work. Chunk sizes also obey the engine's alignment and capacity limits. One amount per pass, shared by every prompt reading in it on the mixed-prefill families: four readers under `1024` get about 256 tokens each per pass. Size it for the readers together. | -1 (automatic) |
 | `engine.prefill_idle_budget_tokens` | Maximum prompt work per chunk when idle. `0` chooses up to 4096 tokens with automatic busy budgeting, or the busy budget when that is explicit. A positive value must be aligned and at least the busy budget. Larger idle chunks can finish a lone prompt sooner but delay a newly arriving request. | 0 (derive from busy policy) |
-| `engine.decode_gap_target_ms` | Soft target for time between a request's generation steps that produce tokens. Lower values favor smoother streaming by limiting competing prefill work, potentially slowing prompt processing. `0` disables this target. | 1000 ms |
+| `engine.decode_gap_target_ms` | Soft target for time between a request's generation steps that produce tokens. Lower values favor smoother streaming by limiting competing prefill work, potentially slowing prompt processing. The decoders' own pass, learned from ticks that only decode, comes out of this allowance before any prompt token does; `scheduler.prefill_chunks.decode_pass_ms` shows it. `0` disables this target. | 1000 ms |
 | `engine.first_token_target_ms` | Soft target from arrival to first token, including queue time. Lower values favor responsiveness to arrivals and may reduce prompt-processing throughput. `0` disables this target. | 3000 ms |
 | `engine.prefill_initial_tokens` | Starting automatic chunk size before timing measurements exist; must be positive. Larger values can improve initial prompt throughput but make the first chunk take longer. Adjusted to alignment, capacity and the idle ceiling. | 256 tokens |
 | `engine.prefill_idle_floor_tokens` | Minimum automatic chunk size after measuring cost, when nothing is decoding or waiting for a free slot. Keeps a lone long prompt from being split into inefficient tiny chunks. Higher values can delay new arrivals by one larger chunk. Rounded down to alignment and capped by the idle ceiling; `0` uses the minimum alignment. | 1024 tokens |
@@ -313,6 +323,7 @@ during generation. They do not select a different checkpoint unless stated.
 | `engine.embed_sharding` | Full GLM-5.3 and DeepSeek embedding-table placement. `replicated` keeps the full table on every rank. `vocab` divides vocabulary rows among ranks, saving memory but adding communication for token lookups. Other families ignore it. | `replicated` |
 | `engine.ngram_table` | Qwen3.8-Flash-Next's n-gram table, which supplies embeddings for token sequences. `resident` keeps it in device-accessible memory. `mmap` reads needed rows from local storage through the host page cache, saving resident memory but adding storage access that can slow requests. DeepSeek's Engram table uses its own mapped sidecar. | `resident` |
 | `engine.ngram_table_model` | Hugging Face `ORG/NAME` repository supplying the n-gram table when the main Qwen checkpoint omits it, as with the AutoRound hybrid. Only table tensors come from this repository. It must be available in the model cache. | Empty: use the main checkpoint's table |
+| `engine.engram_source` | Hugging Face `ORG/NAME` repository supplying DeepSeek-V4.1's Engram tables when the checkpoint omits them, as the EXL3 re-pack does: the base release (`deepseek-ai/DeepSeek-V4.1-Flash-1017`). Only the table tensors come from this repository, and its Engram sidecar serves when the checkpoint has none. It must be available in the model cache. Refused for other families. | Empty: use the checkpoint's own tables |
 | `engine.ngram_prestage` | With Qwen's `ngram_table: "mmap"`, and with DeepSeek-V4.1's Engram tables (always mmap'ed), fetch the next prefill chunk's table rows while the current chunk runs: the next chunk's rows are hashed from its host ids behind the current chunk's last tokens and gathered on a side stream; the next chunk takes them when its identity matches. Overlapping the work reduces waiting without changing values (a 32K DeepSeek-V4.1 prefill had 110–160 ms of the gather exposed per 4,096-token chunk). `false` uses sequential staging. | true |
 | `engine.fp8_head` | Qwen FP8 vocabulary-head computation: `gemv` processes rows in chunks; `mma` uses a streaming tensor-core computation. `mma` can improve performance and uses the same head reduction across row counts, but does not remove numerical differences earlier in the model. Requires `dense_weights: "fp8"`; NVFP4 templates select `mma`. | `gemv` |
 | `engine.mtp_expert_format` | Qwen MTP draft-expert checkpoint layout. Use `fp8` for the NVIDIA release's separate FP8 experts, or `bf16_fused` for the RadixArk release's combined BF16 tensors, which are converted to FP8 at load time. The Qwen3.5 MoE release uses `bf16` for separate BF16 draft experts, converted to block FP8 at load time. This changes draft proposals; the target still verifies them. Match the checkpoint layout so the loader can read it. Other families ignore it. | `fp8` |
@@ -444,6 +455,7 @@ settings; use your deployment's measured values.
 | `engine.mtp_schedule_base_ms` | Estimated fixed milliseconds per pass, including draft work; must be nonnegative. Higher fixed cost makes accepting several tokens in one pass more valuable. Used with row cost to estimate throughput. | 28.0 ms |
 | `engine.mtp_schedule_lambda` | Value assigned to decode time, in tokens/ms. Higher values demand more expected benefit before checking another draft. `0` derives an initial value as `1 / (base_ms + row_ms)`; a positive value supplies the floor for adaptation. | 0 (derived) |
 | `engine.mtp_schedule_min_depth` | Fewest drafts verified per scheduled step, from 1 to 5 and no more than the draft width. Higher values force more checking even when confidence is low. | 1 |
+| `engine.mtp_schedule_options` | At most this many scheduled verify depths, from 0 to 6: the engine spreads them evenly between `engine.mtp_schedule_min_depth` and the draft width, always keeping the full block (three on a 4-draft block are 1, 3 and 4). `0` takes every depth the graph-variant budget holds. Fewer options round a policy depth up to the next one, never down: the DeepSeek EXL3 template pins three because its confidence under-reads the third row on code, where the depth-2 option cost 8 % of the tokens a step (2026-10-23). | `0` |
 | `engine.mtp_schedule_adapt` | Update the value of decode time from committed tokens and modeled pass cost. This helps depth follow the workload and concurrency. `false` uses the fixed configured or derived value. | true |
 | `engine.mtp_schedule_sampled_scale` | Scale predicted acceptance for sampled requests using greedy drafts, from 0 to 1. Smaller positive values are more conservative and tend to verify fewer drafts. `0` disables depth scheduling for those requests and verifies the full block. | 0.93 |
 
@@ -452,10 +464,27 @@ settings; use your deployment's measured values.
 These controls apply when `engine.dflash_model` is set. The eager engine runs
 without a full decode graph on one node; the graph engine is required for
 multi-node DFlash2. Options marked eager-only do not tune the graph path.
+On the Qwen3.8-Flash-Next family (`qwen4_exp`) the recorded block draft runs
+on the graph engine, and the drafter's block confidence feeds the scheduler
+settings above. `engine.dflash_model` names it in a template (the
+Qwen3.8-27B releases) or `--dflash-model DIR_OR_ID` selects it at boot on a
+template that names MTP, for example:
+`dgpp-serve --config deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json --dflash-model incoai/Qwen3.8-Flash-Next-DFlash2 --dflash-weights fp8 --draft-head screen --mtp-schedule`
+(the drafter replaces the MTP draft, so the template's `mtp_depth`,
+`mtp_schedule`, `lookup_draft`, `lookup_tail` and `draft_head` revert to
+their defaults unless the command line names them). With `mtp_schedule` true,
+the scheduler chooses the verification depth from the drafter's confidence
+and the configured cost model. Measure those costs on the selected deployment;
+acceptance and throughput depend on its target weights and workload.
+Add `--draft-head screen` explicitly to screen DFlash2's proposal head;
+target verification keeps the full served head. Flash-Next also uses its
+recurrent-state checkpoint/replay path for DFlash2. See the
+[performance notes](optimizing_performance.md#flash-next-dflash2) for the
+pass-time and acceptance tradeoffs.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.dflash_model` | Qwen draft checkpoint, as a Hugging Face ID or local directory; for example, `z-lab/Qwen3.8-27B-DFlash2` or `z-lab/Qwen3.5-122B-A10B-DFlash`. The architecture selects v2 or v1. Replaces native MTP, so set `mtp: false`. Verifies up to seven proposals per step and needs extra model memory. The v1 drafter still computes its full 16-row block; use BF16 draft weights and keep `mtp_schedule: false`. Multi-node use requires `decode_graph: true`; one node can use either engine. Requests with logprobs, logit bias or a grammar use plain decode. | Empty (off) |
+| `engine.dflash_model` | Qwen draft checkpoint, as a Hugging Face ID or local directory; for example, `z-lab/Qwen3.8-27B-DFlash2`, `z-lab/Qwen3.5-122B-A10B-DFlash` or `incoai/Qwen3.8-Flash-Next-DFlash2`. The architecture selects v2 or v1. Replaces native MTP, so set `mtp: false`. Verifies up to seven proposals per step and needs extra model memory. The v1 drafter still computes its full 16-row block; use BF16 draft weights and keep `mtp_schedule: false`. Multi-node use requires `decode_graph: true`; one node can use either engine. Requests with logprobs, logit bias or a grammar use plain decode. | Empty (off) |
 | `engine.dflash_weights` | Draft-matrix storage. `checkpoint` keeps BF16 weights, with lossless packing where supported by `bf16_weights`. `fp8` converts them to FP8 at load time, reducing draft weight reads; some BF16 data remains for context processing. Quantization can change proposals and acceptance, while target verification remains exact. | `checkpoint` |
 | `engine.dflash_verify_graph` | Eager engine: replay the multi-request verification batch as a CUDA graph to reduce launch overhead. `false` launches the packed batch directly. A lone request stays on its scalar path. | true |
 | `engine.dflash_draft_batch` | Eager engine: propose drafts for active speculative requests together, reusing one read of the draft weights. `false` drafts one request at a time. Batching can improve total throughput. | true |
