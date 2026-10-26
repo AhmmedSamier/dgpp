@@ -18,7 +18,7 @@ reader never meets surrogate pairs (it decodes single \\uXXXX only; the
 tokenizer gate had to learn that lesson the hard way).
 
 Each case carries the render globals as JSON ("kwargs"), the expected
-render ("render"), and the token ids HF tokenizers 0.23.1 produces for
+render ("render"), and the token ids HF tokenizers produces for
 the render ("ids" — the template->tokenizer integration differential;
 the C++ gate re-encodes with glm_tokenizer and compares).
 
@@ -36,9 +36,10 @@ in outputs; empty conversation and empty content.
 Keyed by chat_template.jinja's FNV-1a-64 hash (header "template_hash"),
 cross-referenced with the tokenizer revision ("tokenizer_revision").
 
-Regenerating: python3
-    tools/gen_chat_template_goldens.py
-(the venv pins jinja2 3.1.2 + tokenizers 0.23.1).
+Regenerating: install requirements-tools.txt in a venv, then run
+    python tools/gen_chat_template_goldens.py
+Jinja2 >=3.1.6 is required for the sandbox protections. The corpus header
+records the Jinja2 version used to render it.
 """
 import glob
 import json
@@ -836,14 +837,14 @@ def main():
 
     jinja_env = env()
     template = jinja_env.from_string(tpl_raw.decode("utf-8"))
+    import jinja2
     import tokenizers
     tok = tokenizers.Tokenizer.from_file(tok_path)
 
     with open(out_path, "w", encoding="utf-8") as f:
         header = {
             "model": model,
-            "jinja2": jinja_env.jinja2.__version__ if hasattr(
-                jinja_env, "jinja2") else "3.1.2",
+            "jinja2": jinja2.__version__,
             "template_hash": template_hash,
             "tokenizer_revision": tok_hash,
             "cases": len(cases),

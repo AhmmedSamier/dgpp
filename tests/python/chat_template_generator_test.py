@@ -1,8 +1,12 @@
 """Template reference generation uses restricted Jinja capabilities; no model needed."""
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 try:
     import jinja2
@@ -68,6 +72,39 @@ class ChatTemplateGeneratorTest(unittest.TestCase):
     def test_template_validation_error_is_preserved(self):
         with self.assertRaisesRegex(jinja2.TemplateError, "unsupported role"):
             self.env.from_string("{{ raise_exception('unsupported role') }}").render()
+
+    def test_main_records_runtime_version_and_golden_data(self):
+        # Keep the metadata/output regression independent of the optional
+        # tokenizer package and checkpoint downloads.
+        tokenizers = Mock()
+        tokenizer = tokenizers.Tokenizer.from_file.return_value
+        tokenizer.encode.return_value.ids = [42, 43]
+        content = "城市 {{ 1 + 1 }}"
+        kwargs = {"messages": [{"role": "user", "content": content}]}
+        with tempfile.TemporaryDirectory() as directory:
+            template = Path(directory) / "chat_template.jinja"
+            tokenizer_json = Path(directory) / "tokenizer.json"
+            output = Path(directory) / "goldens.jsonl"
+            template.write_text("{{ messages[0].content }}", encoding="utf-8")
+            tokenizer_json.write_text("{}", encoding="utf-8")
+            argv = ["gen_chat_template_goldens.py", "--model", "Qwen/fixture",
+                    "--template", str(template), "--tokenizer-json", str(tokenizer_json),
+                    "--out", str(output)]
+            with patch.object(sys, "argv", argv), \
+                    patch.dict(sys.modules, {"tokenizers": tokenizers}), \
+                    patch.object(generator, "QWEN_CASES", [("literal_user", kwargs)]), \
+                    redirect_stdout(io.StringIO()):
+                generator.main()
+            header, case = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(header["jinja2"], jinja2.__version__)
+            self.assertEqual(header["model"], "Qwen/fixture")
+            self.assertEqual(header["cases"], 1)
+            self.assertEqual(header["template_hash"], f"{generator.fnv1a64(template.read_bytes()):016x}")
+            self.assertEqual(header["tokenizer_revision"], f"{generator.fnv1a64(tokenizer_json.read_bytes()):016x}")
+            self.assertEqual(case, {"name": "literal_user", "kwargs": kwargs,
+                                    "render": content, "ids": [42, 43]})
+            tokenizers.Tokenizer.from_file.assert_called_once_with(str(tokenizer_json))
+            tokenizer.encode.assert_called_once_with(content)
 
 
 if __name__ == "__main__":
