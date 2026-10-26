@@ -1,8 +1,11 @@
+#include <fstream>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "../common/temp_dir.hpp"
 #include "common/test.hpp"
 #include "text/chat_template.hpp"
 
@@ -79,6 +82,66 @@ DGPP_TEST(chat_template_limits_render_depth) {
           {}, "render depth");
 }
 
+DGPP_TEST(chat_template_limits_load) {
+  const dgpp::test::TempDir fixture("dgpp_chat_template_limits");
+  const auto path = (fixture.path() / "chat_template.jinja").string();
+  const auto write = [&](size_t bytes) {
+    std::ofstream out;
+    out.exceptions(std::ios::failbit | std::ios::badbit);
+    out.open(path, std::ios::binary | std::ios::trunc);
+    out << std::string(bytes, 'x');
+    out.close();
+  };
+  write(kMiB);
+  equal(ChatTemplate::load(path).render(Value::map_value({})), std::string(kMiB, 'x'));
+  // Exercise both a short final read and a full read beyond the limit.
+  for (const size_t bytes : {kMiB + 1, kMiB + 65536}) {
+    write(bytes);
+    bool rejected = false;
+    try {
+      (void)ChatTemplate::load(path);
+    } catch (const std::runtime_error& e) {
+      equal(e.what(), "chat-template: line 1: resource limit: source bytes");
+      rejected = true;
+    }
+    if (!rejected) throw std::runtime_error("expected oversized file refusal");
+  }
+  write(1);
+  equal(ChatTemplate::load(path).render(Value::map_value({})), "x");
+}
+
+DGPP_TEST(chat_template_limits_concurrent_recovery) {
+  const auto compiled = ChatTemplate::compile(
+      "{% macro f(n) %}{% if n > 0 %}{{ f(n - 1) }}{% else %}x{% endif %}{% endmacro %}"
+      "{{ f(n) }}");
+  const auto good = Value::map_value({{"n", Value::integer(10)}});
+  const auto bad = Value::map_value({{"n", Value::integer(1000)}});
+  std::vector<std::future<void>> workers;
+  workers.reserve(4);
+  // A failed launch destroys the promise before joining the started workers.
+  std::promise<void> start;
+  const auto ready = start.get_future().share();
+  for (int i = 0; i < 4; ++i) {
+    workers.push_back(std::async(std::launch::async, [&, ready] {
+      ready.wait();
+      for (int attempt = 0; attempt < 8; ++attempt) {
+        equal(compiled.render(good), "x");
+        bool rejected = false;
+        try {
+          (void)compiled.render(bad);
+        } catch (const std::runtime_error& e) {
+          equal(e.what(), "chat-template: line 1: resource limit: render depth");
+          rejected = true;
+        }
+        if (!rejected) throw std::runtime_error("expected recursive macro refusal");
+        equal(compiled.render(good), "x");
+      }
+    }));
+  }
+  start.set_value();
+  for (auto& worker : workers) worker.get();
+}
+
 DGPP_TEST(chat_template_limits_range) {
   equal(render("{{ range(262144)|length }}"), "262144");
   equal(render("{{ range(262144,0,-1)|length }}"), "262144");
@@ -138,7 +201,18 @@ DGPP_TEST(chat_template_limits_steps) {
                              " %}{% endmacro %}{% for i in range(n) %}{{ m() }}{% endfor %}";
   equal(render(source, {{"n", Value::integer(100)}}), "");
   rejects(source, {{"n", Value::integer(40000)}}, "render steps");
-  // Empty loop bodies still spend a step for every iteration.
-  rejects("{% for i in range(10000) %}{% for j in range(1000) %}{% endfor %}{% endfor %}", {},
-          "render steps");
+}
+
+DGPP_TEST(chat_template_limits_empty_loop_steps) {
+  // Spend most of the budget on assignments, avoiding ten million allocations
+  // of loop metadata under ASan. Each assignment costs a statement and a
+  // constant evaluation; the outer loop costs three setup steps and one per
+  // iteration: 3 + 999 * (1 + 5000 * 2) = 9,991,002 steps.
+  std::string source = "{% for i in range(999) %}";
+  for (int i = 0; i < 5000; ++i) source += "{% set x = 1 %}";
+  source += "{% endfor %}{% for j in range(n) %}{% endfor %}";
+  // The empty loop's three setup steps leave exactly 8,995 iterations. This
+  // also detects a missing iteration charge: neither case would then refuse.
+  equal(render(source, {{"n", Value::integer(8995)}}), "");
+  rejects(source, {{"n", Value::integer(8996)}}, "render steps");
 }

@@ -403,9 +403,16 @@ build. The suites cover:
   finite range/slice results at integer boundaries, checked addition/subtraction
   and line-numbered errors. `chat_template_limits_` covers compile limits,
   recursion, dispatch exhaustion, preflight range cardinality, string growth,
-  cumulative emission across discarded captures/macros, and recovery after
-  refusal. Run these under ASan/UBSan as well as optimized builds;
+  cumulative emission across discarded captures/macros, file-loading boundaries,
+  and recovery after refusal, including concurrent calls on one compiled template.
+  Run these under the separate `asan` and `ubsan` presets as well as optimized builds.
+  Dispatch-exhaustion cases deliberately reach the production ten-million-step
+  budget, so allow for their instrumentation cost when setting external timeouts;
   the checkpoint template goldens separately cover valid family renders and IDs.
+  `DGPP_TEST_FILTER=serve_templateLimits_ build-ci/serve_test` exercises the real
+  template interpreter through HTTP with a fake engine/tokenizer: limit errors
+  return HTTP 400 naming `messages` before tokenization or SSE headers, and a
+  subsequent valid request succeeds on the same compiled template and service.
 - the M6 host suites: the tokenizer (55 byte-exact goldens per family,
   hash-keyed — GLM-5.3, Qwen3.8-Flash-Next and GLM-4.7 corpora), the chat
   template (26 / 20 / 26 goldens + 8 refusal negatives, the tool-call
