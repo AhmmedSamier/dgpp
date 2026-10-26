@@ -1396,7 +1396,9 @@ DGPP_TEST(serve_prometheusExposition_countersAndDistributions) {
   // WHEN the exposition is read,
   Client m(rig.port());
   m.send_all("GET /metrics/prometheus HTTP/1.1\r\nHost: t\r\n\r\n");
-  const std::string r = m.read_until("dgpp_request_generation_tokens_count", 2000);
+  // The final metric name can arrive before its labels and value. Consume
+  // the complete response so TCP fragmentation cannot truncate the checks.
+  const std::string r = m.read_response(2000);
 
   // THEN it is the text format: the route's original unlabeled lines
   // intact, every family declared once, the counters typed and labeled
