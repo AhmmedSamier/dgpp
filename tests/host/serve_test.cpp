@@ -4589,7 +4589,22 @@ DGPP_TEST(serve_edge_reasoningAliasesAndSwitchOnlyModels) {
             rig.frontend.last_globals().find("reasoning_effort") == std::string::npos, "no invented effort level on switch-only model");
   }
   rig.frontend.reads_enable_thinking = false;
-  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"low")"), "\"param\""), "reasoning_effort");
+  // Always-on models such as Flint accept positive effort without inventing
+  // template controls, but still cannot disable reasoning.
+  for (const auto* effort : {"minimal", "low", "medium", "high", "xhigh", "max"}) {
+    const auto result = post_until_usage(
+        rig, chat_body("abcd", 2, std::string(R"(,"reasoning_effort":")") + effort + "\""));
+    require(result.find("200 OK") != std::string::npos,
+            "always-on model accepts positive effort");
+    const auto rendered_globals = rig.frontend.last_globals();
+    const auto parsed_globals = dgpp::minijson::parse(rendered_globals);
+    require(!parsed_globals.root.find("enable_thinking") &&
+                !parsed_globals.root.find("reasoning_effort"),
+            "always-on model receives no invented template controls");
+  }
+  expect_invalid_request(post_chat(rig, chat_body("abcd", 2, R"(,"reasoning_effort":"none")"),
+                                  "\"param\""),
+                         "reasoning_effort");
 }
 
 DGPP_TEST(serve_edge_filePreprocessingPipeliningAndDisconnect) {
