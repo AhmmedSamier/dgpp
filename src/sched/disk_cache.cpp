@@ -377,6 +377,7 @@ void DiskCache::cancel_restore(int entry) {
   e.state = State::kResident;
   e.op = 0;
   --stats_.restores;
+  stats_.pages_read -= static_cast<int64_t>(e.blocks.size()) + (e.partial >= 0 ? 1 : 0) + cfg_.blob_pages;
 }
 
 void DiskCache::abort_restore(int entry) {
