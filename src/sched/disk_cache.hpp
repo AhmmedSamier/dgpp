@@ -125,6 +125,11 @@ class DiskCache {
   const Entry& entry(int index) const { return entries_.at(static_cast<size_t>(index)); }
   // Every live entry's index, ascending (the metrics, the tests).
   std::vector<int> live() const;
+  // The index's invariants, recomputed from scratch (the tests): every
+  // live entry's runs and records cover exactly the pages marked used,
+  // no page twice, every record's refcount is the live entries naming it,
+  // every live entry is in the hash index. `why` names the first breach.
+  bool consistent(std::string* why = nullptr) const;
   // Pages an entry's token ids take at a position (8 bytes a token).
   int ids_pages_for(int64_t position) const;
 

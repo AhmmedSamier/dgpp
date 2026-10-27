@@ -31,6 +31,78 @@ DiskCache::DiskCache(const Config& cfg) : cfg_(cfg) {
   used_.assign(static_cast<size_t>(cfg_.pages), 0);
 }
 
+bool DiskCache::consistent(std::string* why) const {
+  const auto fail = [&](const std::string& what) {
+    if (why != nullptr) *why = what;
+    return false;
+  };
+  if (!enabled()) return true;
+  std::vector<uint8_t> seen(static_cast<size_t>(cfg_.pages), 0);
+  std::vector<int> refs(blocks_.size(), 0);
+  int64_t used = 0;
+  const auto take = [&](int64_t page, const std::string& what) {
+    if (page < 0 || page >= cfg_.pages) return fail(what + ": page " + std::to_string(page) + " outside the slab");
+    if (seen[static_cast<size_t>(page)]) return fail(what + ": page " + std::to_string(page) + " used twice");
+    seen[static_cast<size_t>(page)] = 1;
+    ++used;
+    return true;
+  };
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const Entry& e = entries_[i];
+    if (!e.live) continue;
+    const std::string what = "entry " + std::to_string(i);
+    if (e.position <= 0) return fail(what + ": empty");
+    if (static_cast<int64_t>(e.ids.size()) != e.position) return fail(what + ": ids do not cover the position");
+    if (e.ids_pages != ids_pages_for(e.position)) return fail(what + ": ids pages differ from the position's");
+    if (e.blob_page < 0) return fail(what + ": no blob run");
+    for (int64_t q = e.blob_page; q < e.blob_page + cfg_.blob_pages + e.ids_pages; ++q)
+      if (!take(q, what + " run")) return false;
+    const int64_t n_full = cfg_.block_tokens > 0 ? e.position / cfg_.block_tokens : 0;
+    const bool partial = cfg_.block_tokens > 0 && e.position % cfg_.block_tokens != 0;
+    if (static_cast<int64_t>(e.blocks.size()) != n_full) return fail(what + ": block records do not cover the full blocks");
+    if (partial != (e.partial >= 0)) return fail(what + ": the partial record does not match the position");
+    for (const int b : e.blocks) {
+      if (b < 0 || static_cast<size_t>(b) >= blocks_.size() || !blocks_[static_cast<size_t>(b)].live)
+        return fail(what + ": a dead block record");
+      ++refs[static_cast<size_t>(b)];
+    }
+    if (e.partial >= 0) {
+      if (static_cast<size_t>(e.partial) >= blocks_.size() || !blocks_[static_cast<size_t>(e.partial)].live)
+        return fail(what + ": a dead partial record");
+      ++refs[static_cast<size_t>(e.partial)];
+    }
+    bool indexed = false;
+    const auto range = by_hash_.equal_range(e.hash);
+    for (auto it = range.first; it != range.second; ++it) indexed = indexed || it->second == static_cast<int>(i);
+    if (!indexed) return fail(what + ": missing from the hash index");
+    if (e.state == State::kResident && e.op != 0) return fail(what + ": resident with an op");
+    if (e.state != State::kResident && e.op == 0) return fail(what + ": in flight without an op");
+  }
+  for (size_t b = 0; b < blocks_.size(); ++b) {
+    const Block& blk = blocks_[b];
+    if (!blk.live) {
+      if (refs[b] != 0) return fail("block " + std::to_string(b) + ": dead but referenced");
+      continue;
+    }
+    if (blk.refs != refs[b])
+      return fail("block " + std::to_string(b) + ": refcount " + std::to_string(blk.refs) + " against " +
+                  std::to_string(refs[b]) + " live references");
+    if (blk.refs <= 0) return fail("block " + std::to_string(b) + ": live with no references");
+    if (!take(blk.page, "block " + std::to_string(b))) return false;
+    for (const uint64_t id : blk.identities) {
+      const auto it = by_identity_.find(id);
+      if (it != by_identity_.end() && it->second != static_cast<int>(b) &&
+          blocks_[static_cast<size_t>(it->second)].live && !blocks_[static_cast<size_t>(it->second)].ready)
+        continue;  // a newer, not yet ready record may shadow an identity
+    }
+  }
+  for (int64_t p = 0; p < cfg_.pages; ++p)
+    if ((used_[static_cast<size_t>(p)] != 0) != (seen[static_cast<size_t>(p)] != 0))
+      return fail("page " + std::to_string(p) + (used_[static_cast<size_t>(p)] ? " marked used but unowned" : " owned but not marked"));
+  if (used != used_pages_) return fail("used pages " + std::to_string(used_pages_) + " against " + std::to_string(used) + " owned");
+  return true;
+}
+
 int DiskCache::ids_pages_for(int64_t position) const {
   if (cfg_.page_bytes == 0 || position <= 0) return 0;
   const size_t bytes = static_cast<size_t>(position) * sizeof(int64_t);
@@ -457,13 +529,25 @@ DiskCache::Adopted DiskCache::restore(
     bool ok = position > 0 && static_cast<int64_t>(n_blocks) == n_full && partial == (partial_page >= 0) &&
               static_cast<int>(ids_pages) == ids_pages_for(position) && in_range(blob_page) &&
               blob_page + run <= cfg_.pages;
-    for (int64_t q = blob_page; ok && q < blob_page + run; ++q) ok = !used_[static_cast<size_t>(q)];
+    // The pages this entry claims, against the index so far AND against
+    // itself: a corrupted entry may name one page twice (a block page
+    // inside its own run, its partial on one of its blocks - the fuzz's
+    // find of 2026-10-27).
+    std::vector<int64_t> claimed;
+    const auto claim = [&](int64_t q) {
+      if (std::find(claimed.begin(), claimed.end(), q) != claimed.end()) return false;
+      claimed.push_back(q);
+      return true;
+    };
+    for (int64_t q = blob_page; ok && q < blob_page + run; ++q) ok = !used_[static_cast<size_t>(q)] && claim(q);
     for (const int64_t p : block_pages) {
       if (!ok) break;
-      // A block page is shared only with another block record.
-      ok = in_range(p) && (!used_[static_cast<size_t>(p)] || by_page.count(p) != 0);
+      // A block page is shared only with another block record; within the
+      // entry a page appears once.
+      ok = in_range(p) && (!used_[static_cast<size_t>(p)] || by_page.count(p) != 0) && claim(p);
     }
-    if (ok && partial_page >= 0) ok = in_range(partial_page) && !used_[static_cast<size_t>(partial_page)];
+    if (ok && partial_page >= 0)
+      ok = in_range(partial_page) && !used_[static_cast<size_t>(partial_page)] && claim(partial_page);
     std::vector<int64_t> ids;
     if (ok) {
       std::vector<uint8_t> raw(static_cast<size_t>(ids_pages) * cfg_.page_bytes);
