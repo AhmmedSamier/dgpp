@@ -384,6 +384,15 @@ struct ClusterConfig {
     std::string path = "~/dgpp/nvme-cache";
     double capacity_gib = 0.0;
     int64_t min_tokens = 0;
+    // One staging slice in MiB: two slices of device work move per tick, so
+    // the chunk paces spills and restores against the decode step and
+    // sizes the staging (4 x chunk + 8 MiB) in the memory plan.
+    int64_t chunk_mib = 64;
+    // Spills and restores started but not yet committed by the world: a
+    // started entry is busy (never evicted) until its commit.
+    int64_t max_ops = 4;
+    // Free space the pre-flight leaves on the slab's filesystem, in GiB.
+    double reserve_gib = 1.0;
   } nvme_cache;
   struct Paths {
     std::string log_dir = "~/dgpp/log";

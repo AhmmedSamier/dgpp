@@ -521,7 +521,12 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           n.capacity_gib = number(p.value, nk, what);
           if (n.capacity_gib < 0.0) fail(what, "'" + nk + "' must be >= 0");
         } else if (p.key == "min_tokens") n.min_tokens = integer(p.value, nk, what, 0, 1ll << 40);
-        else fail(what, "unknown key '" + nk + "'");
+        else if (p.key == "chunk_mib") n.chunk_mib = integer(p.value, nk, what, 4, 4096);
+        else if (p.key == "max_ops") n.max_ops = integer(p.value, nk, what, 1, 256);
+        else if (p.key == "reserve_gib") {
+          n.reserve_gib = number(p.value, nk, what);
+          if (n.reserve_gib < 0.0) fail(what, "'" + nk + "' must be >= 0");
+        } else fail(what, "unknown key '" + nk + "'");
       }
       if (n.enabled && n.capacity_gib <= 0.0)
         fail(what, "'nvme_cache.capacity_gib' must be positive when the cache is enabled");

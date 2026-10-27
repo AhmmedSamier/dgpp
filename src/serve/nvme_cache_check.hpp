@@ -26,7 +26,7 @@ struct NvmeCachePlan {
   std::string describe() const;
 };
 
-// The reserve the tier never takes from a filesystem: 1 GiB.
+// The reserve the tier never takes from a filesystem (nvme_cache.reserve_gib): 1 GiB by default.
 constexpr size_t kNvmeCacheReserveBytes = size_t{1} << 30;
 
 // Plans the slab for a rank: `block_bytes` one cache block's bytes across
@@ -40,6 +40,6 @@ constexpr size_t kNvmeCacheReserveBytes = size_t{1} << 30;
 // when it does not fit.
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
                               size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
-                              bool create_directory = true);
+                              bool create_directory = true, size_t reserve_bytes = kNvmeCacheReserveBytes);
 
 }  // namespace dgpp::serve

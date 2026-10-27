@@ -31,11 +31,11 @@ std::string NvmeCachePlan::describe() const {
 
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
                               size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
-                              bool create_directory) {
+                              bool create_directory, size_t reserve_bytes) {
   NvmeCachePlan plan;
   plan.directory = expand_home(path);
   plan.slab = plan.directory + "/rank" + std::to_string(rank) + ".slab";
-  plan.reserve_bytes = kNvmeCacheReserveBytes;
+  plan.reserve_bytes = reserve_bytes;
   if (!(capacity_gib > 0.0) || !std::isfinite(capacity_gib)) {
     plan.error = "nvme_cache.capacity_gib must be a positive number of GiB";
     return plan;

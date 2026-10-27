@@ -827,6 +827,19 @@ DGPP_TEST(cluster_config_parses_nvme_cache) {
   require(on.nvme_cache.enabled && on.nvme_cache.path == "/nvme/dgpp" && on.nvme_cache.capacity_gib == 64.0 &&
               on.nvme_cache.min_tokens == 2048,
           "every field parses");
+  require(on.nvme_cache.chunk_mib == 64 && on.nvme_cache.max_ops == 4 && on.nvme_cache.reserve_gib == 1.0,
+          "the pacing, op bound and reserve default");
+  const dgpp::serve::ClusterConfig tuned = dgpp::serve::parse_cluster_config(
+      "{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"enabled\":true,\"capacity_gib\":8,"
+      "\"chunk_mib\":32,\"max_ops\":2,\"reserve_gib\":2.5}}",
+      "t");
+  require(tuned.nvme_cache.chunk_mib == 32 && tuned.nvme_cache.max_ops == 2 && tuned.nvme_cache.reserve_gib == 2.5,
+          "the pacing, op bound and reserve parse");
+  for (const char* bad : {"\"chunk_mib\":2", "\"chunk_mib\":8192", "\"chunk_mib\":1.5", "\"max_ops\":0",
+                          "\"max_ops\":257", "\"reserve_gib\":-1", "\"reserve_gib\":true"})
+    require(refusal(std::string("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{") + bad + "}}")
+                    .find("nvme_cache.") != std::string::npos,
+            std::string("refused by name: ") + bad);
   // Refusals, by name.
   require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"enabled\":true}}")
                   .find("capacity_gib") != std::string::npos,

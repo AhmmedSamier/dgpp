@@ -221,8 +221,8 @@ in-memory hit.
 document cut) and the close-time entries a completed answer leaves spill
 right after they are taken, once they are at least `min_tokens` long
 (default 0: every entry memory keeps, which `engine.prefix_min_tokens`
-already floors). A spill or restore advances two 64 MiB
-slices per scheduler tick — the device side of every slice is enqueued on
+already floors). A spill or restore advances two slices of `chunk_mib`
+(64 MiB) per scheduler tick — the device side of every slice is enqueued on
 the model stream between decode steps, never on a second stream beside
 the fabric's collectives — and a file worker moves the slices to and
 from the slab. Between requests that is the NVMe's rate; during decode
@@ -256,9 +256,11 @@ process's and are not reused across restarts.
 
 **Sizing and checks.** `capacity_gib` must hold at least one entry at the
 request context limit plus its blob (startup prints the minimum) and must
-fit the filesystem's free space beside a 1 GiB reserve; both are checked on
-every rank before anything is allocated, and by `--memory-plan`. The tier's
-staging buffers (264 MiB per rank) are part of the memory plan. Watch
+fit the filesystem's free space beside `reserve_gib` (1 GiB); both are checked
+on every rank before anything is allocated, and by `--memory-plan`. The tier's
+staging buffers (4 × `chunk_mib` + 8 MiB: 264 MiB per rank at the default) are
+part of the memory plan. At most `max_ops` spills and restores are in flight;
+a started entry is busy, never evicted, until the world commits it. Watch
 `nvme_cache` in `/v1/metrics`: `pages_used` against `pages_total`,
 `spilled`, `restored`, `restore_failed`, `spill_skipped` (no room), and
 `evictions` (disk retention at work).

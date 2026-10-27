@@ -230,6 +230,9 @@ struct WorldSettings {
   bool nvme_cache = false;
   double nvme_cache_capacity_gib = 0.0;
   int64_t nvme_cache_min_tokens = 0;
+  int64_t nvme_cache_chunk_mib = 64;   // the staging slice (pacing, the memory plan)
+  int64_t nvme_cache_max_ops = 4;      // ops started but not committed (a decision input)
+  double nvme_cache_reserve_gib = 1.0;  // the pre-flight's free-space reserve
   bool operator==(const WorldSettings&) const = default;
 };
 std::string encode_journal_settings(const WorldSettings& s);

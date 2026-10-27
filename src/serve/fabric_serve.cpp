@@ -458,8 +458,9 @@ std::string encode_journal_settings(const WorldSettings& s) {
   // The NVMe cold tier (issue #26): written only when on, so a record
   // without it is byte for byte the earlier format.
   if (s.nvme_cache)
-    out += std::format(",\"nvme\":1,\"nvmegib\":{:.17g},\"nvmemin\":{}", s.nvme_cache_capacity_gib,
-                       s.nvme_cache_min_tokens);
+    out += std::format(",\"nvme\":1,\"nvmegib\":{:.17g},\"nvmemin\":{},\"nvmechunk\":{},\"nvmeops\":{},\"nvmereserve\":{:.17g}",
+                       s.nvme_cache_capacity_gib, s.nvme_cache_min_tokens, s.nvme_cache_chunk_mib,
+                       s.nvme_cache_max_ops, s.nvme_cache_reserve_gib);
   out += ",\"ngt\":";
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
@@ -742,6 +743,16 @@ JournalRecord decode_journal_line(std::string_view line) {
       s.nvme_cache_min_tokens = num("nvmemin").as_int();
       if (s.nvme_cache_min_tokens < 0)
         throw std::runtime_error("journal: settings record with a bad NVMe cache minimum");
+      // The pacing, op bound and reserve keys (absent in records before
+      // 2026-10-27: the defaults they ran with).
+      if (v.find("nvmechunk")) {
+        s.nvme_cache_chunk_mib = num("nvmechunk").as_int();
+        s.nvme_cache_max_ops = num("nvmeops").as_int();
+        s.nvme_cache_reserve_gib = num("nvmereserve").as_double();
+        if (s.nvme_cache_chunk_mib < 4 || s.nvme_cache_chunk_mib > 4096 || s.nvme_cache_max_ops < 1 ||
+            s.nvme_cache_max_ops > 256 || !(s.nvme_cache_reserve_gib >= 0.0))
+          throw std::runtime_error("journal: settings record with a bad NVMe cache chunk, op bound or reserve");
+      }
     }
     // Records before 2026-09-10 carry no table residency: resident.
     if (const dgpp::minijson::Value* ngt = v.find("ngt")) s.ngram_table = std::string(ngt->as_string());

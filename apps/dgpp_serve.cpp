@@ -1853,6 +1853,9 @@ int main(int argc, char** argv) {
   std::string nvme_cache_path = "~/dgpp/nvme-cache";
   double nvme_cache_gib = 0.0;
   int64_t nvme_cache_min_tokens = 0;
+  int64_t nvme_cache_chunk_mib = 64;
+  int64_t nvme_cache_max_ops = 4;
+  double nvme_cache_reserve_gib = 1.0;
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<float> frequency_penalty, presence_penalty;
   std::optional<int> top_k;
@@ -1994,6 +1997,9 @@ int main(int argc, char** argv) {
     nvme_cache_path = c.nvme_cache.path;
     nvme_cache_gib = c.nvme_cache.capacity_gib;
     nvme_cache_min_tokens = c.nvme_cache.min_tokens;
+    nvme_cache_chunk_mib = c.nvme_cache.chunk_mib;
+    nvme_cache_max_ops = c.nvme_cache.max_ops;
+    nvme_cache_reserve_gib = c.nvme_cache.reserve_gib;
     admission_mode = e.admission;
     admission_window = e.admission_window;
     model_alias = e.model_alias;
@@ -2392,7 +2398,9 @@ int main(int argc, char** argv) {
                      : "off",
         dflash_model.empty() ? "off" : dflash_model, dflash_weights, lookup_draft ? 1 : 0,
         lookup_nmin, lookup_nstrong, lookup_agree, lookup_tail,
-        nvme_cache ? std::format("{}:{}", nvme_cache_gib, nvme_cache_min_tokens) : std::string("off"));
+        nvme_cache ? std::format("{}:{}:{}:{}:{}", nvme_cache_gib, nvme_cache_min_tokens, nvme_cache_chunk_mib,
+                                 nvme_cache_max_ops, nvme_cache_reserve_gib)
+                   : std::string("off"));
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
     try {
@@ -2510,6 +2518,9 @@ int main(int argc, char** argv) {
         ws.nvme_cache = nvme_cache;
         ws.nvme_cache_capacity_gib = nvme_cache ? nvme_cache_gib : 0.0;
         ws.nvme_cache_min_tokens = nvme_cache ? nvme_cache_min_tokens : 0;
+        ws.nvme_cache_chunk_mib = nvme_cache_chunk_mib;
+        ws.nvme_cache_max_ops = nvme_cache_max_ops;
+        ws.nvme_cache_reserve_gib = nvme_cache_reserve_gib;
         journal->broadcast(dgpp::serve::encode_journal_settings(ws));
         DGPP_LOG_INFO("journal: settings pushed to {} peer(s): {}", world - 1,
                       canonical());
@@ -2624,6 +2635,9 @@ int main(int argc, char** argv) {
         if (nvme_cache) {
           nvme_cache_gib = ws.nvme_cache_capacity_gib;
           nvme_cache_min_tokens = ws.nvme_cache_min_tokens;
+          nvme_cache_chunk_mib = ws.nvme_cache_chunk_mib;
+          nvme_cache_max_ops = ws.nvme_cache_max_ops;
+          nvme_cache_reserve_gib = ws.nvme_cache_reserve_gib;
         }
         const std::string now = canonical();
         if (own != now)
@@ -3343,14 +3357,15 @@ int main(int argc, char** argv) {
     // the free space beside it and the minimum capacity, from the family's
     // block record and snapshot sizes, before anything is allocated; its
     // staging buffers join the engine's bytes in the memory plan.
-    const size_t kNvmeChunkBytes = dgpp::sched::SchedulerEngine::DiskEnable{}.chunk_bytes;
+    const size_t kNvmeChunkBytes = static_cast<size_t>(nvme_cache_chunk_mib) << 20;
     const size_t nvme_staging_bytes = nvme_cache ? dgpp::nvme_tier_staging_bytes(kNvmeChunkBytes) : 0;
     dgpp::serve::NvmeCachePlan nvme_plan;
     if (nvme_cache) {
       nvme_plan = dgpp::serve::plan_nvme_cache(nvme_cache_path, nvme_cache_gib, rank,
                                                family->cache_block_bytes(world, mtp && graph_world),
                                                snapshot_bytes, block_tokens, context_limit,
-                                               /*create_directory=*/!memory_plan_only);
+                                               /*create_directory=*/!memory_plan_only,
+                                               static_cast<size_t>(nvme_cache_reserve_gib * 1024.0 * 1024.0 * 1024.0));
       DGPP_LOG_INFO("rank {}: {}", rank, nvme_plan.describe());
       if (!nvme_plan.error.empty()) {
         DGPP_LOG_ERROR("rank {}: the NVMe cache does not fit — {}", rank, nvme_plan.error);
@@ -3375,6 +3390,7 @@ int main(int argc, char** argv) {
       en.capacity_bytes = nvme_plan.capacity_bytes;
       en.chunk_bytes = kNvmeChunkBytes;
       en.min_tokens = nvme_cache_min_tokens;  // 0: every entry memory keeps (engine.prefix_min_tokens floors them)
+      en.max_ops = static_cast<int>(nvme_cache_max_ops);
       en.rank = rank;
       eng->disk_enable(en);
       const dgpp::sched::SchedulerEngine::DiskInfo info = eng->disk_info();
@@ -3399,11 +3415,12 @@ int main(int argc, char** argv) {
                       rank, info.blob_pages, nvme_plan.blob_pages,
                       static_cast<int64_t>(info.blob_pages - nvme_plan.blob_pages) *
                           static_cast<int64_t>(info.page_bytes));
-      DGPP_LOG_INFO("rank {}: NVMe cache on — {} pages of {} bytes ({:.2f} GiB), entries of at least {} tokens",
+      DGPP_LOG_INFO("rank {}: NVMe cache on — {} pages of {} bytes ({:.2f} GiB), entries of at least {} tokens, "
+                    "{} MiB slices, {} ops in flight at most",
                     rank, info.pages, info.page_bytes,
                     static_cast<double>(info.pages) * static_cast<double>(info.page_bytes) /
                         (1024.0 * 1024.0 * 1024.0),
-                    info.min_tokens);
+                    info.min_tokens, nvme_cache_chunk_mib, info.max_ops);
     };
     if (memory_plan_only) {
       // The check alone, for the shape this rank would run (world > 1: the

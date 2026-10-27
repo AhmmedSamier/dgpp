@@ -173,6 +173,7 @@ class NvmeTier {
     i.page_bytes = page_bytes_;
     i.blob_pages = blob_pages_;
     i.min_tokens = cfg_.min_tokens;
+    i.max_ops = cfg_.max_ops;
     return i;
   }
 

@@ -412,6 +412,7 @@ class SchedulerEngine {
     size_t page_bytes = 0;    // one cache block's planes, rounded to 4 KiB
     int64_t blob_pages = 0;   // pages one snapshot blob spans
     int64_t min_tokens = 0;   // entries below this position are not spilled
+    int max_ops = 4;          // spills and restores started but not committed
   };
   virtual DiskInfo disk_info() const { return {}; }
   // Opens the tier: the slab file (created, sized to the capacity), the
@@ -425,6 +426,7 @@ class SchedulerEngine {
     // per tick, so 64 MiB is 128 MiB of cache state per tick.
     size_t chunk_bytes = size_t{64} << 20;
     int64_t min_tokens = 0;
+    int max_ops = 4;              // ops in flight at most (the scheduler's bound)
     int rank = 0;
   };
   virtual void disk_enable(const DiskEnable& enable) {
@@ -1100,7 +1102,6 @@ class Scheduler {
     std::string id;
   };
   std::vector<DiskWant> disk_wanted_;
-  static constexpr int kDiskOpsMax = 4;
   bool restore_in_flight() const;
 };
 

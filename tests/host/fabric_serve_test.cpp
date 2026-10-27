@@ -1887,6 +1887,9 @@ DGPP_TEST(journal_disk_commits_ride_the_tick_record) {
   on.nvme_cache = true;
   on.nvme_cache_capacity_gib = 64.5;
   on.nvme_cache_min_tokens = 2048;
+  on.nvme_cache_chunk_mib = 32;
+  on.nvme_cache_max_ops = 2;
+  on.nvme_cache_reserve_gib = 2.5;
   require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(on)).world_settings == on,
           "the tier's settings round trip");
   require(dgpp::serve::encode_journal_settings(off).find("nvme") == std::string::npos, "off: absent");

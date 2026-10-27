@@ -253,6 +253,9 @@ how much a token takes and how retention works.
 | `nvme_cache.path` | Directory for the slab file, created at startup if missing; each rank writes `rank<N>.slab` under it on its own node, so choose a directory on every node's local NVMe. The slab is recreated at every start (entries are not reused across restarts), and a slab left behind by a crash or an earlier path is reclaimed only when a rank reopens that same file. | `~/dgpp/nvme-cache` |
 | `nvme_cache.capacity_gib` | Size of each rank's slab in GiB. Retention evicts the least recently used entries so the slab never grows past it. Must hold at least one entry at the request context limit plus its snapshot (startup names the number) and must fit the filesystem's free space beside a 1 GiB reserve. Every rank runs rank 0's value. | 0 |
 | `nvme_cache.min_tokens` | The shortest entry worth keeping cold, in prompt tokens; shorter entries stay memory-only. `0` keeps every entry memory keeps, which `engine.prefix_min_tokens` already floors. | 0 |
+| `nvme_cache.chunk_mib` | One staging slice in MiB, from 4 to 4096. Two slices of device work move per scheduler tick, so this paces a spill or restore against the decode step (128 MiB per tick at the default) and sizes the staging buffers in the memory plan (4 × chunk + 8 MiB). A slice must hold one cache block. Every rank runs rank 0's value. | 64 |
+| `nvme_cache.max_ops` | Spills and restores started but not yet committed by the world, from 1 to 256. A started entry is busy — never evicted — until its commit, so a higher bound protects more freshly taken entries on a slow device at the cost of slots the arena cannot reclaim meanwhile. Every rank runs rank 0's value. | 4 |
+| `nvme_cache.reserve_gib` | Free space the pre-flight leaves on the slab's filesystem, in GiB. Startup refuses a capacity that would cut into it. | 1 |
 
 ## Prefill scheduling
 

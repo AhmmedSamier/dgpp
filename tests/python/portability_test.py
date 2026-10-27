@@ -52,14 +52,18 @@ class PortabilityTest(unittest.TestCase):
         # as written; its keys and types are checked by name.
         self.config.write_text(json.dumps({"model": "org/model", "world_size": 1,
                                          "nvme_cache": {"enabled": True, "path": "/nvme/dgpp",
-                                                        "capacity_gib": 64, "min_tokens": 2048}}))
+                                                        "capacity_gib": 64, "min_tokens": 2048,
+                                                        "chunk_mib": 32, "max_ops": 2, "reserve_gib": 2.5}}))
         resolved = site_env.resolve_config(self.config, self.values)
         self.assertEqual(resolved["nvme_cache"], {"enabled": True, "path": "/nvme/dgpp",
-                                                  "capacity_gib": 64, "min_tokens": 2048})
+                                                  "capacity_gib": 64, "min_tokens": 2048,
+                                                  "chunk_mib": 32, "max_ops": 2, "reserve_gib": 2.5})
         self.config.write_text(json.dumps({"model": "org/model", "world_size": 1}))
         self.assertNotIn("nvme_cache", site_env.resolve_config(self.config, self.values))
         for nvme in ({"enabled": True}, {"enabled": 1}, {"capacity_gib": -1}, {"capacity_gib": True},
-                     {"path": ""}, {"min_tokens": 1.5}, {"size": 3}, []):
+                     {"path": ""}, {"min_tokens": 1.5}, {"size": 3}, [], {"chunk_mib": 2}, {"chunk_mib": 8192},
+                     {"chunk_mib": 1.5}, {"max_ops": 0}, {"max_ops": 257}, {"reserve_gib": -1},
+                     {"reserve_gib": True}):
             with self.subTest(nvme=nvme):
                 self.config.write_text(json.dumps({"model": "org/model", "world_size": 1, "nvme_cache": nvme}))
                 with self.assertRaises(ValueError):

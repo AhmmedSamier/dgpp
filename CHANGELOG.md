@@ -6,7 +6,7 @@ project procedures and design guidance live in `docs/`.
 ## Unreleased
 - **NVMe cold tier for the prefix cache** (2026-10-27, issue #26, PR #53): the
   top-level `nvme_cache` deployment key (`enabled`, `path`, `capacity_gib`,
-  `min_tokens`) keeps entries the snapshot arena evicts — the snapshot blob
+  `min_tokens`, `chunk_mib`, `max_ops`, `reserve_gib`) keeps entries the snapshot arena evicts — the snapshot blob
   and every KV block it pins — in one preallocated slab file per rank on
   local NVMe, and restores an entry before a later matching request
   prefills its suffix. Blocks shared by a document and its attached

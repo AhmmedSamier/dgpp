@@ -130,6 +130,7 @@ Scheduler::Scheduler(SchedulerEngine* engine,
   if (disk_info_.enabled) {
     if (disk_info_.pages <= 0 || disk_info_.page_bytes == 0 || disk_info_.blob_pages <= 0)
       throw std::invalid_argument("Scheduler: the engine's cold tier reports an empty slab");
+    if (disk_info_.max_ops < 1) throw std::invalid_argument("Scheduler: the cold tier's op bound must be >= 1");
     DiskCache::Config dc;
     dc.pages = disk_info_.pages;
     dc.page_bytes = disk_info_.page_bytes;
@@ -2132,7 +2133,7 @@ void Scheduler::want_spill(int entry, const std::string& id) {
 
 void Scheduler::start_spills() {
   if (!disk_.enabled()) return;
-  while (!disk_wanted_.empty() && static_cast<int>(disk_ops_.size()) < kDiskOpsMax) {
+  while (!disk_wanted_.empty() && static_cast<int>(disk_ops_.size()) < disk_info_.max_ops) {
     const DiskWant want = disk_wanted_.front();
     disk_wanted_.erase(disk_wanted_.begin());
     if (want.entry < 0 || want.entry >= cache_.size()) continue;
