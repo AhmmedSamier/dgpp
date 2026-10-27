@@ -17,8 +17,17 @@
 // on disk keeps the token ids (the exact-match compare), the cut, the MTP
 // lookahead token and draft position, and its records; restoring it
 // reads the records into fresh pool blocks and an arena slot.
+//
+// The slab outlives the process (nvme_cache.persist): the token ids are
+// written to the slab too, in a page run right after the blob's, so the
+// index the tier keeps beside the slab is small — positions, pages, keys
+// — and serialize() / restore() carry the committed index across a
+// restart. An adopted entry's block records get synthetic identities (no
+// live block has them), so sharing resumes only once a restore commits.
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -43,7 +52,8 @@ class DiskCache {
     int64_t next_token = -1;   // the MTP lookahead constraint (-1: none)
     int64_t mtp_position = 0;  // the draft block's row counter at the cut
     uint64_t hash = 0;
-    int64_t blob_page = -1;    // the blob's first page
+    int64_t blob_page = -1;    // the blob's first page; the ids run follows it
+    int ids_pages = 0;         // pages the token ids take, right after the blob
     std::vector<int> blocks;   // block records, one per full block
     int partial = -1;          // the partial block's record, or -1
     State state = State::kResident;
@@ -73,6 +83,7 @@ class DiskCache {
     int64_t blocks_shared = 0;  // blocks a spill found already on disk
     int64_t pages_read = 0;     // pages restores read
     int64_t tokens_restored = 0;
+    int64_t adopted = 0;        // entries taken over from a previous run's index
   };
   // A spill's plan: per full block, the page to write (-1: shared with a
   // record already on disk), the blob's run and the partial block's page.
@@ -86,6 +97,8 @@ class DiskCache {
     bool duplicate = false;  // an identical entry is already on disk (nothing to do)
     int entry = -1;
     int64_t blob_page = -1;
+    int64_t ids_page = -1;   // the ids run: blob_page + blob_pages, ids_pages long
+    int ids_pages = 0;
     std::vector<int64_t> pages;
     int64_t partial_page = -1;
     std::vector<Evicted> evicted;  // the entries evicted for room
@@ -112,6 +125,28 @@ class DiskCache {
   const Entry& entry(int index) const { return entries_.at(static_cast<size_t>(index)); }
   // Every live entry's index, ascending (the metrics, the tests).
   std::vector<int> live() const;
+  // Pages an entry's token ids take at a position (8 bytes a token).
+  int ids_pages_for(int64_t position) const;
+
+  // ---- across restarts ----------------------------------------------------
+  // The committed index as bytes: every resident entry (a spill still in
+  // flight is left out, as is one with image inputs) by position, pages,
+  // key and lookahead, in least-recently-used order — the token ids stay
+  // in the slab. The tier keeps these beside the slab.
+  std::vector<uint8_t> serialize() const;
+  // Adopts such bytes into an empty index whose geometry matches theirs:
+  // each entry's ids are read from its run through `read_pages` (false:
+  // that entry is dropped), its block records are rebuilt by page with
+  // synthetic identities, and every adopted entry is older than anything
+  // new. `error` names a header that does not fit this slab (nothing
+  // adopted then).
+  struct Adopted {
+    int entries = 0;
+    int dropped = 0;
+    std::string error;
+  };
+  Adopted restore(const std::vector<uint8_t>& bytes,
+                  const std::function<bool(int64_t page, int64_t count, void* dst)>& read_pages);
 
   // The deepest entry that is on disk (resident, or restoring — a second
   // request then waits on the same op) at one of the prompt's cuts with

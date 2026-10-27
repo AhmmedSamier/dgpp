@@ -1,6 +1,8 @@
 // The NVMe cold tier's host index (sched/disk_cache.hpp, issue #26): page
 // allocation from both ends, block sharing by identity, LRU retention
 // within the capacity, the spill/restore state machine and its aborts.
+#include <cstring>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -139,6 +141,60 @@ DGPP_TEST(disk_cache_aborts_release_records_and_dedupes_identical_entries) {
   require(threw, "identities must cover every full block");
 }
 
+DGPP_TEST(disk_cache_adoption_round_trips_the_committed_index) {
+  // Two committed entries sharing two block records (one pinned), a third
+  // still spilling: the bytes carry the first two with their pages and
+  // key, the ids come back from the slab, the uncommitted one is gone.
+  DiskCache d(config(/*pages=*/64));
+  std::map<int64_t, std::vector<int64_t>> slab;  // ids runs by page, as the tier would hold them
+  const auto spill = [&](const std::vector<int64_t>& prompt, int64_t position, const std::vector<uint64_t>& ids,
+                         uint64_t op, int memory, const std::string& key = "") {
+    const auto plan = d.begin_spill(prompt.data(), position, -1, {}, 0, ids, 0, op, op, memory, key);
+    require(plan.ok && plan.ids_page == plan.blob_page + 2 && plan.ids_pages == 1, "the ids run follows the blob");
+    slab[plan.ids_page] = std::vector<int64_t>(prompt.begin(), prompt.begin() + position);
+    return plan.entry;
+  };
+  const auto a = counted(12, 1000), b = counted(12, 1000), c = counted(12, 3000);
+  const int ea = spill(a, 12, identities(3, 100), 1, 0, "agent-7");
+  d.commit_spill(ea);
+  const int eb = spill(b, 8, identities(2, 100), 2, 1);  // shares a's first two blocks
+  d.commit_spill(eb);
+  (void)spill(c, 12, identities(3, 300), 3, 2);  // in flight at the "crash"
+  require(d.live_entries() == 3 && d.stats().blocks_shared == 2, "three entries, two shared records");
+  const int64_t committed_pages = d.pages_used() - (3 + 3);  // c's three blocks and its run
+  const std::vector<uint8_t> bytes = d.serialize();
+  DiskCache fresh(config(/*pages=*/64));
+  const auto read = [&](int64_t page, int64_t count, void* dst) {
+    const auto it = slab.find(page);
+    if (it == slab.end() || count != 1) return false;
+    std::memcpy(dst, it->second.data(), it->second.size() * sizeof(int64_t));
+    return true;
+  };
+  const DiskCache::Adopted got = fresh.restore(bytes, read);
+  require(got.error.empty() && got.entries == 2 && got.dropped == 0, "two entries adopted: " + got.error);
+  require(fresh.live_entries() == 2 && fresh.live_blocks() == 3 && fresh.pages_used() == committed_pages,
+          "the shared records and the pages came back: blocks " + std::to_string(fresh.live_blocks()) +
+              ", pages " + std::to_string(fresh.pages_used()) + " vs " + std::to_string(committed_pages));
+  require(fresh.pinned_entries() == 1 && fresh.stats().adopted == 2, "the key survived");
+  const std::vector<int64_t> cuts{8, 12};
+  const std::vector<uint64_t> hashes{
+      PrefixCache::with_images(PrefixCache::hash_prefix(a.data(), 8), 8, {}),
+      PrefixCache::with_images(PrefixCache::hash_prefix(a.data(), 12), 12, {})};
+  const int hit = fresh.lookup(a, cuts, hashes);
+  require(hit >= 0 && fresh.entry(hit).position == 12 && fresh.entry(hit).key == "agent-7",
+          "a's prompt finds the adopted entry at its deepest cut");
+  // Another slab geometry refuses the bytes outright.
+  DiskCache other(config(/*pages=*/32));
+  require(!other.restore(bytes, read).error.empty() && other.live_entries() == 0, "another geometry adopts nothing");
+  // An ids run the slab cannot read drops that entry alone.
+  DiskCache lossy(config(/*pages=*/64));
+  const auto read_a_only = [&](int64_t page, int64_t count, void* dst) {
+    return page == slab.begin()->first && read(page, count, dst);
+  };
+  const DiskCache::Adopted partial = lossy.restore(bytes, read_a_only);
+  require(partial.entries == 1 && partial.dropped == 1 && lossy.live_entries() == 1, "a bad run drops its entry");
+}
+
 DGPP_TEST(disk_cache_retention_keeps_pinned_entries_past_unpinned_ones) {
   // Two entries fit; the older one carries a prompt_cache_key. The third
   // evicts the younger unpinned entry, not the pinned one; with only pinned
@@ -165,8 +221,8 @@ DGPP_TEST(disk_cache_retention_keeps_pinned_entries_past_unpinned_ones) {
 }
 
 DGPP_TEST(disk_cache_retention_evicts_lru_within_the_capacity) {
-  // 10 pages, 2 per blob: an entry of 2 blocks takes 4 pages, so two fit
-  // and the third evicts the least recently used.
+  // 10 pages, 2 per blob and 1 for the ids: an entry of 2 blocks takes 5
+  // pages, so two fit and the third evicts the least recently used.
   DiskCache d(config(/*pages=*/10));
   std::vector<int> entries;
   for (int i = 0; i < 2; ++i) {
@@ -176,14 +232,14 @@ DGPP_TEST(disk_cache_retention_evicts_lru_within_the_capacity) {
     d.commit_spill(plan.entry);
     entries.push_back(plan.entry);
   }
-  require(d.pages_used() == 8 && d.live_entries() == 2, "two entries, eight pages");
+  require(d.pages_used() == 10 && d.live_entries() == 2, "two entries, ten pages");
   d.touch(entries[0], 10);  // the first is the most recently used now
   const auto prompt = counted(12, 3000);
   const auto plan = d.begin_spill(prompt.data(), 8, -1, {}, 0, identities(2, 300), 0, 3, 11, 2);
   require(plan.ok && plan.evicted.size() == 1 && plan.evicted[0].entry == entries[1] &&
               plan.evicted[0].position == 8 && plan.evicted[0].memory == 1,
           "the least recently used entry made room and named its memory link");
-  require(d.pages_used() == 8 && d.live_entries() == 2 && d.stats().evictions == 1, "capacity held");
+  require(d.pages_used() == 10 && d.live_entries() == 2 && d.stats().evictions == 1, "capacity held");
   d.commit_spill(plan.entry);
   // An entry the slab can never hold is refused without evicting anything.
   const auto huge = d.begin_spill(prompt.data(), 40, -1, {}, 0, identities(10, 900), 0, 4, 12, 3);

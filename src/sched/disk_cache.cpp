@@ -1,6 +1,8 @@
 #include "sched/disk_cache.hpp"
 
 #include <algorithm>
+#include <cstring>
+#include <map>
 #include <stdexcept>
 
 namespace dgpp::sched {
@@ -27,6 +29,12 @@ DiskCache::DiskCache(const Config& cfg) : cfg_(cfg) {
   if (cfg_.block_tokens < 0 || cfg_.min_tokens < 0)
     throw std::invalid_argument("DiskCache: negative block or minimum tokens");
   used_.assign(static_cast<size_t>(cfg_.pages), 0);
+}
+
+int DiskCache::ids_pages_for(int64_t position) const {
+  if (cfg_.page_bytes == 0 || position <= 0) return 0;
+  const size_t bytes = static_cast<size_t>(position) * sizeof(int64_t);
+  return static_cast<int>((bytes + cfg_.page_bytes - 1) / cfg_.page_bytes);
 }
 
 int DiskCache::live_entries() const {
@@ -175,7 +183,8 @@ void DiskCache::kill_entry(int entry) {
   if (!e.live) throw std::logic_error("DiskCache: killing a dead entry");
   for (const int b : e.blocks) release_block(b);
   if (e.partial >= 0) release_block(e.partial);
-  if (e.blob_page >= 0) give_run(e.blob_page, cfg_.blob_pages);
+  if (e.blob_page >= 0) give_run(e.blob_page, cfg_.blob_pages + e.ids_pages);
+  e.ids_pages = 0;
   const auto range = by_hash_.equal_range(e.hash);
   for (auto it = range.first; it != range.second; ++it)
     if (it->second == entry) {
@@ -231,7 +240,11 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
     for (const int b : shared)
       if (b >= 0) release_block(b);
   };
-  if (new_pages + cfg_.blob_pages > cfg_.pages) {
+  // The blob's run carries the token ids behind it (the slab outlives
+  // the process; the index beside it names only pages).
+  const int ids_pages = ids_pages_for(position);
+  const int64_t run = cfg_.blob_pages + ids_pages;
+  if (new_pages + run > cfg_.pages) {
     undo_shares();
     ++stats_.spill_skipped;
     return plan;
@@ -240,8 +253,8 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
   // exists (fragmentation can deny a run with enough pages free).
   int64_t blob_page = -1;
   for (;;) {
-    if (free_pages() >= new_pages + cfg_.blob_pages) {
-      blob_page = take_run(cfg_.blob_pages);
+    if (free_pages() >= new_pages + run) {
+      blob_page = take_run(run);
       if (blob_page >= 0) break;
     }
     Evicted victim;
@@ -267,6 +280,7 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
   e.mtp_position = mtp_position;
   e.hash = h;
   e.blob_page = blob_page;
+  e.ids_pages = ids_pages;
   e.state = State::kSpilling;
   e.op = op;
   e.memory = memory_entry;
@@ -294,7 +308,7 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
     plan.partial_page = page;
     ++stats_.pages_written;
   }
-  stats_.pages_written += cfg_.blob_pages;
+  stats_.pages_written += run;
   int index = -1;
   for (size_t i = 0; i < entries_.size(); ++i)
     if (!entries_[i].live) {
@@ -312,7 +326,200 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
   plan.ok = true;
   plan.entry = index;
   plan.blob_page = blob_page;
+  plan.ids_page = blob_page + cfg_.blob_pages;
+  plan.ids_pages = ids_pages;
   return plan;
+}
+
+// ---- across restarts ------------------------------------------------------------
+
+namespace {
+constexpr char kIndexMagic[8] = {'D', 'G', 'P', 'P', 'N', 'V', 'X', '1'};
+constexpr uint64_t kAdoptedIdentity = uint64_t{1} << 63;  // no live block carries the top bit
+
+void put_u64(std::vector<uint8_t>* out, uint64_t v) {
+  for (int i = 0; i < 8; ++i) out->push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+void put_i64(std::vector<uint8_t>* out, int64_t v) { put_u64(out, static_cast<uint64_t>(v)); }
+void put_u32(std::vector<uint8_t>* out, uint32_t v) {
+  for (int i = 0; i < 4; ++i) out->push_back(static_cast<uint8_t>(v >> (8 * i)));
+}
+struct Reader {
+  const std::vector<uint8_t>& b;
+  size_t at = 0;
+  bool bad = false;
+  uint64_t u64() {
+    if (at + 8 > b.size()) {
+      bad = true;
+      return 0;
+    }
+    uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(b[at + static_cast<size_t>(i)]) << (8 * i);
+    at += 8;
+    return v;
+  }
+  int64_t i64() { return static_cast<int64_t>(u64()); }
+  uint32_t u32() {
+    if (at + 4 > b.size()) {
+      bad = true;
+      return 0;
+    }
+    uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(b[at + static_cast<size_t>(i)]) << (8 * i);
+    at += 4;
+    return v;
+  }
+  std::string str(uint32_t n) {
+    if (at + n > b.size()) {
+      bad = true;
+      return {};
+    }
+    std::string s(reinterpret_cast<const char*>(b.data() + at), n);
+    at += n;
+    return s;
+  }
+};
+}  // namespace
+
+std::vector<uint8_t> DiskCache::serialize() const {
+  std::vector<uint8_t> out;
+  out.insert(out.end(), kIndexMagic, kIndexMagic + 8);
+  put_u64(&out, static_cast<uint64_t>(cfg_.pages));
+  put_u64(&out, cfg_.page_bytes);
+  put_u64(&out, static_cast<uint64_t>(cfg_.blob_pages));
+  put_u64(&out, static_cast<uint64_t>(cfg_.block_tokens));
+  std::vector<int> order;
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const Entry& e = entries_[i];
+    if (!e.live || e.state == State::kSpilling || !e.images.empty()) continue;
+    order.push_back(static_cast<int>(i));
+  }
+  std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+    return entries_[static_cast<size_t>(a)].last_use < entries_[static_cast<size_t>(b)].last_use;
+  });
+  put_u32(&out, static_cast<uint32_t>(order.size()));
+  for (const int i : order) {
+    const Entry& e = entries_[static_cast<size_t>(i)];
+    put_i64(&out, e.position);
+    put_i64(&out, e.next_token);
+    put_i64(&out, e.mtp_position);
+    put_i64(&out, e.blob_page);
+    put_u32(&out, static_cast<uint32_t>(e.ids_pages));
+    put_u32(&out, static_cast<uint32_t>(e.key.size()));
+    out.insert(out.end(), e.key.begin(), e.key.end());
+    put_u32(&out, static_cast<uint32_t>(e.blocks.size()));
+    for (const int b : e.blocks) put_i64(&out, blocks_[static_cast<size_t>(b)].page);
+    put_i64(&out, e.partial >= 0 ? blocks_[static_cast<size_t>(e.partial)].page : -1);
+  }
+  return out;
+}
+
+DiskCache::Adopted DiskCache::restore(
+    const std::vector<uint8_t>& bytes,
+    const std::function<bool(int64_t page, int64_t count, void* dst)>& read_pages) {
+  Adopted out;
+  if (!enabled()) {
+    out.error = "the tier is off";
+    return out;
+  }
+  if (live_entries() != 0 || used_pages_ != 0) throw std::logic_error("DiskCache: adopting into a used index");
+  Reader r{bytes};
+  if (bytes.size() < 8 || std::memcmp(bytes.data(), kIndexMagic, 8) != 0) {
+    out.error = "not an index";
+    return out;
+  }
+  r.at = 8;
+  const uint64_t pages = r.u64(), page_bytes = r.u64(), blob_pages = r.u64(), block_tokens = r.u64();
+  if (r.bad || pages != static_cast<uint64_t>(cfg_.pages) || page_bytes != cfg_.page_bytes ||
+      blob_pages != static_cast<uint64_t>(cfg_.blob_pages) || block_tokens != static_cast<uint64_t>(cfg_.block_tokens)) {
+    out.error = "the index was written for another slab geometry (" + std::to_string(pages) + " pages of " +
+                std::to_string(page_bytes) + " bytes, " + std::to_string(blob_pages) + " blob pages, " +
+                std::to_string(block_tokens) + "-token blocks)";
+    return out;
+  }
+  const uint32_t count = r.u32();
+  std::map<int64_t, int> by_page;  // block records already rebuilt, by their page
+  const auto in_range = [&](int64_t p) { return p >= 0 && p < cfg_.pages; };
+  for (uint32_t n = 0; n < count && !r.bad; ++n) {
+    const int64_t position = r.i64(), next_token = r.i64(), mtp_position = r.i64(), blob_page = r.i64();
+    const uint32_t ids_pages = r.u32();
+    const std::string key = r.str(r.u32());
+    const uint32_t n_blocks = r.u32();
+    std::vector<int64_t> block_pages;
+    for (uint32_t i = 0; i < n_blocks && !r.bad; ++i) block_pages.push_back(r.i64());
+    const int64_t partial_page = r.i64();
+    if (r.bad) break;
+    // Validation before any mutation: geometry, ranges, and runs that
+    // do not collide with what is already adopted.
+    const int64_t n_full = cfg_.block_tokens > 0 ? position / cfg_.block_tokens : 0;
+    const bool partial = cfg_.block_tokens > 0 && position % cfg_.block_tokens != 0;
+    const int64_t run = cfg_.blob_pages + static_cast<int64_t>(ids_pages);
+    bool ok = position > 0 && static_cast<int64_t>(n_blocks) == n_full && partial == (partial_page >= 0) &&
+              static_cast<int>(ids_pages) == ids_pages_for(position) && in_range(blob_page) &&
+              blob_page + run <= cfg_.pages;
+    for (int64_t q = blob_page; ok && q < blob_page + run; ++q) ok = !used_[static_cast<size_t>(q)];
+    for (const int64_t p : block_pages) {
+      if (!ok) break;
+      // A block page is shared only with another block record.
+      ok = in_range(p) && (!used_[static_cast<size_t>(p)] || by_page.count(p) != 0);
+    }
+    if (ok && partial_page >= 0) ok = in_range(partial_page) && !used_[static_cast<size_t>(partial_page)];
+    std::vector<int64_t> ids;
+    if (ok) {
+      std::vector<uint8_t> raw(static_cast<size_t>(ids_pages) * cfg_.page_bytes);
+      ok = read_pages(blob_page + cfg_.blob_pages, static_cast<int64_t>(ids_pages), raw.data());
+      if (ok) {
+        ids.resize(static_cast<size_t>(position));
+        std::memcpy(ids.data(), raw.data(), static_cast<size_t>(position) * sizeof(int64_t));
+      }
+    }
+    if (!ok) {
+      ++out.dropped;
+      continue;
+    }
+    Entry e;
+    e.ids = std::move(ids);
+    e.position = position;
+    e.next_token = next_token;
+    e.mtp_position = mtp_position;
+    e.hash = PrefixCache::with_images(PrefixCache::hash_prefix(e.ids.data(), position), position, {});
+    e.blob_page = blob_page;
+    e.ids_pages = static_cast<int>(ids_pages);
+    e.state = State::kResident;
+    e.key = key;
+    e.last_use = 0;  // older than anything this run makes; the serialized order breaks ties
+    e.live = true;
+    for (int64_t q = blob_page; q < blob_page + run; ++q) {
+      used_[static_cast<size_t>(q)] = 1;
+      ++used_pages_;
+    }
+    for (const int64_t p : block_pages) {
+      const auto it = by_page.find(p);
+      if (it != by_page.end()) {
+        ++blocks_[static_cast<size_t>(it->second)].refs;
+        e.blocks.push_back(it->second);
+        continue;
+      }
+      used_[static_cast<size_t>(p)] = 1;
+      ++used_pages_;
+      const int b = new_block(p, kAdoptedIdentity | static_cast<uint64_t>(blocks_.size()));
+      blocks_[static_cast<size_t>(b)].ready = true;
+      by_page[p] = b;
+      e.blocks.push_back(b);
+    }
+    if (partial_page >= 0) {
+      used_[static_cast<size_t>(partial_page)] = 1;
+      ++used_pages_;
+      e.partial = new_block(partial_page, kAdoptedIdentity | static_cast<uint64_t>(blocks_.size()));
+      blocks_[static_cast<size_t>(e.partial)].ready = true;
+    }
+    entries_.push_back(std::move(e));
+    by_hash_.emplace(entries_.back().hash, static_cast<int>(entries_.size()) - 1);
+    ++stats_.adopted;
+    ++out.entries;
+  }
+  if (r.bad) out.error = "the index is truncated";
+  return out;
 }
 
 void DiskCache::commit_spill(int entry) {
