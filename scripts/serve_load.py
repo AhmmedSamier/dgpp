@@ -211,13 +211,28 @@ def _stream_one(host, port, model, prompt, max_tokens, think, out, temperature, 
         conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
                      headers={"Content-Type": "application/json"})
         resp = conn.getresponse()
-        if resp.status == 400 and not think:
-            # The template has no thinking knob: plain.
+        # A template-less family (Llama FIM) refuses chat twice over: first the
+        # thinking knob it lacks, then chat itself. Two retries cover the chain;
+        # the completion prompt is the FIM prompt verbatim.
+        for _ in range(2):
+            if resp.status != 400:
+                break
+            detail = resp.read(1024).decode(errors="replace")
+            if "no chat template" in detail:
+                retry_path, retry_body = "/v1/completions", {
+                    "model": model, "prompt": prompt, "max_tokens": max_tokens,
+                    "temperature": temperature, "stream": True,
+                    "stream_options": {"include_usage": True}}
+            elif "enable_thinking" in detail and not think and "chat_template_kwargs" in body:
+                # The template has no thinking knob: plain.
+                body.pop("chat_template_kwargs", None)
+                retry_path, retry_body = "/v1/chat/completions", body
+            else:
+                break
             conn.close()
-            body.pop("chat_template_kwargs", None)
             conn = http.client.HTTPConnection(host, port, timeout=900)
             t0 = time.perf_counter()
-            conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
+            conn.request("POST", retry_path, body=json.dumps(retry_body),
                          headers={"Content-Type": "application/json"})
             resp = conn.getresponse()
         out.update(read_completion(resp, on_update=on_update))

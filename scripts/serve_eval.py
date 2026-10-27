@@ -97,7 +97,26 @@ def request(path, body=None, timeout=900):
 MODEL = args.model or request("/v1/models")["data"][0]["id"]
 
 
+def completions(prompt, max_tokens=None):
+    # A template-less family (Llama FIM) refuses chat: the prompt verbatim as
+    # the completion prompt; response_format and thinking knobs do not apply.
+    body = {"model": MODEL, "prompt": prompt, "temperature": 0,
+            "max_tokens": max_tokens or args.max_tokens}
+    t0 = time.perf_counter()
+    r = request("/v1/completions", body)
+    choice = r["choices"][0]
+    usage = r.get("usage", {})
+    return {
+        "content": choice.get("text") or "",
+        "finish": choice.get("finish_reason"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "reasoning_tokens": None,
+        "seconds": round(time.perf_counter() - t0, 2),
+    }
+
+
 def chat(messages, max_tokens=None, response_format=None):
+    prompt = messages[0]["content"]
     body = {
         "model": MODEL, "messages": messages, "temperature": 0,
         "max_tokens": max_tokens or args.max_tokens,
@@ -108,8 +127,25 @@ def chat(messages, max_tokens=None, response_format=None):
     }
     if response_format is not None:
         body["response_format"] = response_format
-    t0 = time.perf_counter()
-    r = request("/v1/chat/completions", body)
+    for _ in range(4):
+        try:
+            r = request("/v1/chat/completions", body)
+            break
+        except RuntimeError as e:
+            detail = str(e)
+            # The service refuses one unsupported parameter per request; drop
+            # it and ask again, and let a template-less family (Llama FIM)
+            # take the prompt verbatim as the completion prompt.
+            if "no enable_thinking knob" in detail and "chat_template_kwargs" in body:
+                body.pop("chat_template_kwargs", None)
+            elif "cannot be enforced on this engine" in detail and "response_format" in body:
+                body.pop("response_format", None)
+            elif "no chat template" in detail:
+                return completions(prompt, max_tokens)
+            else:
+                raise
+    else:
+        raise RuntimeError("the chat retries did not converge")
     choice = r["choices"][0]
     usage = r.get("usage", {})
     return {

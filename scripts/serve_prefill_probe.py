@@ -67,24 +67,36 @@ def ask(host, port, model, prompt, no_think=False):
                "stream_options": {"include_usage": True}}
     if no_think and not ALWAYS_ON["seen"]:
         payload["chat_template_kwargs"] = {"enable_thinking": False}
+    path = "/v1/chat/completions"
     conn = http.client.HTTPConnection(host, port, timeout=1200)
     t0 = time.perf_counter()
     try:
-        conn.request("POST", "/v1/chat/completions", json.dumps(payload),
+        conn.request("POST", path, json.dumps(payload),
                      {"Content-Type": "application/json"})
         response = conn.getresponse()
-        if response.status == 400 and "chat_template_kwargs" in payload:
-            # An always-on template refuses the switch (unsupported_parameter):
-            # the probe measures the prefill alone, so ask again without it.
+        # A template-less family (Llama FIM) refuses chat twice over: first the
+        # thinking knob it lacks, then chat itself. Two retries cover the chain;
+        # the probe measures the prefill alone, so the prompt goes verbatim.
+        for _ in range(2):
+            if response.status != 400:
+                break
             body = response.read(2048)
-            if b"enable_thinking" not in body:
+            if "chat_template_kwargs" in payload and b"enable_thinking" in body:
+                # An always-on template refuses the switch (unsupported_parameter):
+                # the probe measures the prefill alone, so ask again without it.
+                ALWAYS_ON["seen"] = True
+                payload.pop("chat_template_kwargs")
+            elif b"no chat template" in body:
+                path = "/v1/completions"
+                payload = {"model": model, "prompt": prompt, "max_tokens": 1,
+                           "temperature": 0, "stream": True,
+                           "stream_options": {"include_usage": True}}
+            else:
                 raise RuntimeError(f"HTTP 400: {body!r}")
-            ALWAYS_ON["seen"] = True
             conn.close()
-            del payload["chat_template_kwargs"]
             conn = http.client.HTTPConnection(host, port, timeout=1200)
             t0 = time.perf_counter()
-            conn.request("POST", "/v1/chat/completions", json.dumps(payload),
+            conn.request("POST", path, json.dumps(payload),
                          {"Content-Type": "application/json"})
             response = conn.getresponse()
         result = read_completion(response)

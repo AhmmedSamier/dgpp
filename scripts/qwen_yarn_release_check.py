@@ -188,18 +188,37 @@ class Lane:
         return context.get("request_limit_tokens") if isinstance(context, dict) else None
 
     def ask(self, prompt, max_tokens, timeout=None):
-        body = json.dumps({"model": self.model,
-                           "messages": [{"role": "user", "content": prompt}],
-                           "max_tokens": max_tokens, "temperature": 0, "stream": True,
-                           "stream_options": {"include_usage": True}})
+        payload = {"model": self.model,
+                   "messages": [{"role": "user", "content": prompt}],
+                   "max_tokens": max_tokens, "temperature": 0, "stream": True,
+                   "stream_options": {"include_usage": True}}
         # A 512K prefill is minutes, not seconds; the budget scales with the
         # prompt so a hung endpoint still fails in hours rather than days.
         conn = http.client.HTTPConnection(
             self.host, self.port, timeout=timeout if timeout is not None else request_timeout(prompt))
         t0 = time.perf_counter()
         try:
-            conn.request("POST", "/v1/chat/completions", body, {"Content-Type": "application/json"})
-            result = read_completion(conn.getresponse())
+            conn.request("POST", "/v1/chat/completions", json.dumps(payload),
+                         {"Content-Type": "application/json"})
+            response = conn.getresponse()
+            if response.status == 400:
+                body = response.read(2048)
+                if b"no chat template" not in body:
+                    raise RuntimeError(f"HTTP 400: {body!r}")
+                # A template-less family (Llama FIM) refuses chat: the prompt
+                # verbatim as the completion prompt.
+                conn.close()
+                conn = http.client.HTTPConnection(
+                    self.host, self.port,
+                    timeout=timeout if timeout is not None else request_timeout(prompt))
+                t0 = time.perf_counter()
+                conn.request("POST", "/v1/completions", json.dumps(
+                    {"model": self.model, "prompt": prompt, "max_tokens": max_tokens,
+                     "temperature": 0, "stream": True,
+                     "stream_options": {"include_usage": True}}),
+                    {"Content-Type": "application/json"})
+                response = conn.getresponse()
+            result = read_completion(response)
         finally:
             conn.close()
         ended = time.perf_counter()

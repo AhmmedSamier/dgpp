@@ -38,7 +38,10 @@ def read_completion(response, clock=time.perf_counter, on_update=None):
                 usage = obj["usage"]
             for choice in obj.get("choices", []):
                 delta = choice.get("delta", {})
-                content = (delta.get("reasoning_content") or "") + (delta.get("content") or "")
+                # Chat streams carry text in delta.content; completion
+                # streams (template-less families) carry it on the choice.
+                content = (delta.get("reasoning_content") or "") + (delta.get("content") or "") + \
+                          (choice.get("text") or "")
                 if content:
                     stamps.append(now)
                     text.append(content)
