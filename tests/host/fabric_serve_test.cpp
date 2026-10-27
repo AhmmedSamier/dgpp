@@ -17,6 +17,7 @@
 // The fakes are the 4a gate's (same token laws), so the shapes this
 // test skims are already byte-pinned there — here the JOURNAL is the
 // thing under test.
+#include <random>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -1898,6 +1899,73 @@ DGPP_TEST(journal_disk_commits_ride_the_tick_record) {
   require(dgpp::serve::encode_journal_settings(off).find("nvme") == std::string::npos, "off: absent");
   require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(off)).world_settings == off,
           "off decodes off");
+}
+
+DGPP_TEST(journal_codec_fuzz_mutatedRecordsDecodeOrThrowCleanly) {
+  // Every record the tier added fields to, mutated at random: the decoder
+  // returns a record or throws a std::exception (a protocol error the
+  // peer reports), never anything else; the status-line parser likewise.
+  std::vector<std::string> good;
+  {
+    dgpp::serve::WorldSettings s;
+    s.world = 4;
+    s.max_concurrency = 4;
+    s.kv_capacity = 8192;
+    s.admission = "full";
+    s.nvme_cache = true;
+    s.nvme_cache_capacity_gib = 32;
+    s.nvme_cache_min_tokens = 1024;
+    s.nvme_cache_chunk_mib = 32;
+    s.nvme_cache_max_ops = 2;
+    s.nvme_cache_reserve_gib = 2;
+    s.nvme_cache_persist = false;
+    good.push_back(dgpp::serve::encode_journal_settings(s));
+    GenerationService::PassEvents ev;
+    dgpp::sched::SchedulerRequest r;
+    r.id = "chatcmpl-0000000000000f01";
+    r.prompt = {1, 2, 3, 4, 5};
+    r.max_steps = 2;
+    r.boundaries = {3};
+    r.cache_key = "agent-7";
+    ev.submits.push_back(r);
+    ev.disk_commits.push_back({7, true});
+    ev.disk_commits.push_back({8, false});
+    ev.has_prefix_digest = true;
+    ev.prefix_digest = 12345;
+    good.push_back(dgpp::serve::encode_journal_tick(ev));
+    good.push_back(dgpp::serve::encode_journal_warm(dgpp::sched::AdmissionPolicy{}, 4, "cfg", true));
+    good.push_back(dgpp::serve::encode_disk_status(42, true));
+  }
+  std::mt19937_64 rng(20261027);
+  int decoded = 0, thrown = 0;
+  for (int iter = 0; iter < 4000; ++iter) {
+    std::string line = good[rng() % good.size()];
+    const int edits = 1 + static_cast<int>(rng() % 4);
+    for (int e = 0; e < edits && !line.empty(); ++e) {
+      const size_t at = rng() % line.size();
+      switch (rng() % 4) {
+        case 0: line[at] = static_cast<char>(32 + rng() % 95); break;
+        case 1: line.erase(at, 1); break;
+        case 2: line.insert(at, 1, static_cast<char>(32 + rng() % 95)); break;
+        default: line.resize(at); break;
+      }
+    }
+    try {
+      if (line.rfind("disk ", 0) == 0) {
+        uint64_t op = 0;
+        bool ok = false;
+        (void)dgpp::serve::decode_disk_status(line, &op, &ok);
+        ++decoded;
+      } else {
+        (void)dgpp::serve::decode_journal_line(line);
+        ++decoded;
+      }
+    } catch (const std::exception&) {
+      ++thrown;
+    }
+  }
+  require(decoded > 0 && thrown > 0, "mutations both decoded and were refused: " + std::to_string(decoded) + " / " +
+                                         std::to_string(thrown));
 }
 
 DGPP_TEST(journal_warm_record_carries_the_disk_adoption) {

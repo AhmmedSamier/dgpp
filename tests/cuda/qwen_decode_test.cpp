@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -634,6 +635,69 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
               "persist: a refused adoption starts the slab fresh");
       t4.reset();
       require(fs::exists(pe.slab_path), "persist: the fresh slab stays for the next run");
+      // 9. The tier under random damage (the fuzz): spills of the entry over
+      //    the same pages, a random byte of a random page of the entry
+      //    flipped on disk half the time, then a restore — which must come
+      //    back bitwise or fail on the checksum of the page hit, never
+      //    with other bytes; blocks return every time. Random staging
+      //    chunks reopen the tier mid-way.
+      {
+        std::mt19937_64 rng(20261027);
+        auto t5 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pe);
+        t5->adopt(false);
+        int failed = 0, restored = 0;
+        uint64_t op = 10;
+        for (int iter = 0; iter < 16; ++iter) {
+          if (iter % 5 == 4) {  // another chunk: more or fewer slices per op
+            dgpp::sched::SchedulerEngine::DiskEnable pc = pe;
+            pc.chunk_bytes = (size_t{1} << 20) * (1 + static_cast<size_t>(rng() % 4));
+            t5.reset();
+            t5 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pc);
+            t5->adopt(false);
+          }
+          dgpp::sched::SchedulerEngine::DiskSpill fs_spill = spill;
+          fs_spill.op = op++;
+          t5->spill_begin(fs_spill);
+          require(wait_on(*t5, fs_spill.op), "fuzz: the spill completed");
+          // The entry's pages: the blob run, the partial block, the ids page.
+          const int64_t entry_pages = t5->blob_pages() + 2;
+          int64_t hit = -1;
+          if (rng() % 2 == 0) {
+            hit = static_cast<int64_t>(rng() % static_cast<uint64_t>(entry_pages));
+            const int fd = ::open(pe.slab_path.c_str(), O_RDWR);
+            require(fd >= 0, "fuzz: reopen the slab");
+            uint8_t byte = 0;
+            const off_t at = static_cast<off_t>(static_cast<size_t>(hit) * t5->page_bytes() +
+                                                rng() % t5->page_bytes());
+            const ssize_t got = ::pread(fd, &byte, 1, at);
+            require(got == 1, "fuzz: read the byte to flip");
+            byte = static_cast<uint8_t>(byte ^ static_cast<uint8_t>(1u << (rng() % 8)));
+            require(::pwrite(fd, &byte, 1, at) == 1, "fuzz: flip a byte");
+            ::close(fd);
+          }
+          dgpp::sched::SchedulerEngine::DiskRestore fr = rs;
+          fr.op = op++;
+          (void)t5->restore_begin(fr);
+          const bool ok = wait_on(*t5, fr.op);
+          const bool ids_hit = hit == t5->blob_pages() + 1;  // a restore never reads the ids page
+          if (hit < 0 || ids_hit) {
+            require(ok, "fuzz: an undamaged entry restores");
+            std::vector<uint8_t> a(arena.bytes()), b(arena.bytes());
+            DGPP_CUDA_OK(cudaMemcpy(a.data(), arena.slot_data(0), a.size(), cudaMemcpyDeviceToHost));
+            DGPP_CUDA_OK(cudaMemcpy(b.data(), arena.slot_data(1), b.size(), cudaMemcpyDeviceToHost));
+            require(a == b, "fuzz: the restored blob is bitwise the spilled one");
+            ++restored;
+          } else {
+            require(!ok, "fuzz: a damaged page fails the restore (page " + std::to_string(hit) + ")");
+            ++failed;
+          }
+          arena.release(1);
+          require(m.kv_blocks_in_use() == blocks_before, "fuzz: the restore's blocks came back");
+        }
+        require(restored > 0 && failed > 0, "fuzz: both outcomes seen");
+        t5.reset();
+        std::printf("[ OK ] NVMe tier fuzz: %d restores bitwise, %d damaged restores refused\n", restored, failed);
+      }
       fs::remove_all(bdir);
     }
     arena.release(0);

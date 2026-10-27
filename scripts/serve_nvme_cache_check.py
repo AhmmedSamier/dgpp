@@ -51,10 +51,11 @@ def metrics(host, port):
         conn.close()
 
 
-def ask(host, port, model, prompt, max_tokens):
+def ask(host, port, model, prompt, max_tokens, extra=None):
     body = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
             "temperature": 0, "stream": True, "stream_options": {"include_usage": True},
             "chat_template_kwargs": {"clear_thinking": False}}
+    body.update(extra or {})  # the fuzz's prompt_cache_key / prefix_cache fields
     conn = http.client.HTTPConnection(host, port, timeout=3600)
     t0 = time.perf_counter()
     conn.request("POST", "/v1/chat/completions", body=json.dumps(body),

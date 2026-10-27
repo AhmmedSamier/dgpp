@@ -3,6 +3,7 @@
 // within the capacity, the spill/restore state machine and its aborts.
 #include <cstring>
 #include <map>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -197,6 +198,68 @@ DGPP_TEST(disk_cache_adoption_round_trips_the_committed_index) {
   };
   const DiskCache::Adopted partial = lossy.restore(bytes, read_a_only);
   require(partial.entries == 1 && partial.dropped == 1 && lossy.live_entries() == 1, "a bad run drops its entry");
+}
+
+DGPP_TEST(disk_cache_fuzz_corruptIndexBytesNeverBreakTheIndex) {
+  // The bytes a previous run left can be anything: flipped, truncated,
+  // spliced. restore() must never throw past its contract, and whatever it
+  // adopts must leave a consistent index within the capacity.
+  DiskCache d(config(/*pages=*/64));
+  std::map<int64_t, std::vector<int64_t>> slab;
+  const auto spill = [&](const std::vector<int64_t>& prompt, int64_t position, const std::vector<uint64_t>& ids,
+                         uint64_t partial, uint64_t op, int memory, const std::string& key = "") {
+    const auto plan = d.begin_spill(prompt.data(), position, -1, {}, 0, ids, partial, op, op, memory, key);
+    require(plan.ok, "fits");
+    slab[plan.ids_page] = std::vector<int64_t>(prompt.begin(), prompt.begin() + position);
+    d.commit_spill(plan.entry);
+  };
+  spill(counted(20, 1000), 12, identities(3, 100), 0, 1, 0, "k");
+  spill(counted(20, 1000), 8, identities(2, 100), 0, 2, 1);
+  spill(counted(20, 3000), 10, identities(2, 300), 77, 3, 2);  // a partial block
+  const std::vector<uint8_t> good = d.serialize();
+  const auto read = [&](int64_t page, int64_t count, void* dst) {
+    const auto it = slab.find(page);
+    if (it == slab.end() || count != 1) return false;
+    std::memset(dst, 0, 4096);
+    std::memcpy(dst, it->second.data(), it->second.size() * sizeof(int64_t));
+    return true;
+  };
+  std::mt19937_64 rng(20261027);
+  int adopted_total = 0, refused = 0;
+  for (int iter = 0; iter < 3000; ++iter) {
+    std::vector<uint8_t> bytes = good;
+    const int edits = 1 + static_cast<int>(rng() % 6);
+    for (int e = 0; e < edits && !bytes.empty(); ++e) {
+      const size_t at = rng() % bytes.size();
+      switch (rng() % 5) {
+        case 0: bytes[at] ^= static_cast<uint8_t>(1u << (rng() % 8)); break;
+        case 1: bytes[at] = static_cast<uint8_t>(rng()); break;
+        case 2: bytes.resize(at); break;
+        case 3: bytes.insert(bytes.begin() + static_cast<std::ptrdiff_t>(at), static_cast<uint8_t>(rng())); break;
+        default: {
+          const size_t len = std::min<size_t>(rng() % 16, bytes.size() - at);
+          const std::vector<uint8_t> chunk(bytes.begin() + static_cast<std::ptrdiff_t>(at),
+                                           bytes.begin() + static_cast<std::ptrdiff_t>(at + len));
+          bytes.insert(bytes.end(), chunk.begin(), chunk.end());  // a copy: never a self-range insert
+        }
+      }
+    }
+    DiskCache fresh(config(/*pages=*/64));
+    DiskCache::Adopted got;
+    try {
+      got = fresh.restore(bytes, read);
+    } catch (const std::exception& e) {
+      throw std::runtime_error("iteration " + std::to_string(iter) + ": restore threw: " + e.what());
+    }
+    std::string why;
+    if (!fresh.consistent(&why)) throw std::runtime_error("iteration " + std::to_string(iter) + ": " + why);
+    require(fresh.pages_used() <= fresh.pages_total(), "within capacity");
+    require(fresh.live_entries() == got.entries, "the count reported is the count adopted");
+    adopted_total += got.entries;
+    refused += got.error.empty() ? 0 : 1;
+  }
+  require(adopted_total > 0 && refused > 0, "the mutations both passed and failed: " + std::to_string(adopted_total) +
+                                                 " adopted, " + std::to_string(refused) + " refused");
 }
 
 DGPP_TEST(disk_cache_retention_keeps_pinned_entries_past_unpinned_ones) {

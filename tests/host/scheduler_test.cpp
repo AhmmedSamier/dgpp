@@ -17,6 +17,7 @@
 // The fake also enforces the engine interface: scripts are consumed in order,
 // each slot owns its pending transcript, and close() must find a live
 // reservation to release.
+#include <random>
 #include <cstring>
 #include <algorithm>
 #include <cmath>
@@ -274,6 +275,7 @@ class FakeEngine : public SchedulerEngine {
     disk_latency_ = latency;
   }
   void fail_next_disk_op() { disk_fail_next_ = true; }
+  void set_disk_max_ops(int n) { disk_max_ops_ = n; }
   int64_t disk_ops_begun() const { return disk_ops_begun_; }
   dgpp::sched::SchedulerEngine::DiskInfo disk_info() const override {
     dgpp::sched::SchedulerEngine::DiskInfo i;
@@ -283,6 +285,7 @@ class FakeEngine : public SchedulerEngine {
     i.blob_pages = disk_blob_pages_;
     i.min_tokens = disk_min_tokens_;
     i.persist = disk_persist_;
+    i.max_ops = disk_max_ops_;
     return i;
   }
   // Across a "restart" (nvme_cache.persist): the ids runs the spills wrote
@@ -294,6 +297,7 @@ class FakeEngine : public SchedulerEngine {
     disk_store_ = previous.disk_store_;
   }
   int index_writes() const { return index_writes_; }
+  const std::vector<uint8_t>& persisted_index() const { return index_; }
   std::vector<uint8_t> disk_adopted_index() const override { return adopted_; }
   bool disk_read_pages(int64_t page, int64_t count, void* dst) override {
     const auto it = disk_store_.find(page);
@@ -363,6 +367,7 @@ class FakeEngine : public SchedulerEngine {
   int64_t disk_pages_ = 0, disk_blob_pages_ = 1, disk_min_tokens_ = 0;
   int disk_latency_ = 1;
   bool disk_persist_ = false;
+  int disk_max_ops_ = 4;
   std::map<int64_t, std::vector<int64_t>> disk_store_;
   std::vector<uint8_t> index_, adopted_;
   int index_writes_ = 0;
@@ -3368,6 +3373,141 @@ DGPP_TEST(scheduler_nvmeCache_spillsAnEvictedEntryAndRestoresItForALaterRequest)
           "the restore precedes the attach: " + ops);
   require(ids_joined(sched.results()[2].generated) == "6,7,8", "c's ids");
   require(m.disk_pages_used <= m.disk_pages_total, "within capacity");
+}
+
+// The cold tier under random streams (the fuzz): random geometry, prompts
+// that share prefixes, pins, opt-outs, cancels mid-flight, injected op
+// failures and restarts that adopt the persisted index — on two replicas
+// fed the same actions, which must stay identical (the fabric's rank
+// identity), with the disk index's invariants and the pool's accounting
+// recomputed after every round. A seed that breaks is named.
+namespace {
+struct FuzzReplica {
+  std::unique_ptr<FakeEngine> engine;
+  std::unique_ptr<Scheduler> sched;
+};
+struct FuzzGeometry {
+  int slots, arena_slots;
+  int64_t total_blocks, disk_pages, blob_pages, min_tokens;
+  int latency, max_ops;
+};
+std::unique_ptr<FakeEngine> fuzz_engine(const FuzzGeometry& g, const FakeEngine* previous) {
+  auto e = std::make_unique<FakeEngine>(g.slots, g.total_blocks, /*block_tokens=*/4);
+  e->set_prefix_arena(g.arena_slots, /*align=*/4);
+  e->set_disk(g.disk_pages, g.blob_pages, g.min_tokens, g.latency);
+  e->set_disk_max_ops(g.max_ops);
+  e->set_disk_persist(true);
+  if (previous != nullptr) e->adopt_from(*previous);
+  for (int s = 0; s < g.slots; ++s)
+    for (int i = 0; i < 400; ++i) e->arm(s, {1, 2, 3, 4}, 3);
+  return e;
+}
+}  // namespace
+
+DGPP_TEST(scheduler_nvmeCache_fuzz_randomStreamsHoldInvariantsOnTwoReplicas) {
+  int64_t restores = 0, adopted = 0, hits = 0, failures = 0;
+  for (uint64_t seed = 1; seed <= 48; ++seed) {
+    std::mt19937_64 rng(seed * 0x9e3779b97f4a7c15ull);
+    const auto pick = [&](int lo, int hi) { return lo + static_cast<int>(rng() % static_cast<uint64_t>(hi - lo + 1)); };
+    const FuzzGeometry g{pick(1, 3), pick(1, 4), static_cast<int64_t>(pick(24, 64)), static_cast<int64_t>(pick(8, 64)),
+                         static_cast<int64_t>(pick(1, 2)), static_cast<int64_t>(pick(0, 2) * 4), pick(1, 3), pick(1, 4)};
+    FuzzReplica reps[2];
+    for (FuzzReplica& r : reps) {
+      r.engine = fuzz_engine(g, nullptr);
+      r.sched = std::make_unique<Scheduler>(r.engine.get(), std::vector<int64_t>{kEos});
+    }
+    int next_id = 0;
+    const std::string where = "seed " + std::to_string(seed);
+    try {
+      for (int round = 0; round < 24; ++round) {
+        // The round's actions, drawn once and applied to both replicas.
+        struct Action {
+          std::vector<int64_t> prompt;
+          std::vector<int64_t> boundaries;
+          int max_steps;
+          std::string key;
+          bool no_cache;
+        };
+        std::vector<Action> actions;
+        const int n = pick(1, 3);
+        for (int i = 0; i < n; ++i) {
+          const int family = pick(0, 2);
+          const int length = 4 * pick(2, 6);  // 8..24 tokens on the block grid
+          std::vector<int64_t> prompt = counted_prompt(length, 1000 * (family + 1));
+          if (pick(0, 3) == 0) prompt.back() += 50000;  // a changed tail: the body cut still shares
+          std::vector<int64_t> boundaries;
+          if (pick(0, 1)) boundaries.push_back(5);
+          if (length > 13 && pick(0, 1)) boundaries.push_back(13);
+          const int key = pick(0, 3);
+          actions.push_back({prompt, boundaries, pick(1, 3), key < 2 ? "k" + std::to_string(key) : "", pick(0, 7) == 0});
+        }
+        const bool fail_op = pick(0, 4) == 0;
+        const int cancel_at = pick(0, 2) == 0 ? pick(1, 6) : -1;  // a tick at which the youngest request is cancelled
+        const bool restart = round > 0 && pick(0, 5) == 0;
+        std::vector<std::string> ids;
+        for (int i = 0; i < n; ++i) ids.push_back("r" + std::to_string(next_id++));
+        for (FuzzReplica& r : reps) {
+          if (fail_op) r.engine->fail_next_disk_op();
+          for (int i = 0; i < n; ++i) {
+            auto req = make_cached_request(ids[static_cast<size_t>(i)], actions[static_cast<size_t>(i)].prompt,
+                                           actions[static_cast<size_t>(i)].boundaries,
+                                           actions[static_cast<size_t>(i)].max_steps);
+            req.cache_key = actions[static_cast<size_t>(i)].key;
+            req.no_cache = actions[static_cast<size_t>(i)].no_cache;
+            r.sched->submit(req);
+          }
+          for (int tick = 0; tick < 1000; ++tick) {
+            if (tick == cancel_at) r.sched->cancel(ids.back());
+            std::vector<Scheduler::DiskCommit> commits;
+            for (const auto& c : r.sched->poll_disk_completions()) commits.push_back({c.op, c.ok});
+            r.sched->apply_disk_commits(commits);
+            const bool more = r.sched->tick();
+            if (!more && !r.sched->has_pending() && r.sched->disk_ops_pending() == 0) break;
+            if (tick == 999) throw std::runtime_error("the round did not drain");
+          }
+          std::string why;
+          if (!r.sched->disk_cache().consistent(&why)) throw std::runtime_error("disk index: " + why);
+          if (r.engine->pool_blocks_in_use() != r.engine->pinned_blocks())
+            throw std::runtime_error("pool blocks in use " + std::to_string(r.engine->pool_blocks_in_use()) +
+                                     " against " + std::to_string(r.engine->pinned_blocks()) + " pinned");
+          const Scheduler::Meters m = r.sched->meters();
+          if (m.disk_pages_used > m.disk_pages_total) throw std::runtime_error("disk pages past the capacity");
+        }
+        if (reps[0].engine->op_stream() != reps[1].engine->op_stream())
+          throw std::runtime_error("the replicas' op streams differ:\n" + reps[0].engine->op_stream() + "\n" +
+                                   reps[1].engine->op_stream());
+        if (reps[0].sched->prefix_digest() != reps[1].sched->prefix_digest())
+          throw std::runtime_error("the replicas' prefix digests differ");
+        if (restart) {
+          // Both replicas restart on their own persisted index: the bytes
+          // must be the same (the world's adoption agreement) and the
+          // adopted entries identical.
+          if (reps[0].engine->persisted_index() != reps[1].engine->persisted_index())
+            throw std::runtime_error("the replicas' persisted indexes differ");
+          for (FuzzReplica& r : reps) {
+            auto fresh = fuzz_engine(g, r.engine.get());
+            r.sched.reset();
+            r.engine = std::move(fresh);
+            r.sched = std::make_unique<Scheduler>(r.engine.get(), std::vector<int64_t>{kEos});
+            std::string why;
+            if (!r.sched->disk_cache().consistent(&why)) throw std::runtime_error("adopted index: " + why);
+          }
+          if (reps[0].sched->meters().disk_adopted != reps[1].sched->meters().disk_adopted)
+            throw std::runtime_error("the replicas adopted different counts");
+          adopted += reps[0].sched->meters().disk_adopted;
+        }
+      }
+      const Scheduler::Meters m = reps[0].sched->meters();
+      restores += m.disk_restored;
+      hits += m.prefix_hits;
+      failures += m.disk_spill_failed + m.disk_restore_failed;
+    } catch (const std::exception& e) {
+      throw std::runtime_error(where + ": " + e.what());
+    }
+  }
+  require(restores > 0 && adopted > 0 && hits > 0 && failures > 0,
+          "the fuzz exercised restores, adoptions, hits and failures: " + std::to_string(restores) + " / " +
+              std::to_string(adopted) + " / " + std::to_string(hits) + " / " + std::to_string(failures));
 }
 
 DGPP_TEST(scheduler_nvmeCache_adoptsThePersistedIndexAfterARestart) {
