@@ -45,15 +45,21 @@ void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
 }
 
-// Two-participant fold exchange: each rank publishes its partial's host
-// copy and device pointer; the second arrival folds in canonical rank
-// order and writes the sum back to both device buffers. Folds are
-// globally sequential (each rank blocks in reduce until its fold
-// completes), so one slot pair suffices.
+// Two-participant fold exchange: each fold takes a monotonic turn. The
+// first arrival publishes its partial's host copy and device pointer and
+// waits until ITS turn is recorded as paired; the second arrival folds in
+// canonical rank order and writes the sum back to both device buffers,
+// then records the paired turn. The release is turn-based, not a boolean
+// slot flag: the pairer's NEXT publish used to re-set the slot flag
+// before the released rank's predicate re-check, sending it back to
+// sleep on a foreign fold — both ranks then starved. Folds are globally
+// sequential (each rank blocks in reduce until its fold completes), so
+// one slot still suffices.
 struct FoldExchange {
   std::mutex m;
   std::condition_variable cv;
-  bool occupied = false;
+  bool pending = false;
+  uint64_t turn_counter = 0, pending_turn = 0, paired_turn = 0;
   int first_rank = -1;
   std::vector<uint16_t> first_host;
   uint16_t* first_dev = nullptr;
@@ -68,14 +74,16 @@ class LocalRankReducer final : public dgpp::BoundaryReducer {
     std::vector<uint16_t> mine(n);
     DGPP_CUDA_OK(cudaMemcpy(mine.data(), partial, n * 2, cudaMemcpyDeviceToHost));
     std::unique_lock<std::mutex> lk(ex_->m);
-    if (!ex_->occupied) {
-      ex_->occupied = true;
+    const uint64_t turn = ++ex_->turn_counter;
+    if (!ex_->pending) {
+      ex_->pending = true;
+      ex_->pending_turn = turn;
       ex_->first_rank = rank_;
       ex_->first_host = std::move(mine);
       ex_->first_dev = partial;
       ex_->rows = rows;
       ex_->hidden = hidden;
-      ex_->cv.wait(lk, [&] { return !ex_->occupied; });
+      ex_->cv.wait(lk, [&] { return ex_->paired_turn >= turn; });
       return;
     }
     require(rows == ex_->rows && hidden == ex_->hidden, "fold shape drift between ranks");
@@ -86,7 +94,9 @@ class LocalRankReducer final : public dgpp::BoundaryReducer {
       sum[i] = float_to_bf16_bits(bf16_bits_to_float(a[i]) + bf16_bits_to_float(b[i]));
     DGPP_CUDA_OK(cudaMemcpy(ex_->first_dev, sum.data(), n * 2, cudaMemcpyHostToDevice));
     DGPP_CUDA_OK(cudaMemcpy(partial, sum.data(), n * 2, cudaMemcpyHostToDevice));
-    ex_->occupied = false;
+    ex_->paired_turn = ex_->pending_turn;
+    ex_->pending_turn = 0;
+    ex_->pending = false;
     ex_->first_dev = nullptr;
     ex_->first_host.clear();
     lk.unlock();
