@@ -269,8 +269,11 @@ class NvmeTier {
       if (q == cudaErrorNotReady) continue;
       if (q != cudaSuccess) {
         (void)cudaGetLastError();
+        // The note is shared with the worker (it writes its own under the
+        // mutex when a read or write fails): take the lock for ours too.
+        std::lock_guard<std::mutex> lock(mutex_);
         job.failed = true;
-        job.why = "the model stream failed on a slice";
+        if (job.why.empty()) job.why = "the model stream failed on a slice";
       }
       if (job.restore || job.failed) {
         release_buffer(buf);
