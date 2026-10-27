@@ -46,12 +46,13 @@ Csa2Layer::Layout Csa2Layer::layout(const Csa2Config& cfg, int max_tokens, int64
                                     int max_decode_rows, int decode_n_split, size_t dot_budget) {
   Csa2Config::validate(cfg);
   if (max_tokens <= 0 || max_cache_tokens <= 0) throw std::invalid_argument("csa2 layer: max_tokens / max_cache_tokens");
-  // The decode batch's bound mirrors the engine's (dgpp::kDecodeRowsMax, 64
-  // — twelve DSpark slots since 2026-10-23; the header stays out of this
-  // CUDA unit); the select workspace scales with it.
-  constexpr int kCsa2MaxDecodeRows = 64;
+  // The decode batch's bound mirrors the engine's (dgpp::kDecodeRowsMax, 96
+  // — sixteen DSpark slots at the five-row block since 2026-10-23, twelve
+  // at 64 earlier that day; the header stays out of this CUDA unit); the
+  // select workspace scales with it.
+  constexpr int kCsa2MaxDecodeRows = 96;
   if (max_decode_rows <= 0 || max_decode_rows > kCsa2MaxDecodeRows || max_decode_rows > max_tokens)
-    throw std::invalid_argument("csa2 layer: max_decode_rows must be in [1, min(64, max_tokens)]");
+    throw std::invalid_argument("csa2 layer: max_decode_rows must be in [1, min(96, max_tokens)]");
   if (decode_n_split <= 0 || dot_budget == 0) throw std::invalid_argument("csa2 layer: decode_n_split / dot_budget");
   const int lh = cfg.local_heads(), lg = cfg.local_groups();
   const size_t T = static_cast<size_t>(max_tokens);
@@ -113,6 +114,19 @@ Csa2Layer::Layout Csa2Layer::layout(const Csa2Config& cfg, int max_tokens, int64
   L.m_win = alloc(size_t(L.ws_slots) * lh * 4);
   L.l_win = alloc(size_t(L.ws_slots) * lh * 4);
   L.c_win = alloc(size_t(L.ws_slots) * lh * kCsa2Latent * 4);
+  // The split groups' partials (one per kAttnSplitGroup splits) and the
+  // groups' tickets per row pair (the listed kernel's 32 M-rows), both
+  // sources (2026-10-23).
+  const size_t grp_slots = size_t(L.ws_slots) / kAttnSplitGroup + 1;
+  L.m_grp_main = alloc(grp_slots * lh * 4);
+  L.l_grp_main = alloc(grp_slots * lh * 4);
+  L.c_grp_main = alloc(grp_slots * lh * kCsa2Latent * 4);
+  L.m_grp_win = alloc(grp_slots * lh * 4);
+  L.l_grp_win = alloc(grp_slots * lh * 4);
+  L.c_grp_win = alloc(grp_slots * lh * kCsa2Latent * 4);
+  const size_t row_pairs = (size_t(std::max(max_decode_rows, 8)) * lh + 31) / 32;
+  L.tickets_per_source = row_pairs * (size_t(std::max(decode_n_split, 8)) / kAttnSplitGroup + 1);
+  L.tickets = alloc(2 * L.tickets_per_source * 4);
   L.gather_k = alloc(size_t(L.max_entries) * kCsa2IndexDim);
   L.gather_scale = alloc(size_t(L.max_entries) * 4);
   L.logits = alloc(size_t(tile_cap) * size_t(L.max_entries) * 4);
@@ -196,6 +210,14 @@ Csa2Layer::Csa2Layer(IGemm& gemm, const Csa2Config& cfg, int max_tokens, int64_t
   m_win_ = reinterpret_cast<float*>(at(L.m_win));
   l_win_ = reinterpret_cast<float*>(at(L.l_win));
   c_win_ = reinterpret_cast<float*>(at(L.c_win));
+  m_grp_main_ = reinterpret_cast<float*>(at(L.m_grp_main));
+  l_grp_main_ = reinterpret_cast<float*>(at(L.l_grp_main));
+  c_grp_main_ = reinterpret_cast<float*>(at(L.c_grp_main));
+  m_grp_win_ = reinterpret_cast<float*>(at(L.m_grp_win));
+  l_grp_win_ = reinterpret_cast<float*>(at(L.l_grp_win));
+  c_grp_win_ = reinterpret_cast<float*>(at(L.c_grp_win));
+  tickets_main_ = reinterpret_cast<int32_t*>(at(L.tickets));
+  tickets_win_ = tickets_main_ + L.tickets_per_source;
   gather_k_ = at(L.gather_k);
   gather_scale_ = reinterpret_cast<float*>(at(L.gather_scale));
   logits_ = reinterpret_cast<float*>(at(L.logits));
@@ -215,6 +237,7 @@ Csa2Layer::Csa2Layer(IGemm& gemm, const Csa2Config& cfg, int max_tokens, int64_t
   DGPP_CUDA_OK(cudaMemset(one_block_, 0, 16));
   DGPP_CUDA_OK(cudaMemset(select_ws_, 0, dsa_select_workspace_bytes(max_decode_rows, max_entries_)));
   DGPP_CUDA_OK(cudaMemset(counter_ws_, 0, 16));
+  DGPP_CUDA_OK(cudaMemset(tickets_main_, 0, 2 * L.tickets_per_source * 4));  // the group tickets start at zero
   DGPP_CUDA_OK(cudaMemset(violations_, 0, 16));
   if (cfg.exl3) DGPP_CUDA_OK(cudaMemset(exl3_ws_, 0, exl3_ws_bytes_));  // the GEMV's arrival counters start at zero
   DGPP_CUDA_OK(cudaMemset(wscratch_, 0, (size_t(cfg.window) - 1 + size_t(max_tokens)) * latent_row_bytes(Csa2StatePool::kRingFormat, kCsa2Latent)));
@@ -493,40 +516,69 @@ void Csa2Layer::attend_rows(Csa2StatePool& pool, const int32_t* req_ids_win, con
   // scalar kernel's 29; prefill keeps one split, its row tile fills the
   // GPU).
   const int n_split_win = split_window ? std::min(n_split_main, kWinDecodeSplit) : 1;
+  // The decode splits in groups (2026-10-23, kernels/dsa.hpp
+  // kAttnSplitGroup): each group of eight consecutive splits publishes one
+  // merged partial (the last block of the group folds the eight from L2
+  // and discards them), so the finish reads n_split / 8 per source and the
+  // per-split partials — fifty megabytes a layer at forty rows — never
+  // write back. The scalar fallback keeps one per split.
+  const int group = split_window && n_split_win % kAttnSplitGroup == 0 && n_split_main % kAttnSplitGroup == 0
+                        ? kAttnSplitGroup : 1;
   // The window table has one entry per request (the ring: request r's
   // region r; the prefill scratch: block 0): the physical bound is the
   // ring's region count, not the row width.
   const int win_blocks_total = split_window ? pool.shape().max_requests : 1;
-  if (!(flash_try &&
-        dsa_attn_listed(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
-                        n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
-                        wstream, Csa2StatePool::kRingFormat, nullptr, 0, win_blocks_total))) {
+  int n_win_pub = n_split_win;
+  const float *m_win_pub = m_win_, *l_win_pub = l_win_, *c_win_pub = c_win_;
+  if (flash_try &&
+      dsa_attn_listed(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
+                      n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
+                      wstream, Csa2StatePool::kRingFormat, nullptr, 0, win_blocks_total, group, tickets_win_, m_grp_win_,
+                      l_grp_win_, c_grp_win_)) {
+    n_win_pub = n_split_win / group;
+    if (group > 1) {
+      m_win_pub = m_grp_win_;
+      l_win_pub = l_grp_win_;
+      c_win_pub = c_grp_win_;
+    }
+  } else {
     dsa_attn_partial(q, win_cache, req_ids_win, list + size_t(row0) * list_stride, list_stride, counts + row0, rows,
                      n_split_win, lh, kCsa2Latent, win_block_tokens, win_table, 1, attn_scale_, m_win_, l_win_, c_win_,
                      wstream, Csa2StatePool::kRingFormat, nullptr, 0);
   }
-  int n_main = 0;
+  int n_main_pub = 0;
+  const float *m_main_pub = m_main_, *l_main_pub = l_main_, *c_main_pub = c_main_;
   if (w_.ratio > 0) {
     const int ord = w_.cache_ord;
     const int epb = pool.entries_per_block(ord);
     const int32_t* topk = topk_ + size_t(sel_base + row0) * cfg_.index_topk;
     const int32_t* counts = counts_ + sel_base + row0;
-    n_main = n_split_main;
-    if (!(lh >= 16 && lh % 16 == 0 &&
-          dsa_attn_listed(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
-                          epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
-                          stream, Csa2StatePool::kMainFormat, nullptr, 0)))
+    const int n_main = n_split_main;
+    if (lh >= 16 && lh % 16 == 0 &&
+        dsa_attn_listed(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
+                        epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
+                        stream, Csa2StatePool::kMainFormat, nullptr, 0, -1, group, tickets_main_, m_grp_main_,
+                        l_grp_main_, c_grp_main_)) {
+      n_main_pub = n_main / group;
+      if (group > 1) {
+        m_main_pub = m_grp_main_;
+        l_main_pub = l_grp_main_;
+        c_main_pub = c_grp_main_;
+      }
+    } else {
       dsa_attn_partial(q, pool.main(ord), req_ids_main, topk, cfg_.index_topk, counts, rows, n_main, lh, kCsa2Latent,
                        epb, pool.block_tables(), int(pool.total_blocks()), attn_scale_, m_main_, l_main_, c_main_,
                        stream, Csa2StatePool::kMainFormat, nullptr, 0);
+      n_main_pub = n_main;
+    }
   }
   if (beside) {
     DGPP_CUDA_OK(cudaEventRecord(side_join_, side_stream_));
     DGPP_CUDA_OK(cudaStreamWaitEvent(stream, side_join_, 0));
   }
-  csa2_attn_finish(n_main ? m_main_ : nullptr, n_main ? l_main_ : nullptr, n_main ? c_main_ : nullptr, n_main, m_win_,
-                   l_win_, c_win_, n_split_win, w_.attn_sink, rows, lh, pos, w_.inv_freq,
-                   o_ + size_t(row0) * lh * kCsa2Latent, stream);
+  csa2_attn_finish(n_main_pub ? m_main_pub : nullptr, n_main_pub ? l_main_pub : nullptr,
+                   n_main_pub ? c_main_pub : nullptr, n_main_pub, m_win_pub, l_win_pub, c_win_pub, n_win_pub,
+                   w_.attn_sink, rows, lh, pos, w_.inv_freq, o_ + size_t(row0) * lh * kCsa2Latent, stream);
 }
 
 void Csa2Layer::project_out(int tokens, void* out, cudaStream_t stream) {

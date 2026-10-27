@@ -1684,6 +1684,7 @@ DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path) {
       {8, 512, 256, 2, 1},   // one decode row
       {8, 512, 256, 2, 3},   // multi-row steps
       {16, 1024, 512, 4, 2},  // wider geometry, K=4
+      {8, 512, 256, 2, 80},  // the 96-row decode batch's sixteen five-row slots (2026-10-23)
   };
   for (const Case& cs : cases) {
     SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M,
@@ -2601,6 +2602,7 @@ DGPP_TEST(moe_decode_slot_path_is_bitwise_host_path_mxfp4) {
       {16, 1024, 512, 4, 2},  // gate k=1024, down k=512, K=4
       {8, 1024, 576, 6, 2},   // the release's world-4 down width (18 chunks: 2 lanes x 9), top-6
       {8, 1024, 576, 6, 5},   // a draft block's five rows: more shared slots than a group of four
+      {8, 1024, 576, 6, 80},  // sixteen five-row slots: the 96-row decode batch (2026-10-23)
   };
   for (const Case& cs : cases) {
     SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0x3F4CADE + cs.E + cs.M + cs.I,
@@ -3153,12 +3155,13 @@ DGPP_TEST(moe_exl3_expert_path_matches_oracle) {
 // and many rows, the expert-sorted order has long equal-expert runs (the
 // shared expert's is every row), so the cases past 16 rows run the 64-row
 // run tile beside the 16-row one, at every compiled width pair, and must
-// stay bitwise the host chain (per row the same core chain).
+// stay bitwise the host chain (per row the same core chain); the 80- and
+// 96-row cases cut the shared expert's run into two 64-row groups.
 DGPP_TEST(moe_exl3_decode_slot_path_is_bitwise_host_path) {
   struct Case { int E, H, I, K, M, rb, sb; };
   const Case cases[] = {{8, 512, 256, 2, 1, 4, 6},  {8, 512, 256, 2, 3, 3, 6},  {8, 512, 640, 4, 2, 6, 6},
                         {8, 512, 256, 2, 17, 4, 6}, {8, 512, 640, 4, 40, 3, 6}, {4, 256, 128, 2, 64, 8, 8},
-                        {8, 512, 256, 2, 64, 6, 6}};
+                        {8, 512, 256, 2, 64, 6, 6}, {4, 256, 128, 2, 80, 4, 6},  {8, 512, 256, 2, 96, 3, 6}};
   for (const Case& cs : cases) {
     SmallCase c = make_small_case(cs.E, cs.H, cs.I, cs.K, cs.M, 0xE7D0 + cs.M + cs.rb, false, false, 0, 16, 0, 0,
                                   nullptr, -1, cs.rb, cs.sb);

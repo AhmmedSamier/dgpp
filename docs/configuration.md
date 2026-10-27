@@ -457,6 +457,7 @@ settings; use your deployment's measured values.
 | `engine.mtp_schedule_base_ms` | Estimated fixed milliseconds per pass, including draft work; must be nonnegative. Higher fixed cost makes accepting several tokens in one pass more valuable. Used with row cost to estimate throughput. | 28.0 ms |
 | `engine.mtp_schedule_lambda` | Value assigned to decode time, in tokens/ms. Higher values demand more expected benefit before checking another draft. `0` derives an initial value as `1 / (base_ms + row_ms)`; a positive value supplies the floor for adaptation. | 0 (derived) |
 | `engine.mtp_schedule_min_depth` | Fewest drafts verified per scheduled step, from 1 to 5 and no more than the draft width. Higher values force more checking even when confidence is low. | 1 |
+| `engine.mtp_schedule_options` | At most this many scheduled verify depths, from 0 to 6: the engine spreads them evenly between `engine.mtp_schedule_min_depth` and the draft width, always keeping the full block (three on a 4-draft block are 1, 3 and 4). `0` takes every depth the graph-variant budget holds. Fewer options round a policy depth up to the next one, never down: the DeepSeek EXL3 template pins three because its confidence under-reads the third row on code, where the depth-2 option cost 8 % of the tokens a step (2026-10-23). | `0` |
 | `engine.mtp_schedule_adapt` | Update the value of decode time from committed tokens and modeled pass cost. This helps depth follow the workload and concurrency. `false` uses the fixed configured or derived value. | true |
 | `engine.mtp_schedule_sampled_scale` | Scale predicted acceptance for sampled requests using greedy drafts, from 0 to 1. Smaller positive values are more conservative and tend to verify fewer drafts. `0` disables depth scheduling for those requests and verifies the full block. | 0.93 |
 
@@ -465,10 +466,27 @@ settings; use your deployment's measured values.
 These controls apply when `engine.dflash_model` is set. The eager engine runs
 without a full decode graph on one node; the graph engine is required for
 multi-node DFlash2. Options marked eager-only do not tune the graph path.
+On the Qwen3.8-Flash-Next family (`qwen4_exp`) the recorded block draft runs
+on the graph engine, and the drafter's block confidence feeds the scheduler
+settings above. `engine.dflash_model` names it in a template (the
+Qwen3.8-27B releases) or `--dflash-model DIR_OR_ID` selects it at boot on a
+template that names MTP, for example:
+`dgpp-serve --config deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json --dflash-model incoai/Qwen3.8-Flash-Next-DFlash2 --dflash-weights fp8 --draft-head screen --mtp-schedule`
+(the drafter replaces the MTP draft, so the template's `mtp_depth`,
+`mtp_schedule`, `lookup_draft`, `lookup_tail` and `draft_head` revert to
+their defaults unless the command line names them). With `mtp_schedule` true,
+the scheduler chooses the verification depth from the drafter's confidence
+and the configured cost model. Measure those costs on the selected deployment;
+acceptance and throughput depend on its target weights and workload.
+Add `--draft-head screen` explicitly to screen DFlash2's proposal head;
+target verification keeps the full served head. Flash-Next also uses its
+recurrent-state checkpoint/replay path for DFlash2. See the
+[performance notes](optimizing_performance.md#flash-next-dflash2) for the
+pass-time and acceptance tradeoffs.
 
 | Key | What it controls and what to expect | Default |
 |---|---|---|
-| `engine.dflash_model` | Qwen draft checkpoint, as a Hugging Face ID or local directory; for example, `z-lab/Qwen3.8-27B-DFlash2` or `z-lab/Qwen3.5-122B-A10B-DFlash`. The architecture selects v2 or v1. Replaces native MTP, so set `mtp: false`. Verifies up to seven proposals per step and needs extra model memory. The v1 drafter still computes its full 16-row block; use BF16 draft weights and keep `mtp_schedule: false`. Multi-node use requires `decode_graph: true`; one node can use either engine. Requests with logprobs, logit bias or a grammar use plain decode. | Empty (off) |
+| `engine.dflash_model` | Qwen draft checkpoint, as a Hugging Face ID or local directory; for example, `z-lab/Qwen3.8-27B-DFlash2`, `z-lab/Qwen3.5-122B-A10B-DFlash` or `incoai/Qwen3.8-Flash-Next-DFlash2`. The architecture selects v2 or v1. Replaces native MTP, so set `mtp: false`. Verifies up to seven proposals per step and needs extra model memory. The v1 drafter still computes its full 16-row block; use BF16 draft weights and keep `mtp_schedule: false`. Multi-node use requires `decode_graph: true`; one node can use either engine. Requests with logprobs, logit bias or a grammar use plain decode. | Empty (off) |
 | `engine.dflash_weights` | Draft-matrix storage. `checkpoint` keeps BF16 weights, with lossless packing where supported by `bf16_weights`. `fp8` converts them to FP8 at load time, reducing draft weight reads; some BF16 data remains for context processing. Quantization can change proposals and acceptance, while target verification remains exact. | `checkpoint` |
 | `engine.dflash_verify_graph` | Eager engine: replay the multi-request verification batch as a CUDA graph to reduce launch overhead. `false` launches the packed batch directly. A lone request stays on its scalar path. | true |
 | `engine.dflash_draft_batch` | Eager engine: propose drafts for active speculative requests together, reusing one read of the draft weights. `false` drafts one request at a time. Batching can improve total throughput. | true |

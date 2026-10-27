@@ -74,19 +74,23 @@ bytes even out across the ranks; the head's 129,280 rows 253 / 253 / 252
 / 252 blocks, the attention's query heads and output groups as the
 release's.
 World 4 is the deployment that fits: the template's memory plan reads
-81.5 GiB on rank 0 at twelve slots (the resident weights with the
+81.8 GiB on rank 0 at sixteen slots (the resident weights with the
 replicated embedding, the 14 GiB prefix arena and the 1M-token pool;
-87.5 GiB at six slots before the expert slices were balanced across the
-ranks on 2026-10-23), against ~116 GiB free per node.
+81.5 GiB at twelve slots, 87.5 at six before the expert slices were
+balanced across the ranks on 2026-10-23), against ~116 GiB free per node.
 
 ## Serving
 
 Four DGX Spark nodes, tensor parallel, the 1017 template's shape
 ([deploy/cluster_deepseek-v4.1-flash-1017_exl3-3.5bpw_w4.example.json](../../deploy/cluster_deepseek-v4.1-flash-1017_exl3-3.5bpw_w4.example.json)):
-twelve request slots at DSpark depth 4 with the confidence-scheduled
-verify depth (the family's decode batch is 64 rows since 2026-10-23, 32
-and six slots before: the aggregate past six streams is where the pack
-trailed most), the bounded prefill with a 4,096-token first chunk for a
+sixteen request slots at DSpark depth 5 — the block's five drafts, the
+confidence-scheduled verify depth choosing among 1, 3 and 5 of them a
+step (depth 4 until the evening of 2026-10-23: the fifth draft pays on
+code, tables, JSON and counting, where the head's survivals stay high
+through the block) — (the family's decode batch is 96 rows since the evening of
+2026-10-23 — 64 and twelve slots that morning, 32 and six slots before:
+the aggregate past six streams is where the pack trailed most), the
+bounded prefill with a 4,096-token first chunk for a
 lone prompt (`engine.prefill_initial_tokens`), the full 1M-token context,
 the indexer budget at the checkpoint's 512, and `engine.engram_source:
 "deepseek-ai/DeepSeek-V4.1-Flash-1017"` — that repository must be in every
@@ -99,31 +103,45 @@ from the release — the campaign below reads HumanEval 159/164, GSM8K
 293/300 (294 in the morning's six-slot run), schema extraction 100/100
 against the release's 157 / 295 / 100.
 
-## Measured (2026-10-23, four nodes): the campaign of record
+## Measured (2026-10-24, four nodes): the campaign of record
 
-The full row set of [benchmarks](../benchmarks.md) on source `a24e05b5` plus the port's working tree, binary
-`6f8bccfa5b70efef`, the finished twelve-slot template with the expert-run slot form, in one
-`serve_campaign.py run` with the five DSpark mode boots (12:56–13:45 UTC; every rank at zero swap before and
-after, zero cached tokens in the 12 cold probes, matching operation streams in 7/7 launches, the plain boot's
-transcripts identical to the default's in 5/5 classes, 9/9 API checks, isolation identical). The middle
-column is the same day's first campaign on the six-slot template (binary `c7efb833f88a06e3`, 05:41–06:41
-UTC, the same gates), before the day's levers; the last is the release's MXFP4/FP8 template on the same
-shape (six slots, DSpark depth 4 scheduled, the 1M context), its campaign of 2026-10-20 (`283a52f7`, binary
-`f4e9e9cdb16acf86`). A third campaign the same day, on the twelve-slot template before the run form (binary
-`dde85abfaa953cc1`, 10:46–11:42 UTC), is quoted in the text where it separates the two steps.
+The full row set of [benchmarks](../benchmarks.md) on source `b423d5db` plus the day's working tree, binary
+`9a179b15a6de02fa`, the sixteen-slot template with the five-draft DSpark block, in one `serve_campaign.py run`
+with the five DSpark mode boots (2026-10-24 00:06–00:54 UTC; every rank at zero swap before and after, zero cached
+tokens in the 12 cold probes, matching operation streams in 7/7 launches, the plain boot's transcripts identical
+to the default's in 5/5 classes, 9/9 API checks, isolation identical). The middle column is the previous day's
+campaign on the twelve-slot template with the expert-run slot form (binary `6f8bccfa5b70efef`, 12:56–13:45 UTC,
+the same gates); the last is the release's MXFP4/FP8 template on the same shape (six slots, DSpark depth 4
+scheduled, the 1M context), its campaign of 2026-10-20 (`283a52f7`, binary `f4e9e9cdb16acf86`). Two more
+campaigns of 2026-10-23 are quoted in the text where they separate the steps: the six-slot template at 05:41 UTC
+(binary `c7efb833f88a06e3`: C1 67.0 / 91.5 / 105.0 / 93.1 / 65.0 tok/s by class, C8 91.1–137.9) and the
+sixteen-slot template at depth 4 on this same binary at 19:26 UTC (C1 71.0 / 91.6 / 121.5 / 112.1 / 71.5, C8
+165.3–242.4).
 
-| | EXL3 3.5bpw, twelve slots, run form (`6f8bccfa5b70efef`) | EXL3 3.5bpw, six slots (`c7efb833f88a06e3`) | MXFP4/FP8 release, 2026-10-20 (`283a52f7`) |
+| | EXL3 3.5bpw, sixteen slots, five drafts (`9a179b15a6de02fa`) | EXL3 3.5bpw, twelve slots, run form (`6f8bccfa5b70efef`) | MXFP4/FP8 release, 2026-10-20 (`283a52f7`) |
 |---|---|---|---|
-| C1 decode tok/s (prose / code / JSON / math / chat) | 70.6 / 96.2 / 119.3 / 111.3 / 70.9 | 67.0 / 91.5 / 105.0 / 93.1 / 65.0 | 53.5 / 80.0 / 89.4 / 87.5 / 55.0 |
-| Decode tok/s by concurrency, C1 / C2 / C4 / C8 | 70.6–119.3 / 96.7–170.3 / 126.4–183.7 / 167.7–224.0 | 65.0–105.0 / 90.9–141.8 / 115.5–156.4 / 91.1–137.9 | 53.5–89.4 / 75.5–121.9 / 94.7–130.3 / 83.8–139.0 |
-| Wall tok/s, C1 / C2 / C4 / C8 | 68.1–111.1 / 93.5–159.5 / 122.8–174.7 / 162.7–214.1 | 62.5–98.7 / 88.2–134.4 / 112.4–149.8 / 89.1–133.6 | 52.0–84.6 / 73.4–115.8 / 92.2–125.2 / 81.7–132.7 |
-| Cold prefill s, 2K / 8K / 32K | 1.166 / 3.398 / 13.326 | 1.225 / 3.489 / 13.607 | 1.006 / 2.638 / 10.024 |
-| Context decode ms per pass (tok/s), short / 32K / 64K / 128K / 256K / 512K | 33.18 (94.3) / 35.59 (93.0) / 37.37 (85.3) / 38.78 (78.3) / 42.81 (77.4) / 50.58 (59.3) | 36.21 (90.3) / 37.72 (79.5) / 38.25 (76.6) / 40.57 (75.7) / 43.89 (69.2) / 51.39 (61.3) | 43.12 (73.0) / 44.82 (72.9) / 45.64 (69.5) / 48.49 (64.9) / 51.99 (53.3) / 60.35 (51.5) |
-| Context prefill s, short / 32K / 64K / 128K / 256K / 512K | 0.260 / 12.516 / 25.622 / 54.724 / 125.425 / 345.913 | 0.274 / 12.716 / 26.213 / 55.876 / 127.451 / 350.651 | 0.263 / 9.684 / 19.999 / 43.577 / 103.139 / 301.219 |
-| Decode modes, C1 tok/s: plain / DSpark 1 / 2 / 3 / 5 / adaptive ≤4 | 52.9–53.1 / 65.0–75.9 / 71.2–100.6 / 66.8–107.6 / 57.2–129.8 / 70.6–119.3 | 49.9–50.3 / 62.3–73.4 / 63.6–92.6 / 59.0–100.8 / 48.4–114.8 / 65.0–105.0 | 41.7–41.9 / 50.2–59.5 / 50.1–76.5 / 47.8–82.6 / 39.6–96.7 / 53.5–89.4 |
-| HumanEval / GSM8K / extraction | 159/164 / 293/300 / 100/100 | 159/164 / 294/300 / 100/100 | 157/164 / 295/300 / 100/100 |
+| C1 decode tok/s (prose / code / JSON / math / chat) | 70.7 / 92.0 / 134.2 / 111.4 / 70.1 | 70.6 / 96.2 / 119.3 / 111.3 / 70.9 | 53.5 / 80.0 / 89.4 / 87.5 / 55.0 |
+| Decode tok/s by concurrency, C1 / C2 / C4 / C8 | 70.1–134.2 / 95.7–182.4 / 127.8–206.6 / 165.0–247.7 | 70.6–119.3 / 96.7–170.3 / 126.4–183.7 / 167.7–224.0 | 53.5–89.4 / 75.5–121.9 / 94.7–130.3 / 83.8–139.0 |
+| Wall tok/s, C1 / C2 / C4 / C8 | 67.6–124.3 / 92.9–170.4 / 124.3–195.6 / 160.3–235.8 | 68.1–111.1 / 93.5–159.5 / 122.8–174.7 / 162.7–214.1 | 52.0–84.6 / 73.4–115.8 / 92.2–125.2 / 81.7–132.7 |
+| Cold prefill s, 2K / 8K / 32K | 1.188 / 3.446 / 13.331 | 1.166 / 3.398 / 13.326 | 1.006 / 2.638 / 10.024 |
+| Context decode ms per pass (tok/s), short / 32K / 64K / 128K / 256K / 512K | 34.70 (91.2) / 37.80 (95.0) / 38.14 (85.7) / 40.67 (81.4) / 44.39 (74.6) / 52.38 (65.8) | 33.18 (94.3) / 35.59 (93.0) / 37.37 (85.3) / 38.78 (78.3) / 42.81 (77.4) / 50.58 (59.3) | 43.12 (73.0) / 44.82 (72.9) / 45.64 (69.5) / 48.49 (64.9) / 51.99 (53.3) / 60.35 (51.5) |
+| Context prefill s, short / 32K / 64K / 128K / 256K / 512K | 0.272 / 12.470 / 25.652 / 54.885 / 125.507 / 345.781 | 0.260 / 12.516 / 25.622 / 54.724 / 125.425 / 345.913 | 0.263 / 9.684 / 19.999 / 43.577 / 103.139 / 301.219 |
+| Decode modes, C1 tok/s: plain / DSpark 1 / 2 / 3 / 5 / adaptive | 52.6–53.0 / 65.0–76.6 / 69.2–99.3 / 67.0–110.9 / 58.3–135.1 / 70.1–134.2 (≤5) | 52.9–53.1 / 65.0–75.9 / 71.2–100.6 / 66.8–107.6 / 57.2–129.8 / 70.6–119.3 (≤4) | 41.7–41.9 / 50.2–59.5 / 50.1–76.5 / 47.8–82.6 / 39.6–96.7 / 53.5–89.4 (≤4) |
+| HumanEval / GSM8K / extraction | 160/164 / 295/300 / 100/100 | 159/164 / 293/300 / 100/100 | 157/164 / 295/300 / 100/100 |
 
-What the day's levers bought, cell by cell between the two EXL3 campaigns. The C8 cell took two steps:
+What the second day's two programs bought between the twelve-slot and the sixteen-slot columns. The decode batch
+96 rows and sixteen slots (the multi-row program of 2026-10-23 evening, [plan §3.6](../deepseek_v41_flash_exl3_plan.md)):
+the C8 cell is eight live streams on a sixteen-slot world — its step at 40 rows 91 → 82.5 ms on the counting
+prompt — and sixteen identical streams decode at 128 ms a step where the twelve-slot template queued four. The
+five-draft block under the schedule's three options (1, 3, 5), on the same binary as the depth-4 sixteen-slot
+campaign: JSON 121.5 → 134.2 tok/s at C1 (4.25 → 5.10 tokens a step), the C2 / C4 / C8 tops 174.9 → 182.4 /
+195.0 → 206.6 / 242.4 → 247.7, prose 71.0 → 70.7, code 91.6 → 92.0, math 112.1 → 111.4 and chat 71.5 → 70.1
+(all four within the three-repeat spread; the prose and chat passes are the same 29–31 ms at four or five drafts,
+the schedule holding them at one to three rows). Against the twelve-slot column: C1 JSON +12 %, code −4 % (its
+transcript drafts 3.19 tokens a step here against 3.04 at depth 4 and 96.2 tok/s on the twelve-slot world's
+shorter step), prose, math and chat level; C2 +7 %, C4 +12 % and C8 +11 % at the top.
+
+What the first day's levers bought, cell by cell between the six-slot and the twelve-slot campaigns. The C8 cell took two steps:
 twelve slots made it eight live streams instead of six live and two queued (prose 91.1 → 136.8, code 131.3
 → 158.5, JSON 137.9 → 174.8, math 119.3 → 162.2, chat 96.0 → 148.2 tok/s on binary `dde85abfaa953cc1`), and
 the expert-run slot form then took it to 167.7 / 200.8 / 224.0 / 208.3 / 177.9 (the step 71.6–128.3 ms for
@@ -155,12 +173,11 @@ landed this day; the deeper B ring and the reconstruct-to-fp16 tensor-core form 
 remain open, with the short-prompt floor (0.52 ms a token at 3K against 0.42 at 47K: the per-walk costs of
 the folds, the Engram gather, the row copies and the attention over a short ring).
 
-The decode modes: fixed depth 5 wins JSON and math (129.8 / 122.2 against the schedule's 119.3 / 111.3) and
-loses code, prose and chat (90.2 / 57.2 / 62.6 against 96.2 / 70.6 / 70.9); the schedule takes 70.6–119.3
-without a per-class choice. Its constants (`engine.mtp_schedule_base_ms` 31.1, `engine.mtp_schedule_row_ms`
-5.2) are the release template's pass costs; a re-fit to the pack's curve (base 18, 4.3 ms a row) measured no
-better at C1 or C12 (the plan's §7), since the schedule's rate estimate adapts to the measured pass and the
-constants shape only its prior, so the template keeps them.
+The decode modes: fixed depth 5 wins JSON and math (135.1 / 118.0 against the schedule's 134.2 / 111.4) and
+loses code, prose and chat (88.3 / 58.3 / 65.8 against 92.0 / 70.7 / 70.1); the schedule takes 70.1–134.2
+without a per-class choice. Its constants are the pack's own pass costs since 2026-10-23 evening
+(`engine.mtp_schedule_base_ms` 19.9, `engine.mtp_schedule_row_ms` 2.95, from the mode boots' curve) with three
+depth options (`engine.mtp_schedule_options` 3: 1, 3 and 5 of the five drafts).
 
 Before the morning's run, the first requests on the pack exposed a decode-graph defect, fixed before any row
 was taken (the plan's §7 has the record): `GlmMoeLayer::prepare_graph_table` wrote the routed EXL3 expert
