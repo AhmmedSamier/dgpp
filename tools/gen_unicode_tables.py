@@ -15,6 +15,7 @@ and the Qwen3.8 scanner its sibling with [\\p{L}\\p{M}]+, a single
 need four Unicode predicates on codepoints:
 
   is_letter      Unicode General_Category L* (Lu, Ll, Lt, Lm, Lo)
+  is_lower       Ll; is_upper_or_title: Lu, Lt (the Flint pattern's case classes)
   is_mark        Unicode General_Category M* (Mn, Mc, Me)
   is_number      Unicode General_Category N* (Nd, Nl, No)
   is_upper       Unicode General_Category Lu and Lt (the Nemotron/Dory
@@ -75,11 +76,11 @@ def main():
         "src/text/unicode_tables.hpp"
     letters = ranges_of(
         lambda cp: unicodedata.category(chr(cp)) in ("Lu", "Ll", "Lt", "Lm", "Lo"))
-    # The Nemotron/Dory scanner's CamelCase classes split the letters:
-    # U = [\p{Lu}\p{Lt}\p{Lm}\p{Lo}] (+ marks), L2 = [\p{Ll}\p{Lm}\p{Lo}]
-    # (+ marks) — so uppercase-and-titlecase (Lu, Lt) versus lowercase (Ll).
-    uppers = ranges_of(lambda cp: unicodedata.category(chr(cp)) in ("Lu", "Lt"))
+    # The CamelCase case tables (the Nemotron/Dory scanner's U and L2, the
+    # Flint pattern's case classes): Lu+Lt versus Ll — the same ranges both
+    # patterns use.
     lowers = ranges_of(lambda cp: unicodedata.category(chr(cp)) == "Ll")
+    uppers = ranges_of(lambda cp: unicodedata.category(chr(cp)) in ("Lu", "Lt"))
     marks = ranges_of(
         lambda cp: unicodedata.category(chr(cp)) in ("Mn", "Mc", "Me"))
     numbers = ranges_of(
@@ -177,9 +178,9 @@ namespace dgpp::text::unicode {{
 
 {emit("Letter", letters, "General_Category L* (Lu, Ll, Lt, Lm, Lo)")}
 
-{emit("Upper", uppers, "General_Category Lu and Lt — the Nemotron/Dory scanner's CamelCase upper class")}
+{emit("Lower", lowers, "General_Category Ll — the case classes' lower range (the Flint pattern's, the Nemotron/Dory scanner's L2)")}
 
-{emit("Lower", lowers, "General_Category Ll — the Nemotron/Dory scanner's CamelCase lower class")}
+{emit("Upper", uppers, "General_Category Lu, Lt — the case classes' upper range (the Flint pattern's, the Nemotron/Dory scanner's U)")}
 
 {emit("Mark", marks, "General_Category M* (Mn, Mc, Me)")}
 
@@ -222,11 +223,14 @@ inline bool is_white_space(uint32_t cp) {{
 inline bool is_mark(uint32_t cp) {{
   return in_ranges(kMarkRanges, std::size(kMarkRanges), cp);
 }}
-inline bool is_upper(uint32_t cp) {{
-  return in_ranges(kUpperRanges, std::size(kUpperRanges), cp);
-}}
 inline bool is_lower(uint32_t cp) {{
   return in_ranges(kLowerRanges, std::size(kLowerRanges), cp);
+}}
+inline bool is_upper_or_title(uint32_t cp) {{
+  return in_ranges(kUpperRanges, std::size(kUpperRanges), cp);
+}}
+inline bool is_upper(uint32_t cp) {{
+  return in_ranges(kUpperRanges, std::size(kUpperRanges), cp);
 }}
 inline bool is_punctuation(uint32_t cp) {{
   return in_ranges(kPunctRanges, std::size(kPunctRanges), cp);

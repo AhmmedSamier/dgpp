@@ -1,4 +1,5 @@
 #include "kernels/qsa.hpp"
+#include "kernels/pdl.cuh"
 
 #include <algorithm>
 #include <cmath>
@@ -106,6 +107,7 @@ __global__ void norm_rope_kernel(const uint16_t* __restrict__ x, int64_t x_row_s
                                  const float* __restrict__ inv_freq, uint16_t* __restrict__ out,
                                  int64_t out_row_stride, int heads, int dim, int rotary_dim,
                                  float eps, float mscale) {
+  dgpp_pdl_wait();
   extern __shared__ float xs[];
   __shared__ float scratch[33];
   const int64_t r = blockIdx.x / heads;
@@ -137,6 +139,7 @@ __global__ void norm_rope_append_fp8_kernel(const uint16_t* __restrict__ x,
                                             int dim, int rotary_dim, float eps, float mscale,
                                             uint8_t* __restrict__ k_cache,
                                             float* __restrict__ k_scale) {
+  dgpp_pdl_wait();
   extern __shared__ float xs[];
   __shared__ float scratch[33];
   const int64_t r = blockIdx.x / kv_heads;
@@ -172,6 +175,7 @@ __global__ void kv_append_kernel(const uint16_t* __restrict__ k, int64_t k_row_s
                                  int blocks_per_request, int block_tokens, int kv_heads, int dim,
                                  uint16_t* __restrict__ k_cache, uint16_t* __restrict__ v_cache,
                                  float* __restrict__ k_scale, float* __restrict__ v_scale) {
+  dgpp_pdl_wait();
   const int64_t r = blockIdx.x;
   const int64_t p = pos[r];
   if (p < 0) return;
@@ -253,6 +257,7 @@ __global__ void kv_append_fp8_kernel(const uint16_t* __restrict__ k, int64_t k_r
                                      int blocks_per_request, int block_tokens, int width,
                                      const float* __restrict__ kv_scales,
                                      uint8_t* __restrict__ k_cache, uint8_t* __restrict__ v_cache) {
+  dgpp_pdl_wait();
   const int64_t r = blockIdx.x;
   const int64_t p = pos[r];
   if (p < 0) return;
@@ -285,6 +290,7 @@ __global__ void index_compress_write_kernel(const uint16_t* __restrict__ raw_k, 
                                             int pools_per_block, int64_t first_pool, int n_pools,
                                             uint16_t* __restrict__ index_cache, int kpool, int dim,
                                             int rotary_dim, float eps, float mscale) {
+  dgpp_pdl_wait();
   extern __shared__ float xs[];
   __shared__ float scratch[33];
   const int i = blockIdx.x;
@@ -308,6 +314,7 @@ __global__ void index_tail_seed_kernel(const uint16_t* __restrict__ raw_k, int64
                                        const int32_t* __restrict__ req_ids,
                                        const int64_t* __restrict__ pos, int64_t tokens,
                                        uint16_t* __restrict__ ring, int kpool, int dim) {
+  dgpp_pdl_wait();
   const int64_t i = blockIdx.x;
   if (i >= tokens) return;
   const int32_t req = req_ids[i];
@@ -328,6 +335,7 @@ __global__ void index_decode_update_kernel(
     const int32_t* __restrict__ block_tables, int blocks_per_request, uint16_t* __restrict__ ring,
     uint16_t* __restrict__ index_cache, int pools_per_block, int kpool, int dim, int rotary_dim,
     float eps, float mscale, uint16_t* __restrict__ ring_snapshots) {
+  dgpp_pdl_wait();
   extern __shared__ float xs[];
   __shared__ float scratch[33];
   const int span = blockIdx.x;
@@ -376,7 +384,8 @@ __global__ void index_decode_update_kernel(
 }
 
 // ---- scoring ----------------------------------------------------------------
-// Block (stripe, row): the row's q (4 heads x 128) in smem as floats; each
+// Block (stripe, row), or (row, stripe) for long prefills: the row's q
+// (4 heads x 128) in smem as floats; each
 // warp scores one pool per iteration: lane (h = lane / 8, c = lane % 8)
 // holds dims [16c, 16c + 16) of head h and of the key row.
 constexpr int kScoreWarps = 8;
@@ -388,14 +397,15 @@ __global__ __launch_bounds__(kScoreThreads) void index_score_kernel(
     const int64_t* __restrict__ pos, const int32_t* __restrict__ block_tables,
     int blocks_per_request, const uint16_t* __restrict__ index_cache, int pools_per_block,
     int heads, int kpool, uint64_t* __restrict__ keys_ws, int64_t ws_stride, float sqrt_dim,
-    int select_k) {
+    int select_k, bool stripe_first) {
+  dgpp_pdl_wait();
   __shared__ float qs[4 * 128];
-  const int64_t r = blockIdx.y;
+  const int64_t r = stripe_first ? blockIdx.x : blockIdx.y;
   const int64_t p = pos[r];
   if (p < 0) return;
   const int64_t visible = (p + 1) / kpool;
   if (visible <= select_k) return;
-  const int64_t p0 = static_cast<int64_t>(blockIdx.x) * kScorePoolsPerBlock;
+  const int64_t p0 = static_cast<int64_t>(stripe_first ? blockIdx.y : blockIdx.x) * kScorePoolsPerBlock;
   if (p0 >= visible) return;
   // Heads beyond `heads` (<= 4) hold zeros: their lanes add nothing.
   for (int i = threadIdx.x; i < 4 * 128; i += kScoreThreads)
@@ -558,6 +568,7 @@ __global__ __launch_bounds__(kSelectThreads) void select_from_keys_kernel(
     const uint64_t* __restrict__ keys_ws, int64_t ws_stride, const int64_t* __restrict__ pos,
     int select_k, int kpool, int max_selected, int32_t* __restrict__ topk_out,
     int32_t* __restrict__ out_counts) {
+  dgpp_pdl_wait();
   extern __shared__ uint64_t smem_u64[];
   uint32_t* best_hi = reinterpret_cast<uint32_t*>(smem_u64);
   uint32_t* best_lo = best_hi + select_k;
@@ -624,6 +635,7 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_ro
                                     int blocks_per_request, float scale, float* __restrict__ m_ws,
                                     float* __restrict__ l_ws, float* __restrict__ c_ws,
                                     int async_gather) {
+  dgpp_pdl_wait();
   constexpr int kGroups = 32;
   constexpr int kDslice = D / kGroups;  // 8 at D=256
   constexpr int kRowStride = D + 8;     // padded smem row (u16)
@@ -914,6 +926,7 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_ro
 __global__ void gate_out_kernel(const float* __restrict__ c, const uint16_t* __restrict__ gate,
                                 int64_t gate_row_stride, int64_t gate_head_stride,
                                 uint16_t* __restrict__ out, int heads, int dim) {
+  dgpp_pdl_wait();
   const int64_t r = blockIdx.y;
   const int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i >= static_cast<int64_t>(heads) * dim) return;
@@ -1081,10 +1094,19 @@ void qsa_index_score(const uint16_t* q, int64_t q_row_stride, const int32_t* req
   if (pools <= select_k) return;
   const int64_t stripes = (pools + kScorePoolsPerBlock - 1) / kScorePoolsPerBlock;
   if (stripes > 0x7fffffff) throw std::invalid_argument("qsa_index_score: too many pools");
-  const dim3 grid(static_cast<unsigned>(stripes), static_cast<unsigned>(rows));
+  // Once the compressed key cache exceeds GB10's 24 MiB L2, walking all
+  // stripes for each row streams it again for every query. Visit the rows
+  // of one stripe together instead, so they reuse its keys. The arithmetic,
+  // causal bounds and output addresses stay identical. Short contexts and
+  // decode retain their original traversal. The pool-id bound above caps
+  // stripes at 8192, within CUDA's grid.y limit in either orientation.
+  constexpr int64_t cache_pools = (24 << 20) / (128 * sizeof(uint16_t));
+  const bool stripe_first = rows >= 128 && pools >= cache_pools;
+  const dim3 grid(static_cast<unsigned>(stripe_first ? rows : stripes),
+                  static_cast<unsigned>(stripe_first ? stripes : rows));
   index_score_kernel<<<grid, kScoreThreads, 0, stream>>>(
       q, q_row_stride, req_ids, pos, block_tables, blocks_per_request, index_cache, pools_per_block,
-      heads, kpool, keys_ws, ws_stride, std::sqrt(static_cast<float>(dim)), select_k);
+      heads, kpool, keys_ws, ws_stride, std::sqrt(static_cast<float>(dim)), select_k, stripe_first);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 

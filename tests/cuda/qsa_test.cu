@@ -9,6 +9,7 @@
 // within two ulps. Plus the frozen plain rope table and the YaRN cos/sin
 // scale itself.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -759,6 +760,75 @@ DGPP_TEST(qsa_request_bounded_workspace_preserves_scores_selection_and_graphs) {
                 "request-bounded workspace changed scoring keys");
     std::printf("[ .. ] %d rows, context %d, stride %d -> %d: keys, selection and graphs exact\n",
                 rows, context, wide, compact);
+  }
+}
+
+DGPP_TEST(qsa_prefill_score_order_matches_single_rows_and_graphs_bitwise) {
+  // A row at a time retains the decode traversal and serves as an independent
+  // launch-order oracle. Cross the prefill threshold, a partial score stripe,
+  // and a cache larger than L2; requests use disjoint, shuffled physical pages.
+  constexpr int dim = 128, ppb = 16, kpool = 4, select_k = 512, guard = 16;
+  cudaStream_t stream = test_stream();
+  for (auto shape : {std::array<int, 3>{127, 2049, 1}, {128, 2049, 4},
+                     {129, 2049, 4}, {129, 131073, 4}}) {
+    const auto [rows, pools, heads] = shape;
+    const int blocks = (pools + ppb - 1) / ppb, stride = blocks * ppb;
+    const int qstride = heads * dim + 32;
+    std::vector<int32_t> table(2 * blocks);
+    std::iota(table.begin(), table.end(), 0);
+    std::mt19937 rng(133);
+    std::shuffle(table.begin(), table.end(), rng);
+    const auto cache = random_bf16_normal(133, int64_t(2) * stride * dim, 1.f);
+    const auto query = random_bf16_normal(134, int64_t(rows) * qstride, 1.f);
+    std::vector<int32_t> req(rows);
+    std::vector<int64_t> pos(rows);
+    for (int r = 0; r < rows; ++r) {
+      req[r] = r % 2;
+      pos[r] = r % 11 == 0 ? -1 : int64_t(pools) * kpool - rows + r;
+    }
+    DevBuf dc = up(cache), dq = up(query), dt = up(table), dr = up(req), dp = up(pos);
+    const size_t n = size_t(rows) * stride + 2 * guard;
+    DevBuf batched(n * sizeof(uint64_t)), serial(n * sizeof(uint64_t));
+    auto launch = [&](bool one_row) {
+      for (int r = 0; r < (one_row ? rows : 1); ++r)
+        dgpp::qsa_index_score(ptr<uint16_t>(dq) + size_t(r) * qstride, qstride,
+            ptr<int32_t>(dr) + r, ptr<int64_t>(dp) + r, one_row ? 1 : rows,
+            ptr<int32_t>(dt), blocks, ptr<uint16_t>(dc), ppb, heads, dim, kpool,
+            mptr<uint64_t>(one_row ? serial : batched) + guard + size_t(r) * stride,
+            stride, stream, pools, select_k);
+    };
+    DGPP_CUDA_OK(cudaMemsetAsync(batched.p, 0xff, batched.bytes, stream));
+    DGPP_CUDA_OK(cudaMemsetAsync(serial.p, 0xff, serial.bytes, stream));
+    launch(true);
+    launch(false);
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    auto expected = down<uint64_t>(serial, n);
+    require(down<uint64_t>(batched, n) == expected,
+            "prefill traversal changed scoring keys, padding or inactive rows");
+    for (int i = 0; i < guard; ++i)
+      require(expected[i] == UINT64_MAX && expected[n - 1 - i] == UINT64_MAX,
+              "score traversal overwrote a workspace guard");
+    cudaGraph_t graph;
+    cudaGraphExec_t exec;
+    DGPP_CUDA_OK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    launch(false);
+    DGPP_CUDA_OK(cudaStreamEndCapture(stream, &graph));
+    DGPP_CUDA_OK(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+    // Replay with different row metadata, including newly active/inactive rows.
+    std::reverse(pos.begin(), pos.end());
+    DGPP_CUDA_OK(cudaMemcpyAsync(dp.p, pos.data(), pos.size() * sizeof(int64_t),
+                                cudaMemcpyHostToDevice, stream));
+    DGPP_CUDA_OK(cudaMemsetAsync(batched.p, 0xff, batched.bytes, stream));
+    DGPP_CUDA_OK(cudaMemsetAsync(serial.p, 0xff, serial.bytes, stream));
+    launch(true);
+    DGPP_CUDA_OK(cudaGraphLaunch(exec, stream));
+    DGPP_CUDA_OK(cudaStreamSynchronize(stream));
+    require(down<uint64_t>(batched, n) == down<uint64_t>(serial, n),
+            "prefill scoring graph replay changed keys or padding");
+    DGPP_CUDA_OK(cudaGraphExecDestroy(exec));
+    DGPP_CUDA_OK(cudaGraphDestroy(graph));
+    std::printf("[ .. ] score traversal: %d rows, %d pools, %d heads, eager/graph exact\n",
+                rows, pools, heads);
   }
 }
 

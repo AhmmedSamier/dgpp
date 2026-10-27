@@ -48,7 +48,8 @@ GrammarVocab::GrammarVocab(std::vector<std::string> texts, ChatMarkers markers,
 
 GrammarVocab GrammarVocab::from_tokenizer(const Tokenizer& tok,
                                           const std::vector<int64_t>& eos_ids,
-                                          int vocab_size, DsmlDialect dsml_dialect) {
+                                          int vocab_size, DsmlDialect dsml_dialect,
+                                          bool model_opens_thinking) {
   // The table covers the dense vocabulary, not the added tokens' top: a
   // tokenizer whose added tokens ALIAS base ids below the vocab (Dory's
   // <SPECIAL_0..999> at ids 0..999, 2026-10-26) leaves tok.max_id() far
@@ -73,6 +74,7 @@ GrammarVocab GrammarVocab::from_tokenizer(const Tokenizer& tok,
   }
   ChatMarkers markers = ChatMarkers::from_tokenizer(tok);
   markers.dsml_dialect = dsml_dialect;
+  markers.model_opens_thinking = model_opens_thinking;
   return GrammarVocab(std::move(texts), std::move(markers), eos_ids, vocab_size, call_eos);
 }
 

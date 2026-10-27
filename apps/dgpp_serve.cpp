@@ -103,6 +103,8 @@
 #include "models/dory/config.hpp"
 #include "models/dory/forward.hpp"
 #include "models/dory/loader.hpp"
+#include "models/flint/config.hpp"
+#include "models/flint/forward.hpp"
 #include "sched/scheduler.hpp"
 #include "text/tokenizer.hpp"
 #include "text/tool_grammar.hpp"
@@ -257,6 +259,7 @@ struct ServeGraphEngine {
   virtual void set_proposal_temperature_scale(float scale) = 0;
   // engine.mtp_verify: block verification (true) or the token rule, before the warm capture.
   virtual void set_block_verify(bool on) = 0;
+  virtual void set_decode_pdl(bool on) = 0;
   // engine.dflash_batch_rows: the block drafter's batched verify rows budget, before the warm capture.
   virtual void configure_block_rows_budget(int budget) = 0;
   // engine.mtp_schedule_sampled_scale, before the warm capture.
@@ -282,6 +285,7 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   void set_proposal_drafts(bool on) override { eng.set_proposal_drafts(on); }
   void set_proposal_temperature_scale(float scale) override { eng.set_proposal_temperature_scale(scale); }
   void set_block_verify(bool on) override { eng.set_block_verify(on); }
+  void set_decode_pdl(bool on) override { eng.set_decode_pdl(on); }
   void configure_block_rows_budget(int budget) override { eng.configure_block_rows_budget(budget); }
   void set_sampled_schedule_scale(float scale) override { eng.set_sampled_schedule_scale(scale); }
   void set_lookup_drafts(bool on, int nmin, int nstrong, int agree) override {
@@ -307,6 +311,12 @@ struct ServeFamily {
   // requests — but a single request can never pass it, so the launcher
   // says so out loud.
   virtual int64_t position_limit() const { return 0; }
+  // Whether the family's chat template leaves the reasoning block to the
+  // model: its generation prompt neither opens <think> nor closes a block,
+  // and the model opens its own (MiMo-V2.6, Flint). The declaration goes
+  // to the frontend's markers and the grammar vocabulary
+  // (ChatMarkers::model_opens_thinking); a prompt's tokens never decide it.
+  virtual bool model_opens_thinking() const { return false; }
   // The decode rows the family serves in one fixed batch at most (2026-09-10,
   // engine/decode_outputs.hpp): the session-core families take the derived
   // shape up to kDecodeRowsMax; GLM-5.3-Flash takes it up to 32 since
@@ -707,9 +717,24 @@ struct Dsv41Family final : ServeFamily {
   std::string ckpt;
   std::vector<int64_t> eos;
   std::unique_ptr<dgpp::Dsv41Model> model;
-  explicit Dsv41Family(const std::string& checkpoint)
+  Dsv41Family(const std::string& checkpoint, int index_topk, int candidate_topk_blocks, int candidate_block_size)
       : cfg(dgpp::Dsv41TextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
-        ckpt(checkpoint), eos{cfg.eos_token_id} {}
+        ckpt(checkpoint), eos{cfg.eos_token_id} {
+    // The deployment's index budget (engine.index_topk / candidate_topk_blocks /
+    // candidate_block_size, 2026-10-18) replaces the checkpoint's before the
+    // memory plan, the layer shapes and the model read the config. Every
+    // rank applies the same values (the config digest and the settings
+    // record carry them): the selected entries must agree across the world.
+    const int shipped_topk = cfg.index_topk, shipped_blocks = cfg.candidate_topk_blocks,
+              shipped_block = cfg.candidate_block_size;
+    cfg.apply_index_budget(index_topk, candidate_topk_blocks, candidate_block_size);
+    if (cfg.index_topk != shipped_topk || cfg.candidate_topk_blocks != shipped_blocks ||
+        cfg.candidate_block_size != shipped_block)
+      DGPP_LOG_INFO("dsv41: index budget {} entries per query from a candidate pool of {} blocks x {} (the "
+                    "checkpoint's {} from {} x {}; engine.index_topk / candidate_topk_blocks / candidate_block_size)",
+                    cfg.index_topk, cfg.candidate_topk_blocks, cfg.candidate_block_size, shipped_topk,
+                    shipped_blocks, shipped_block);
+  }
   const char* name() const override { return "deepseek_v41"; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return eos; }
@@ -724,6 +749,14 @@ struct Dsv41Family final : ServeFamily {
   int decode_rows_cap() const override { return dgpp::Dsv41Model::decode_rows_cap(); }
   int default_mtp_depth() const override { return cfg.dspark_block_size; }
   int draft_block_rows() const override { return cfg.dspark_block_size; }
+  // Measured 2026-10-19 (four nodes, temperature 1, C1, 256 tokens x 3 per
+  // class): the block's argmax under the token rule 2.87 / 1.77 / 4.25
+  // tokens per pass (code / prose / JSON) against a draw from it 3.19 /
+  // 2.11 / 4.18 — but a sampled-draft slot verifies the whole block every
+  // pass (the depth schedule is for greedy slots), so the draw's passes
+  // cost 53 ms against 46 / 40 / 51: 60.1 / 39.2 / 78.4 tok/s against
+  // 62.2 / 45.4 / 84.1, and 69.5 / 49.9 / 84.8 with mtp_verify block.
+  bool greedy_draft_default() const override { return true; }
   // The widest fold the decode graph records: the Engram kv partial
   // [rows, (hc + 1) x hidden] on layers 1 and 14.
   size_t lat_slot_bytes(int decode_rows) const override {
@@ -743,6 +776,10 @@ struct Dsv41Family final : ServeFamily {
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     dgpp::Dsv41LayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    if (cfg.weights_exl3 && dgpp::Dsv41LayerStream::engram_source_dir().empty())
+      throw std::invalid_argument(
+          "the EXL3 pack ships no Engram tables: set engine.engram_source to the base release "
+          "(deepseek-ai/DeepSeek-V4.1-Flash-1017) whose shards hold them (docs/deepseek_v41_flash_exl3_plan.md §1.3)");
     model = std::make_unique<dgpp::Dsv41Model>(
         cfg, ckpt, forward_rows, pool_tokens,
         fabric ? dgpp::Dsv41Residency::Resident : dgpp::Dsv41Residency::Streaming, reducer,
@@ -870,6 +907,9 @@ struct MimoFamily final : ServeFamily {
                                   " is not implemented for the MiMo-V2 K/V cache (bf16 or fp8)");
   }
   const char* name() const override { return "mimo_v2"; }
+  // The template's generation prompt ends in "assistant\n" (its
+  // enable_thinking=false form in "<think></think>"): the model opens <think>.
+  bool model_opens_thinking() const override { return true; }
   int64_t vocab_size() const override { return cfg.vocab_size; }
   const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
   int64_t block_tokens() const override { return dgpp::MimoModel::kv_block_tokens_static(); }
@@ -922,16 +962,6 @@ struct MimoFamily final : ServeFamily {
   }
 };
 
-// Dory1.0-4B (DoryForCausalLM, modelopt W4A16 NVFP4 as shipped;
-// docs/dory_plan.md): the looped normalized GPT — an input block, a
-// recurrent block walked n_recurrent_loops times with the input re-injected
-// and the state re-normalized at every loop, an output block. The paged
-// K/V pool (64-token blocks, bf16, one plane per attention layer per loop
-// under the exact `per_loop` policy), no recurrent request state beside it
-// (snapshots at any position), no draft layer (plan D4: the templates run
-// plain, speculation keys are refused by name) and one rank (plan: the
-// reference refuses tensor_parallel_size != 1 and the release is a single
-// 3 GiB image, so it is resident).
 struct DoryFamily final : ServeFamily {
   dgpp::DoryConfig cfg;
   std::string ckpt;
@@ -990,6 +1020,83 @@ struct DoryFamily final : ServeFamily {
       int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
       int prefix_slots) override {
     return std::make_unique<dgpp::EagerEngineAdapter<dgpp::DoryModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+struct FlintFamily final : ServeFamily {
+  dgpp::FlintTextConfig cfg;
+  std::string ckpt;
+  dgpp::LatentFormat kv_format = dgpp::LatentFormat::kBf16;
+  std::unique_ptr<dgpp::FlintModel> model;
+  FlintFamily(const std::string& checkpoint, dgpp::LatentFormat fmt)
+      : cfg(dgpp::FlintTextConfig::from_json_file((fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint), kv_format(fmt) {
+    if (kv_format != dgpp::LatentFormat::kBf16 && kv_format != dgpp::LatentFormat::kFp8)
+      throw std::invalid_argument(std::string("engine.kv_dtype ") + dgpp::latent_format_name(kv_format) +
+                                  " is not implemented for the Flint K/V cache (bf16 or fp8)");
+  }
+  const char* name() const override { return "flint"; }
+  // The template's generation prompt ends at "<|assistant|>\n" and reads
+  // no thinking switch: the model opens its own <think>.
+  bool model_opens_thinking() const override { return true; }
+  int64_t vocab_size() const override { return cfg.vocab_size; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.eos_token_ids; }
+  // The checkpoint's positional ceiling (262144): a larger pool seats more
+  // requests, a single request never passes it.
+  int64_t position_limit() const override { return cfg.max_position_embeddings; }
+  int64_t block_tokens() const override { return dgpp::FlintModel::kv_block_tokens_static(); }
+  int prefill_chunk_tokens() const override { return dgpp::FlintModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return dgpp::latent_format_name(kv_format); }
+  int decode_rows_cap() const override { return dgpp::FlintModel::decode_rows_cap(); }
+  // The widest fold the decode graph records: a block output [rows, hidden].
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
+  }
+  static void refuse_mtp(bool mtp) {
+    if (mtp)
+      throw std::invalid_argument("engine.mtp: the Flint family has no draft head (set \"mtp\": false; the plain world)");
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
+                        bool mtp, int decode_rows) const override {
+    refuse_mtp(mtp);
+    return dgpp::FlintModel::plan_memory(
+        cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+        fabric ? dgpp::FlintResidency::Resident : dgpp::FlintResidency::Streaming, slots,
+        /*mtp=*/false, decode_rows, kv_format, /*serving_logits=*/true);
+  }
+  size_t snapshot_bytes(int world_, bool mtp) const override {
+    refuse_mtp(mtp);
+    return dgpp::FlintModel::session_snapshot_bytes(cfg, world_, false);
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
+                   int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
+    refuse_mtp(mtp);
+    dgpp::FlintLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
+    model = std::make_unique<dgpp::FlintModel>(
+        cfg, ckpt, forward_rows, pool_tokens,
+        fabric ? dgpp::FlintResidency::Resident : dgpp::FlintResidency::Streaming, reducer,
+        fabric ? rank : 0, fabric ? world_ : 1, slots, /*mtp=*/false, decode_rows, kv_format,
+        /*serving_logits=*/true);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int world_, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches, int lookup_tail = 0) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::FlintModel>>(
+        model.get(), bus, rank, world_, pick_scratch, cfg.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches, lookup_tail);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::FlintModel>>(
         model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
   }
 };
@@ -1111,13 +1218,22 @@ struct Qwen35Family final : ServeFamily {
 std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
                                          dgpp::LatentFormat kv_format,
                                          const std::optional<dgpp::RopeScaling>& rope_scaling,
-                                         bool fp8_head_mma) {
+                                         bool fp8_head_mma, int index_topk, int candidate_topk_blocks,
+                                         int candidate_block_size) {
   const dgpp::ModelArchitecture arch =
       dgpp::detect_architecture_file((fs::path(ckpt) / "config.json").string());
-  if (arch == dgpp::ModelArchitecture::DeepseekV41) return std::make_unique<Dsv41Family>(ckpt);
+  if (arch == dgpp::ModelArchitecture::DeepseekV41)
+    return std::make_unique<Dsv41Family>(ckpt, index_topk, candidate_topk_blocks, candidate_block_size);
+  // The index budget is the DeepSeek-V4.1 indexer's: no other family has a
+  // configurable selection, so a key that names one is a misconfiguration.
+  if (index_topk > 0 || candidate_topk_blocks > 0 || candidate_block_size > 0)
+    throw std::invalid_argument(
+        "engine.index_topk, engine.candidate_topk_blocks and engine.candidate_block_size are the DeepSeek-V4.1 "
+        "(deepseek_v41) indexer's budget; this checkpoint's family has no configurable selection budget");
   if (arch == dgpp::ModelArchitecture::DeepseekV4) return std::make_unique<Dsv4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::MimoV2) return std::make_unique<MimoFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Dory) return std::make_unique<DoryFamily>(ckpt, world);
+  if (arch == dgpp::ModelArchitecture::Flint) return std::make_unique<FlintFamily>(ckpt, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen4Exp)
     return std::make_unique<QwenFamily>(ckpt, rope_scaling, fp8_head_mma, kv_format);
   if (arch == dgpp::ModelArchitecture::Qwen3_5)
@@ -1218,6 +1334,7 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
                  bool no_eos, double boot_s,
                  dgpp::serve::JournalWriter* journal,
                  dgpp::serve::OpStreamObserver* oplog, const std::string& family_name,
+                 bool model_opens_thinking,
                  const std::atomic<uint64_t>* collective_progress = nullptr) {
   const dgpp::text::Tokenizer tok = dgpp::text::Tokenizer::load(
       (fs::path(ckpt) / "tokenizer.json").string(), k.tokenizer_word_cache_entries);
@@ -1257,7 +1374,10 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
         vision_frontend = std::make_unique<dgpp::serve::QwenVisionFrontend>(&tok, &*tpl, ids);
     }
     frontend = vision_frontend ? std::move(vision_frontend)
-                               : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl);
+                               : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl, model_opens_thinking);
+    if (model_opens_thinking)
+      DGPP_LOG_INFO("serve: the {} template leaves the reasoning block to the model (the family's declaration)",
+                    family_name);
     if (engine->supports_images())
       DGPP_LOG_INFO("serve: image inputs enabled ({} visual tokens per image max)",
                     dgpp::kMaxImageTokens);
@@ -1595,7 +1715,8 @@ int main(int argc, char** argv) {
       "    [--bulk-inflight N (default 4)]: stripes in flight per lane\n"
       "  sampling (defaults from generation_config.json; temperature 0 =\n"
       "  greedy): [--temperature X] [--top-p X] [--top-k N] [--min-p X]\n"
-      "    [--repetition-penalty X] [--seed N (for requests that omit one)]\n"
+      "    [--repetition-penalty X] [--frequency-penalty X] [--presence-penalty X]\n"
+      "    [--seed N (for requests that omit one)]\n"
       "  reasoning (M6 6f): [--reasoning-in-content] folds the ids before\n"
       "    </think> into content instead of reasoning_content\n"
       "  template defaults: [--default-chat-template-kwargs JSON (default {})]\n"
@@ -1610,7 +1731,8 @@ int main(int argc, char** argv) {
   bool dflash_verify_graph = true, dflash_draft_batch = true;
   bool prefill_group = true;  // engine.prefill_group: several cold prompts as one walk
   bool l2_prefetch = true, l2_prefetch_merge = true;  // engine.l2_prefetch*
-  std::string l2_prefetch_form = "load", l2_prefetch_boundary_rate = "light", l2_prefetch_layer_rate = "light";
+  std::string l2_prefetch_form = "load", l2_prefetch_full_form = "16x8", l2_prefetch_boundary_rate = "light",
+              l2_prefetch_layer_rate = "light";
   int l2_prefetch_window_mib = 12, l2_prefetch_boundary_window_mib = 20;
   int dflash_depth = 0;
   std::string dflash_weights = "checkpoint";  // engine.dflash_weights: checkpoint | fp8
@@ -1627,11 +1749,12 @@ int main(int argc, char** argv) {
   std::string kv_dtype = "bf16";  // the latent cache's format
   std::string ngram_table = "resident";  // the Qwen n-gram table: resident | mmap
   std::string ngram_table_model;         // the table's shards from another cached snapshot (engine.ngram_table_model)
+  std::string engram_source;             // the DeepSeek-V4.1 Engram tables' snapshot (engine.engram_source)
   std::string fp8_head = "gemv";
   std::string draft_head = "exact";         // the MTP draft head's read: exact | screen (engine.draft_head)
   int draft_head_blocks = 32;               // the screen's candidate cap (engine.draft_head_blocks)
   std::string dense_weights = "checkpoint";  // the Qwen dense stack: checkpoint | fp8
-  std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused
+  std::string mtp_expert_format = "fp8";    // the Qwen MTP draft experts: fp8 | bf16_fused | bf16 (qwen3_5 MoE)
   std::string bf16_weights = "checkpoint";  // the bf16 decode weights' resident form: checkpoint | bf12 | bf12+bf16
   std::string draft_vocab;                  // the Qwen draft head's vocabulary slice (engine.draft_vocab)
   bool prefill_bf16_partials = false;       // the opt-in prefill levers (engine.prefill_*; 2026-09-30)
@@ -1649,12 +1772,21 @@ int main(int argc, char** argv) {
   std::string prefill = "bounded";  // the DeepSeek-V4.1 prefill: bounded | exact
   int dory_loops = 0;                   // engine.dory_loops (Dory1.0-4B; 0 = the checkpoint's)
   std::string dory_kv_cache = "per_loop";  // engine.dory_kv_cache: per_loop | last_loop
+  std::string prefill_dense = "auto";  // FP8 grid prefill projections: auto | tile | streaming
+  bool prefill_fold_overlap = true;    // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
+  bool decode_pdl = true;              // the decode graph's kernel edges programmatic (engine/graph_pdl.hpp)
+  std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
+  std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar
+  std::string collective_transport = "write";  // the latency collectives' transport: write | send
   // The opt-in YaRN rope ramp (engine.rope_scaling): absent = the plain
   // table, the default and the behaviour every earlier build had.
   std::optional<dgpp::RopeScaling> rope_scaling;
   std::string embed_sharding = "replicated";  // the full GLM-5.3's embedding: replicated | vocab
   std::string mtp_head = "checkpoint";        // the full GLM-5.3 draft head: checkpoint | fp8
   std::string attention_weights = "checkpoint";  // the full GLM-5.3 attention projections: checkpoint | int4
+  // The DeepSeek-V4.1 index budget (engine.index_topk / candidate_topk_blocks /
+  // candidate_block_size): 0 = the checkpoint's.
+  int index_topk = 0, candidate_topk_blocks = 0, candidate_block_size = 0;
   int max_concurrency = 8, queue_limit = 64, default_max_tokens = 256, admission_gather_ms = 3;
   dgpp::serve::FileInputConfig file_inputs;
   bool compact_batches = true;
@@ -1702,6 +1834,7 @@ int main(int argc, char** argv) {
   int lookup_tail = 0;  // engine.lookup_tail: extra verify rows past the MTP block (0: the block alone)
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
+  std::optional<float> frequency_penalty, presence_penalty;
   std::optional<int> top_k;
   std::optional<uint64_t> fixed_seed;
   bool reasoning_in_content = false;
@@ -1755,6 +1888,7 @@ int main(int argc, char** argv) {
     kv_dtype = e.kv_dtype;
     ngram_table = e.ngram_table;
     ngram_table_model = e.ngram_table_model;
+    engram_source = e.engram_source;
     dense_weights = e.dense_weights;
     fp8_head = e.fp8_head;
     draft_head = e.draft_head;
@@ -1777,10 +1911,19 @@ int main(int argc, char** argv) {
     prefill = e.prefill;
     dory_loops = e.dory_loops;
     dory_kv_cache = e.dory_kv_cache;
+    prefill_dense = e.prefill_dense;
+    prefill_fold_overlap = e.prefill_fold_overlap;
+    decode_pdl = e.decode_pdl;
+    prefill_window = e.prefill_window;
+    decode_window = e.decode_window;
+    collective_transport = e.collective_transport;
     rope_scaling = e.rope_scaling;
     embed_sharding = e.embed_sharding;
     mtp_head = e.mtp_head;
     attention_weights = e.attention_weights;
+    index_topk = e.index_topk;
+    candidate_topk_blocks = e.candidate_topk_blocks;
+    candidate_block_size = e.candidate_block_size;
     default_max_tokens = e.default_max_tokens;
     file_inputs = e.file_inputs;
     queue_limit = e.queue_limit;
@@ -1794,6 +1937,7 @@ int main(int argc, char** argv) {
     prefill_group = e.prefill_group;
     l2_prefetch = e.l2_prefetch;
     l2_prefetch_form = e.l2_prefetch_form;
+    l2_prefetch_full_form = e.l2_prefetch_full_form;
     l2_prefetch_window_mib = e.l2_prefetch_window_mib;
     l2_prefetch_boundary_window_mib = e.l2_prefetch_boundary_window_mib;
     l2_prefetch_boundary_rate = e.l2_prefetch_boundary_rate;
@@ -1823,6 +1967,9 @@ int main(int argc, char** argv) {
     compact_batches = e.compact_batches;
     graph_batch_min_live = e.graph_batch_min_live;
     sampling_candidates = e.sampling_candidates;
+    repetition_penalty = e.repetition_penalty;
+    frequency_penalty = e.frequency_penalty;
+    presence_penalty = e.presence_penalty;
     prefix_cache_gib = e.prefix_cache_gib;
     admission_mode = e.admission;
     admission_window = e.admission_window;
@@ -1886,6 +2033,7 @@ int main(int argc, char** argv) {
     else if (a == "--kv-dtype") kv_dtype = next();
     else if (a == "--ngram-table") ngram_table = next();
     else if (a == "--ngram-table-model") ngram_table_model = next();
+    else if (a == "--engram-source") engram_source = next();
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
@@ -1935,6 +2083,7 @@ int main(int argc, char** argv) {
     else if (a == "--no-prefill-group") prefill_group = false;
     else if (a == "--no-l2-prefetch") l2_prefetch = false;
     else if (a == "--l2-prefetch-form") l2_prefetch_form = next();
+    else if (a == "--l2-prefetch-full-form") l2_prefetch_full_form = next();
     else if (a == "--l2-prefetch-window-mib") l2_prefetch_window_mib = std::stoi(next());
     else if (a == "--l2-prefetch-boundary-window-mib") l2_prefetch_boundary_window_mib = std::stoi(next());
     else if (a == "--l2-prefetch-boundary-rate") l2_prefetch_boundary_rate = next();
@@ -1954,6 +2103,10 @@ int main(int argc, char** argv) {
     }
     else if (a == "--mtp-schedule") {
       mtp_schedule = true;
+      mtp_schedule_cli = true;
+    }
+    else if (a == "--no-mtp-schedule") {  // a fixed verify depth from a scheduled template (the campaign's mode knob)
+      mtp_schedule = false;
       mtp_schedule_cli = true;
     }
     else if (a == "--mtp-schedule-row-ms") mtp_schedule_row_ms = std::stod(next());
@@ -2026,6 +2179,10 @@ int main(int argc, char** argv) {
     else if (a == "--top-k") top_k = std::stoi(next());
     else if (a == "--min-p") min_p = std::stof(next());
     else if (a == "--repetition-penalty") repetition_penalty = std::stof(next());
+    else if (a == "--frequency-penalty")
+      frequency_penalty = std::stof(next());
+    else if (a == "--presence-penalty")
+      presence_penalty = std::stof(next());
     else if (a == "--seed") fixed_seed = std::stoull(next());
     else if (a == "--reasoning-in-content") reasoning_in_content = true;
     else if (a == "--default-chat-template-kwargs") default_chat_template_kwargs = next();
@@ -2140,7 +2297,7 @@ int main(int argc, char** argv) {
         graph_batch_min_live == 0 ? std::min(2, max_concurrency) : graph_batch_min_live;
     return std::format(
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
-        "fp8head={} dh={} dhb={} mtph={} attw={} pf={} dlp={} dkv={} "
+        "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} pfw={} dcw={} ctr={} pdl={} dlp={} dkv={} "
         "emsh={} maxtok={} queue={} "
         "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
@@ -2152,7 +2309,10 @@ int main(int argc, char** argv) {
         kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
         draft_head,
         draft_head_blocks, mtp_head,
-        attention_weights, prefill, dory_loops, dory_kv_cache, embed_sharding, default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
+        attention_weights, index_topk, candidate_topk_blocks, candidate_block_size, prefill, prefill_dense,
+        prefill_fold_overlap ? 1 : 0, prefill_window, decode_window, collective_transport, decode_pdl ? 1 : 0,
+        dory_loops, dory_kv_cache, embed_sharding,
+        default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
         mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
         mtp_schedule_adapt ? 1 : 0, mtp_schedule_sampled_scale, mtp_draft, mtp_draft_temperature,
@@ -2240,6 +2400,7 @@ int main(int argc, char** argv) {
         ws.prefill_group = prefill_group;
         ws.l2_prefetch = l2_prefetch;
         ws.l2_prefetch_form = l2_prefetch_form;
+        ws.l2_prefetch_full_form = l2_prefetch_full_form;
         ws.l2_prefetch_window_mib = l2_prefetch_window_mib;
         ws.l2_prefetch_boundary_window_mib = l2_prefetch_boundary_window_mib;
         ws.l2_prefetch_boundary_rate = l2_prefetch_boundary_rate;
@@ -2256,10 +2417,19 @@ int main(int argc, char** argv) {
         ws.prefill = prefill;
         ws.dory_loops = dory_loops;
         ws.dory_kv_cache = dory_kv_cache;
+        ws.prefill_dense = prefill_dense;
+        ws.prefill_fold_overlap = prefill_fold_overlap;
+        ws.decode_pdl = decode_pdl;
+        ws.prefill_window = prefill_window;
+        ws.decode_window = decode_window;
+        ws.collective_transport = collective_transport;
         ws.rope_scaling = rope_scaling;
         ws.embed_sharding = embed_sharding;
         ws.mtp_head = mtp_head;
         ws.attention_weights = attention_weights;
+        ws.index_topk = index_topk;
+        ws.candidate_topk_blocks = candidate_topk_blocks;
+        ws.candidate_block_size = candidate_block_size;
         ws.default_max_tokens = default_max_tokens;
         ws.queue_limit = queue_limit;
         ws.no_eos = no_eos;
@@ -2341,6 +2511,7 @@ int main(int argc, char** argv) {
         prefill_group = ws.prefill_group;
         l2_prefetch = ws.l2_prefetch;
         l2_prefetch_form = ws.l2_prefetch_form;
+        l2_prefetch_full_form = ws.l2_prefetch_full_form;
         l2_prefetch_window_mib = ws.l2_prefetch_window_mib;
         l2_prefetch_boundary_window_mib = ws.l2_prefetch_boundary_window_mib;
         l2_prefetch_boundary_rate = ws.l2_prefetch_boundary_rate;
@@ -2357,10 +2528,19 @@ int main(int argc, char** argv) {
         prefill = ws.prefill;
         dory_loops = ws.dory_loops;
         dory_kv_cache = ws.dory_kv_cache;
+        prefill_dense = ws.prefill_dense;
+        prefill_fold_overlap = ws.prefill_fold_overlap;
+        decode_pdl = ws.decode_pdl;
+        prefill_window = ws.prefill_window;
+        decode_window = ws.decode_window;
+        collective_transport = ws.collective_transport;
         rope_scaling = ws.rope_scaling;
         embed_sharding = ws.embed_sharding;
         mtp_head = ws.mtp_head;
         attention_weights = ws.attention_weights;
+        index_topk = ws.index_topk;
+        candidate_topk_blocks = ws.candidate_topk_blocks;
+        candidate_block_size = ws.candidate_block_size;
         default_max_tokens = ws.default_max_tokens;
         queue_limit = ws.queue_limit;
         no_eos = ws.no_eos;
@@ -2456,6 +2636,21 @@ int main(int argc, char** argv) {
     dgpp::QwenLayerStream::set_ngram_table_dir(dir);
     DGPP_LOG_INFO("n-gram table shards from {} -> {}", ngram_table_model, dir);
   }
+  // The DeepSeek-V4.1 Engram tables from another cached snapshot (the EXL3
+  // pack ships none): resolved like --model, set before the family opens
+  // the checkpoint (the loader admits only the table tensors from it; the
+  // Engram sidecar falls back to it). The family check below refuses the
+  // key for any other family.
+  if (!engram_source.empty()) {
+    std::string err;
+    const std::string dir = dgpp::hf::model_dir(engram_source, &err);
+    if (dir.empty()) {
+      DGPP_LOG_ERROR("engine.engram_source {}: {}", engram_source, err);
+      return 1;
+    }
+    dgpp::Dsv41LayerStream::set_engram_source_dir(dir);
+    DGPP_LOG_INFO("Engram table shards from {} -> {}", engram_source, dir);
+  }
   if (fp8_head != "gemv" && fp8_head != "mma") {
     DGPP_LOG_ERROR("engine.fp8_head (--fp8-head) must be gemv or mma, got '{}'", fp8_head);
     return 1;
@@ -2517,6 +2712,11 @@ int main(int argc, char** argv) {
   }
   // The DeepSeek-V4.1 prefill mode: every model built from here on takes it.
   dgpp::Dsv41Model::set_default_prefill_bounded(prefill == "bounded");
+  dgpp::Dsv41Model::set_default_prefill_dense_tile(prefill_dense != "streaming");
+  dgpp::QwenModel::set_default_prefill_dense_tile(prefill_dense == "tile");
+  dgpp::Dsv41Model::set_default_prefill_fold_overlap(prefill_fold_overlap);
+  dgpp::Dsv41Model::set_default_prefill_window_flash(prefill_window == "flash");
+  dgpp::Dsv41Model::set_default_decode_window_flash(decode_window == "flash");
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
   {
     // The L2 weight prefetcher's settings, before any model builds its prefetcher.
@@ -2534,6 +2734,7 @@ int main(int argc, char** argv) {
     l2.boundary_window_bytes = static_cast<size_t>(l2_prefetch_boundary_window_mib) << 20;
     try {
       l2.form = dgpp::l2_prefetch_form(l2_prefetch_form);
+      l2.full_form = dgpp::l2_prefetch_full_form(l2_prefetch_full_form);
       l2.boundary_rate = dgpp::l2_prefetch_rate(l2_prefetch_boundary_rate);
       l2.layer_rate = dgpp::l2_prefetch_rate(l2_prefetch_layer_rate);
       dgpp::l2_prefetch_configure(l2);
@@ -2601,6 +2802,7 @@ int main(int argc, char** argv) {
   if (prefill_fp8_per_tensor)
     DGPP_LOG_INFO("serve: engine.prefill_fp8_per_tensor on — prefill GEMMs on per-tensor e4m3 (not transcript-preserving)");
   dgpp::QwenLayerStream::set_ngram_prestage(ngram_prestage);
+  dgpp::Dsv41EngramLayer::set_prestage(ngram_prestage);  // the DeepSeek-V4.1 Engram tables' chunk-ahead staging
   if (expert_gemm != "wide" || expert_gemm_prefetch != 3 || !expert_tile_list || expert_gemm_pair || !ngram_prestage)
     DGPP_LOG_INFO("expert GEMM settings: form={} prefetch={} tile_list={} pair={} ngram_prestage={}", expert_gemm,
                   expert_gemm_prefetch, expert_tile_list ? 1 : 0, expert_gemm_pair ? 1 : 0, ngram_prestage ? 1 : 0);
@@ -2614,13 +2816,18 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  if (mtp_expert_format != "fp8" && mtp_expert_format != "bf16_fused") {
-    DGPP_LOG_ERROR("--mtp-expert-format must be fp8 or bf16_fused, got '{}'", mtp_expert_format);
+  if (mtp_expert_format != "fp8" && mtp_expert_format != "bf16_fused" &&
+      mtp_expert_format != "bf16") {
+    DGPP_LOG_ERROR("--mtp-expert-format must be fp8, bf16_fused or bf16 (qwen3_5 MoE draft), got '{}'",
+                   mtp_expert_format);
     return 2;
   }
   // The RadixArk fusion flag: set before the plan and the load (both read it
   // through QwenLayerStream::mtp_experts_bf16_fused and loader_format()).
+  // The qwen3_5 MoE draft flag rides beside it (per-expert BF16 encoded to
+  // block FP8 at load when "bf16").
   dgpp::QwenLayerStream::set_mtp_expert_format(mtp_expert_format == "bf16_fused");
+  dgpp::Qwen35LayerStream::set_mtp_expert_format(mtp_expert_format);
   // The draft head's screen (engine.draft_head; kernels/draft_head.hpp): a
   // process-wide setting every family reads at construction (its memory
   // plan too) — the decode drafts' head reads through the 2-bit copy.
@@ -2797,7 +3004,8 @@ int main(int argc, char** argv) {
     // The family from config.json's architecture (loaders/architecture.hpp):
     // everything below the engine interface comes from it.
     std::unique_ptr<ServeFamily> family =
-        make_family(ckpt, world, kv_format, rope_scaling, fp8_head == "mma");
+        make_family(ckpt, world, kv_format, rope_scaling, fp8_head == "mma", index_topk, candidate_topk_blocks,
+                    candidate_block_size);
     if (!dflash_dir.empty()) {
       try {
         family->set_draft_model(dflash_dir);
@@ -2926,10 +3134,10 @@ int main(int argc, char** argv) {
       return 2;
     }
     if (std::string(family->name()) != "glm5" && std::string(family->name()) != "glm_moe_dsa" &&
-        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "qwen3_5" &&
-        std::string(family->name()) != "qwen4_exp" && kv_dtype != "bf16")
-      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 K/V cache and the "
-                    "Qwen3.5 / Qwen3.8-Flash-Next K/V pools only; the {} caches stay bf16",
+        std::string(family->name()) != "mimo_v2" && std::string(family->name()) != "flint" &&
+        std::string(family->name()) != "qwen3_5" && std::string(family->name()) != "qwen4_exp" && kv_dtype != "bf16")
+      DGPP_LOG_WARN("serve: --kv-dtype {} applies to the GLM-5.3 latent caches, the MiMo-V2 and Flint K/V caches and "
+                    "the Qwen3.5 / Qwen3.8-Flash-Next K/V pools only; the {} caches stay bf16",
                     kv_dtype, family->name());
     if (std::string(family->name()) != "qwen4_exp" && ngram_table != "resident")
       DGPP_LOG_WARN("serve: --ngram-table {} applies to the Qwen n-gram table only; the {} family has none",
@@ -2943,19 +3151,26 @@ int main(int argc, char** argv) {
         dense_weights != "checkpoint")
       DGPP_LOG_WARN("serve: --dense-weights {} applies to the Qwen dense stack only; the {} family loads as shipped",
                     dense_weights, family->name());
-    if (std::string(family->name()) != "qwen4_exp" && mtp_expert_format != "fp8")
+    if (std::string(family->name()) != "qwen4_exp" &&
+        std::string(family->name()) != "qwen3_5" && mtp_expert_format != "fp8")
       DGPP_LOG_WARN("serve: --mtp-expert-format {} applies to the Qwen draft experts only; the {} family loads as shipped",
                     mtp_expert_format, family->name());
     if (bf16_weights != "checkpoint" &&
-        (std::string(family->name()) == "deepseek_v41" || std::string(family->name()) == "deepseek_v4"))
-      DGPP_LOG_INFO("serve: --bf16-weights {} packs nothing on the {} family yet (its bf16 sites ride the "
-                    "tensor-core kernels): the bf16 bytes serve as shipped",
+        (std::string(family->name()) == "deepseek_v4" || std::string(family->name()) == "deepseek_v41"))
+      DGPP_LOG_INFO("serve: --bf16-weights {} on the {} family packs the lm head: the tensor-core decode form reads "
+                    "its 12-bit companion (the bf16 bytes stay resident for the prefill forms); the other bf16 sites "
+                    "serve as shipped",
                     bf16_weights, family->name());
     if (bf16_weights == "bf12" && std::string(family->name()) == "qwen3_5")
       DGPP_LOG_INFO("serve: --bf16-weights bf12 on the {} family packs the drafter's layers and fc taps, the MTP fc "
                     "and a bf16 lm head, and keeps their bf16 bytes resident (one drafter arena; the stacked "
                     "redrafts read bf16): the same residency as bf12+bf16",
                     family->name());
+    if (!engram_source.empty() && std::string(family->name()) != "deepseek_v41") {
+      DGPP_LOG_ERROR("engine.engram_source names the DeepSeek-V4.1 (deepseek_v41) Engram tables' snapshot; {} has no such path",
+                     family->name());
+      return 1;
+    }
     if (std::string(family->name()) != "deepseek_v41" && prefill != "bounded")
       DGPP_LOG_WARN("serve: --prefill {} applies to the DeepSeek-V4.1 family only; the {} family prefills every layer",
                     prefill, family->name());
@@ -2985,6 +3200,8 @@ int main(int argc, char** argv) {
     if (min_p) sampling_defaults.min_p = *min_p;
     if (repetition_penalty)
       sampling_defaults.repetition_penalty = *repetition_penalty;
+    if (frequency_penalty) sampling_defaults.frequency_penalty = *frequency_penalty;
+    if (presence_penalty) sampling_defaults.presence_penalty = *presence_penalty;
     try {
       dgpp::sample::validate_params(sampling_defaults);
     } catch (const std::invalid_argument& e) {
@@ -2993,16 +3210,18 @@ int main(int argc, char** argv) {
     }
     DGPP_LOG_INFO(
         "serve: sampling defaults temperature {} top_p {} top_k {} min_p {} "
-        "repetition_penalty {} ({}; overrides: {}{}{}{}{}{})",
-        sampling_defaults.temperature, sampling_defaults.top_p,
-        sampling_defaults.top_k, sampling_defaults.min_p,
-        sampling_defaults.repetition_penalty,
+        "repetition_penalty {} frequency_penalty {} presence_penalty {} ({}; overrides: "
+        "{}{}{}{}{}{}{}{})",
+        sampling_defaults.temperature, sampling_defaults.top_p, sampling_defaults.top_k,
+        sampling_defaults.min_p, sampling_defaults.repetition_penalty,
+        sampling_defaults.frequency_penalty, sampling_defaults.presence_penalty,
         generation_defaults.file_found ? "from generation_config.json"
                                        : "no generation_config.json: greedy",
-        temperature ? "temperature " : "", top_p ? "top_p " : "",
-        top_k ? "top_k " : "", min_p ? "min_p " : "",
-        repetition_penalty ? "repetition_penalty " : "",
-        (temperature || top_p || top_k || min_p || repetition_penalty)
+        temperature ? "temperature " : "", top_p ? "top_p " : "", top_k ? "top_k " : "",
+        min_p ? "min_p " : "", repetition_penalty ? "repetition_penalty " : "",
+        frequency_penalty ? "frequency_penalty " : "", presence_penalty ? "presence_penalty " : "",
+        (temperature || top_p || top_k || min_p || repetition_penalty || frequency_penalty ||
+         presence_penalty)
             ? ""
             : "none");
 
@@ -3124,7 +3343,8 @@ int main(int argc, char** argv) {
       dgpp::text::GrammarVocab v = dgpp::text::GrammarVocab::from_tokenizer(
           tok, generation_eos, static_cast<int>(family->vocab_size()),
           std::string(family->name()) == "deepseek_v4" ? dgpp::text::DsmlDialect::kV4
-                                                       : dgpp::text::DsmlDialect::kV41);
+                                                       : dgpp::text::DsmlDialect::kV41,
+          family->model_opens_thinking());
       DGPP_LOG_INFO(
           "serve: grammar vocabulary built ({} ids, tool markers {}, "
           "call-turn EOS {})",
@@ -3198,6 +3418,9 @@ int main(int argc, char** argv) {
             rank, world, fabric_port, peer, rendezvous_timeout_ms, family->lat_slot_bytes(decode_rows));
         if (bulk_pace_gbps >= 0) bus_options.bulk_pace_gbps = bulk_pace_gbps;
         if (bulk_inflight >= 0) bus_options.bulk_inflight_per_lane = bulk_inflight;
+        bus_options.latency_transport = collective_transport == "write"
+                                            ? dgpp::net::BusLatencyTransport::kWrite
+                                            : dgpp::net::BusLatencyTransport::kSend;
         bus = std::make_unique<dgpp::net::CollectiveBus>(bus_options);
         std::string err;
         if (!bus->start(&err))
@@ -3309,13 +3532,28 @@ int main(int argc, char** argv) {
           knobs.admission = dgpp::serve::resolve_prefill_policy(
               knobs.admission, *graph_engine->engine(), prefill_early_admission_override);
           peer_policy = knobs.admission;
-          DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt), {} with nothing decoding{}",
-                        rank, knobs.admission.prefill_budget_tokens,
-                        knobs.admission.prefill_idle_budget_tokens > 0 ? knobs.admission.prefill_idle_budget_tokens
-                                                                       : knobs.admission.prefill_budget_tokens,
-                        graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "");
+          {
+            // Name the sizing policy outright: a field operator with both
+            // targets at zero had to infer fixed budgeting from the
+            // metrics (2026-10-21).
+            const auto& adm = knobs.admission;
+            const bool adaptive = adm.prefill_budget_tokens > 0 &&
+                                  (adm.decode_gap_target_ms > 0 || adm.first_token_target_ms > 0);
+            const std::string sizing =
+                adm.prefill_budget_tokens <= 0 ? std::string()
+                : adaptive ? "; adaptive: decode-gap target " + std::to_string(adm.decode_gap_target_ms) +
+                                 " ms, first-token target " + std::to_string(adm.first_token_target_ms) +
+                                 " ms (0 = off), explicit budgets are caps"
+                           : "; fixed budgets (both latency targets 0)";
+            DGPP_LOG_INFO("rank {}: prefill budget {} tokens/tick (0 = full prompt), {} with nothing decoding{}{}",
+                          rank, adm.prefill_budget_tokens,
+                          adm.prefill_idle_budget_tokens > 0 ? adm.prefill_idle_budget_tokens : adm.prefill_budget_tokens,
+                          graph_engine->engine()->prefill_group_advance() ? "; in-flight prompts share one walk" : "",
+                          sizing);
+          }
           graph_engine->set_proposal_temperature_scale(static_cast<float>(mtp_draft_temperature));
           graph_engine->set_block_verify(mtp_verify == "block");
+          graph_engine->set_decode_pdl(decode_pdl);
           graph_engine->set_prefill_group(prefill_group);
           graph_engine->set_lookup_drafts(lookup_draft, lookup_nmin, lookup_nstrong, lookup_agree);
           if (lookup_draft)
@@ -3488,7 +3726,7 @@ int main(int argc, char** argv) {
         open_ops_file(&oplog, "serve_rank0.ops");
         const int rc = serve_openai(engine_ptr(), family->vocab_size(), generation_eos, ckpt,
                                     model_display, knobs, no_eos, boot_s(), journal ? &*journal : nullptr, &oplog,
-                                    family->name(), &bus->completion_epoch());
+                                    family->name(), family->model_opens_thinking(), &bus->completion_epoch());
         engine_release();
         cudaFreeHost(pick_scratch);
         bus->stop();
@@ -3533,7 +3771,7 @@ int main(int argc, char** argv) {
         knobs.admission, *engine, prefill_early_admission_override);
     const int rc = serve_openai(engine.get(), family->vocab_size(), generation_eos, ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
-                                /*oplog=*/nullptr, family->name());
+                                /*oplog=*/nullptr, family->name(), family->model_opens_thinking());
     engine.reset();
     family->destroy_model();
     return rc;

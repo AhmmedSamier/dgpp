@@ -26,6 +26,7 @@
 //   sfb: the four scales of column q. Selectors zero (scale_vec::4X).
 //   C: c0, c1 = row q cols 2t, 2t+1; c2, c3 = row q+8.
 #include "kernels/moe_w4a4.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cstdlib>
 #include <stdexcept>
@@ -141,6 +142,7 @@ __global__ void quantize_rows_nvfp4_kernel(const uint16_t* __restrict__ x, size_
                                            float* __restrict__ gs, float static_gs,
                                            const float* __restrict__ static_gs_dev,
                                            const uint16_t* __restrict__ up = nullptr, float limit = 0.f) {
+  dgpp_pdl_wait();
   const int row = blockIdx.x;
   if (row >= rows) return;
   const int groups = k / 16;
@@ -239,6 +241,7 @@ __global__ __launch_bounds__(w4a4::kThreads, 2) void moe_grouped_w4a4_kernel(
     size_t a_scale_stride, const float* __restrict__ a_gs, const int32_t* __restrict__ act_rows,
     const MoeSegment* __restrict__ segs, const MoeExpertView* __restrict__ views, int which,
     OutT* __restrict__ out, size_t out_stride, int n, int k, int m_tiles) {
+  dgpp_pdl_wait();
   using namespace w4a4;
   using TL = Tile<kBM>;
   constexpr size_t kACodesT = TL::a_codes, kAScalesT = TL::a_scales, kSlotT = TL::slot;
@@ -475,6 +478,7 @@ __global__ __launch_bounds__(kThreads, 1) void dense_w4a4_tma_kernel(
     const uint8_t* __restrict__ a_scales, size_t a_scale_stride, const float* __restrict__ a_gs,
     const uint8_t* __restrict__ w_scales, const float* __restrict__ w_global, uint16_t* __restrict__ out,
     size_t out_stride, int m, int n, int k) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(1024) uint8_t smraw[];
   const unsigned sbase = smem_u32(smraw);
   uint8_t* sm = smraw + ((1024 - (sbase & 1023)) & 1023);

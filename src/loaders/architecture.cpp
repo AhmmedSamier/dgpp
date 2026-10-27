@@ -53,9 +53,12 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
   // `dory` — a looped normalized GPT, single rank (no TP slices).
   if (arch.rfind("Dory", 0) == 0 || (arch.empty() && type == "dory"))
     return ModelArchitecture::Dory;
+  // Flint (2026-10-22, docs/flint_plan.md): `FlintForCausalLM` / `flint`.
+  if (arch.rfind("Flint", 0) == 0 || (arch.empty() && type == "flint"))
+    return ModelArchitecture::Flint;
   throw std::runtime_error(
       "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5* and Dory*");
+      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5*, Flint* and Dory*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {

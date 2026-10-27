@@ -6,9 +6,11 @@
 #include <stdexcept>
 #include <string>
 
+#include "../common/temp_dir.hpp"
 #include "common/test.hpp"
 #include "loaders/architecture.hpp"
 #include "loaders/minijson.hpp"
+#include "models/qwen/binding35.hpp"
 #include "models/qwen/config35.hpp"
 #include "models/qwen/model35.hpp"
 #include "qwen35_config_json.hpp"
@@ -199,8 +201,8 @@ DGPP_TEST(qwen35_config_from_json_file_fills_vision_when_present) {
       "num_heads": 16, "num_position_embeddings": 2304,
       "out_hidden_size": 5120, "patch_size": 16,
       "spatial_merge_size": 2, "temporal_patch_size": 2}})";
-  const auto dir = std::filesystem::temp_directory_path() / "dgpp_qwen35_vision_test";
-  std::filesystem::create_directories(dir);
+  const dgpp::test::TempDir fixture("dgpp_qwen35_vision_test");
+  const auto& dir = fixture.path();
   const auto path = dir / "config.json";
   {
     std::ofstream out(path);
@@ -259,6 +261,39 @@ DGPP_TEST(qwen35_architecture_detects_the_release) {
   require(std::string(dgpp::model_architecture_name(dgpp::ModelArchitecture::Qwen3_5)) ==
               "qwen3_5",
           "name");
+}
+
+DGPP_TEST(qwen35_config_accepts_modelopt_moe) {
+  const std::string text = qwen35_fixture::moe_text_json();
+  const std::string quant = qwen35_fixture::kQuantModeloptNvfp4;
+  const auto t = dgpp::minijson::parse(text);
+  const auto q = dgpp::minijson::parse(quant);
+  const dgpp::Qwen35TextConfig c = dgpp::Qwen35TextConfig::parse(t.root, &q.root);
+  require(c.is_moe, "moe");
+  require(c.hidden_size == 3072, "hidden");
+  require(c.num_hidden_layers == 48, "layers");
+  require(c.num_gdn_layers() == 36, "gdn count");
+  require(c.num_full_layers() == 12, "full count");
+  require(c.num_experts == 256 && c.num_experts_per_tok == 8, "experts");
+  require(c.moe_intermediate_size == 1024 && c.shared_expert_intermediate_size == 1024,
+          "inter");
+  require(c.norm_topk_prob, "norm_topk default");
+  require(c.quant_kind == dgpp::Qwen35QuantKind::Nvfp4Moe, "quant kind");
+  using Q = dgpp::Qwen35TensorQuant;
+  // ModelOpt glob ignore keeps attention/shared/head BF16; experts claim NVFP4.
+  require(c.tensor_quant("model.language_model.layers.0.mlp.experts.0.gate_proj") == Q::Nvfp4,
+          "expert fp4");
+  require(c.tensor_quant("model.language_model.layers.0.linear_attn.in_proj_qkv") == Q::Bf16,
+          "gdn bf16");
+  require(c.tensor_quant("model.language_model.layers.3.self_attn.q_proj") == Q::Bf16,
+          "attn bf16");
+  require(c.tensor_quant("model.language_model.layers.0.mlp.shared_expert.gate_proj") ==
+              Q::Bf16,
+          "shared bf16");
+  require(c.tensor_quant("lm_head") == Q::Bf16, "head bf16");
+  require(c.tensor_quant("mtp.layers.0.mlp.experts.0.gate_proj") == Q::Bf16, "mtp bf16");
+  dgpp::qwen35_tp_validate_geometry(c, 0, 1);
+  dgpp::qwen35_tp_validate_geometry(c, 3, 4);
 }
 
 DGPP_TEST(qwen35_image_spans_must_name_pad_ids) {
