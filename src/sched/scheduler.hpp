@@ -945,9 +945,10 @@ class Scheduler {
   // The structural boundaries the engine's cold prefill cuts at (2026-09-28):
   // only where this deployment can take a snapshot — the cache on and the
   // boundary's aligned image at or past the entry floor — so a cache hit
-  // and a miss are the same walk. A cut a snapshot never stands on served
-  // nothing and made a prompt's cold walk differ from its rows in a group
-  // walk (the DSA sites are not split-invariant).
+  // and a miss are the same walk, and so is a request that opts out. A cut
+  // a snapshot never stands on served nothing and made a prompt's cold walk
+  // differ from its rows in a group walk (the DSA sites are not
+  // split-invariant).
   std::vector<int64_t> cut_boundaries(const Request& r) const;
   void finish_prefill_snapshot(Request& r, int slot, int64_t position, bool taken,
                                bool head = false);

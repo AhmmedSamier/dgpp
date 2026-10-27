@@ -304,7 +304,14 @@ Scheduler::PrefixPlan Scheduler::plan_prefix(const Request& r) const {
 
 std::vector<int64_t> Scheduler::cut_boundaries(const Request& r) const {
   std::vector<int64_t> out;
-  if (!cache_on(r)) return out;
+  // The deployment's cuts, not the request's: a prompt that opts out of the
+  // cache (prefix_cache: false, or a pool too short for its blocks) walks
+  // the chunks a cached prompt walks, so its greedy transcript is the cached
+  // prompt's. The NVMe fuzz of 2026-10-27 caught the request-level gate: an
+  // opted-out repeat diverged mid-answer from its cold cache-on first answer
+  // because its last chunk ran through the prompt's final boundary.
+  if (!cache_.enabled()) return out;
+  if (!r.spec.images.empty() && !engine_->supports_image_prefix_cache()) return out;
   const int64_t align = cache_.config().align;
   for (const int64_t b : r.spec.boundaries) {
     const int64_t image = align > 0 ? (b / align) * align : b;

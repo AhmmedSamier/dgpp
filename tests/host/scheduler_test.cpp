@@ -959,7 +959,9 @@ DGPP_TEST(scheduler_prefill_cuts_only_where_a_snapshot_can_stand) {
   // at 32 only (its aligned image clears the floor); with the floor at 0
   // every boundary cuts, and with the cache off none does — a cut a
   // snapshot never stands on made the cold walk differ from a group walk.
-  for (const int variant : {0, 1, 2}) {
+  // A request that opts out of the cache (variant 3) walks the cached
+  // prompt's cuts: the opt-out changes what is kept, not the arithmetic.
+  for (const int variant : {0, 1, 2, 3}) {
     ChunkFakeEngine engine;
     if (variant != 2) engine.set_prefix_arena(4, 2, 4);
     engine.arm(0, {10, 11}, 2);
@@ -972,16 +974,19 @@ DGPP_TEST(scheduler_prefill_cuts_only_where_a_snapshot_can_stand) {
     request.prompt.assign(40, 3);
     request.max_steps = 2;
     request.boundaries = {4, 8, 32};
+    request.no_cache = variant == 3;
     sched.submit(request);
     sched.tick();
-    const std::vector<int64_t> want = variant == 0   ? std::vector<int64_t>{4, 8, 32}
-                                      : variant == 1 ? std::vector<int64_t>{32}
-                                                     : std::vector<int64_t>{};
+    const std::vector<int64_t> want = variant == 1   ? std::vector<int64_t>{32}
+                                      : variant == 2 ? std::vector<int64_t>{}
+                                                     : std::vector<int64_t>{4, 8, 32};
     require(engine.last_boundaries == want,
             "variant " + std::to_string(variant) + ": the engine cuts at " +
                 std::to_string(engine.last_boundaries.size()) + " boundaries, expected " +
                 std::to_string(want.size()));
     sched.run_to_completion();
+    if (variant == 3)
+      require(sched.meters().prefix_entries == 0, "the opted-out prompt still publishes no entry");
   }
 }
 

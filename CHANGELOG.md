@@ -33,7 +33,17 @@ project procedures and design guidance live in `docs/`.
   25K-token document restored in 407 ms to first token against 18.8 s
   cold, identical transcripts, op streams identical across ranks, decode
   at 34 ms/step through the spills) and
-  on one Spark with Qwen3.8-Flash-Next. Documented in the
+  on one Spark with Qwen3.8-Flash-Next. Fuzzed: random request streams on
+  two scheduler replicas, mutated index bytes, journal codecs, damaged slab
+  pages on the GPU, and a random workload with restarts on the fabric
+  (`scripts/serve_nvme_cache_fuzz.py`). The fabric fuzz's transcript check
+  showed that a cold walk's answer follows its chunk shapes (the first
+  prompt after a boot walks the admission controller's 256-token ramp and
+  can answer differently from the same prompt at 2048-token chunks, with or
+  without the cache), so the fuzz template pins the chunk size; reviewing
+  the cut rule under that check fixed a request-level gate: a request that
+  opts out (`prefix_cache: false`) prefilled without the structural cuts a
+  cached prompt walks, and now walks them. Documented in the
   [configuration reference](docs/configuration.md#nvme-cache) and the
   [prefix-cache guide](docs/prefix-cache.md#the-nvme-cold-tier).
 - **DFlash2 integration fixes** (2026-10-25): the shared drafter follows

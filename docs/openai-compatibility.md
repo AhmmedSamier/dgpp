@@ -36,6 +36,10 @@ DGPP also accepts existing extensions: `top_k`, `min_p`,
 historical tool arguments, flat function definitions, and template-specific
 tool output lists. These extensions should not be assumed portable to OpenAI.
 Historical function arguments must be valid JSON objects for DGPP's templates.
+`prefix_cache: false` opts one request out of the prefix cache: it attaches
+to no entry and publishes none, in memory or on NVMe. It prefills along the
+same structural cuts a cached prompt does: opting out changes what is kept,
+not the arithmetic.
 
 Both completion endpoints accept `prompt_cache_key` (OpenAI's field, DGPP's
 semantics): a string of 1 to 256 bytes that pins the prefix-cache entries the

@@ -17,6 +17,13 @@ Boot the world first (a deployment JSON with the tier on and a small
 
 Exit 0 when every repeat matched, no tier op failed and every restart's op
 streams agreed; the report names each mismatch.
+
+The deployment template pins the prefill chunk size (`engine.first_token_target_ms`
+and `engine.decode_gap_target_ms` at 0, so every tick offers the idle budget):
+a cold walk's arithmetic depends on its chunk shapes (the first prompt after a
+boot walks the controller's 256-token ramp), and an answer restored from the
+tier reproduces the walk that made the entry — the check must compare walks
+of one shape. The driver warns when the served world leaves the targets on.
 """
 import argparse
 import json
@@ -61,6 +68,10 @@ def main():
     args = ap.parse_args()
     rng = random.Random(args.seed)
     model = served_model(args.host, args.port)
+    adm = chk.metrics(args.host, args.port)["service"]["admission"]
+    if adm.get("first_token_target_ms", 1) or adm.get("decode_gap_target_ms", 1):
+        print("WARNING: the world's latency targets are on; cold repeats may differ by chunk shape "
+              "(set engine.first_token_target_ms and engine.decode_gap_target_ms to 0 in the template)", flush=True)
     docs = ["".join(chk.filler(args.seed * 100 + i, rng.randint(250, 700))) for i in range(args.docs)]
     questions = [f"\nQuestion {i}: write a numbered list describing the first {30 + i} parcels and their cities."
                  for i in range(4)]
