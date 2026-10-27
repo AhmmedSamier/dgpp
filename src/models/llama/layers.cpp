@@ -10,6 +10,7 @@
 #include "common/cuda_check.hpp"
 #include "kernels/glm4_attn.hpp"
 #include "kernels/glm_moe_launch.hpp"
+#include "kernels/scale_gemm.hpp"
 #include "kernels/qsa.hpp"
 
 namespace dgpp {
@@ -111,13 +112,27 @@ void LlamaAttentionLayer::enqueue(const uint16_t* x, int tokens, const LlamaAttn
   const int H = hidden_;
   const int Q = lh_ * dim_, KV = lkv_ * dim_;
   // The three projections, fp32 out (decode rows take the bf16 GEMV inside
-  // the interface).
-  g_.gemm->matmul(x, w_.q_proj, qd_, tokens, Q, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,
-                  g_.ws_bytes, stream);
-  g_.gemm->matmul(x, w_.k_proj, kd_, tokens, KV, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,
-                  g_.ws_bytes, stream);
-  g_.gemm->matmul(x, w_.v_proj, vd_, tokens, KV, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,
-                  g_.ws_bytes, stream);
+  // the interface). Under engine.dense_weights = "fp8" they run the scale
+  // GEMM instead — E4M3 codes + 128x128 scales, bf16 activations:
+  // weight-only quantization (kernels/scale_gemm.hpp).
+  if (w_.q_proj_fp8.payload) {
+    launch_scale_gemm_f32(x, static_cast<size_t>(H), w_.q_proj_fp8.payload, w_.q_proj_fp8.scales, qd_, tokens, Q, H,
+                          stream, static_cast<size_t>(Q), g_.mma_from_rows, /*last_row_only=*/false, g_.ws,
+                          g_.ws_bytes);
+    launch_scale_gemm_f32(x, static_cast<size_t>(H), w_.k_proj_fp8.payload, w_.k_proj_fp8.scales, kd_, tokens, KV, H,
+                          stream, static_cast<size_t>(KV), g_.mma_from_rows, /*last_row_only=*/false, g_.ws,
+                          g_.ws_bytes);
+    launch_scale_gemm_f32(x, static_cast<size_t>(H), w_.v_proj_fp8.payload, w_.v_proj_fp8.scales, vd_, tokens, KV, H,
+                          stream, static_cast<size_t>(KV), g_.mma_from_rows, /*last_row_only=*/false, g_.ws,
+                          g_.ws_bytes);
+  } else {
+    g_.gemm->matmul(x, w_.q_proj, qd_, tokens, Q, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,
+                    g_.ws_bytes, stream);
+    g_.gemm->matmul(x, w_.k_proj, kd_, tokens, KV, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,
+                    g_.ws_bytes, stream);
+    g_.gemm->matmul(x, w_.v_proj, vd_, tokens, KV, H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), g_.ws,
+                    g_.ws_bytes, stream);
+  }
   // The full RoPE (no bias, no head norm) and the K/V append.
   glm4_qkv_finish(qd_, Q, kd_, KV, vd_, KV, nullptr, nullptr, nullptr, nullptr, nullptr, eps_, d_inv_freq_,
                   rotary_, rows.req_ids, rows.pos, tokens, lh_, lkv_, cache.block_tables,
@@ -131,8 +146,12 @@ void LlamaAttentionLayer::enqueue(const uint16_t* x, int tokens, const LlamaAttn
                     cache.block_tokens, cache.block_tables, cache.blocks_per_request, scale_, m_ws_, l_ws_, c_ws_,
                     stream);
   glm4_attn_combine(m_ws_, l_ws_, c_ws_, tokens, n_split, lh_, o_, stream);
-  g_.gemm->matmul(o_, w_.o_proj, out, tokens, H, Q, DType::BF16, GemmOut::BF16, static_cast<size_t>(Q), g_.ws,
-                  g_.ws_bytes, stream);
+  if (w_.o_proj_fp8.payload)
+    launch_scale_gemm_bf16(o_, static_cast<size_t>(Q), w_.o_proj_fp8.payload, w_.o_proj_fp8.scales, out, tokens, H, Q,
+                           stream, static_cast<size_t>(H), g_.mma_from_rows, g_.ws, g_.ws_bytes);
+  else
+    g_.gemm->matmul(o_, w_.o_proj, out, tokens, H, Q, DType::BF16, GemmOut::BF16, static_cast<size_t>(Q), g_.ws,
+                    g_.ws_bytes, stream);
 }
 
 // ---- LlamaDenseMlp ------------------------------------------------------------------
@@ -143,7 +162,10 @@ LlamaDenseMlp::LlamaDenseMlp(const LlamaDenseMlpResident& w, const LlamaGemmWork
   if (!g_.gemm || !g_.ws) throw std::invalid_argument("LlamaDenseMlp: GEMM workspace required");
   if (max_tokens_ <= 0) throw std::invalid_argument("LlamaDenseMlp: max_tokens must be positive");
   if (inter_ <= 0) throw std::invalid_argument("LlamaDenseMlp: the inter slice must be positive");
-  if (!w_.gate || !w_.up || !w_.down) throw std::invalid_argument("LlamaDenseMlp: unbound weights");
+  const bool fp8 = w_.gate_fp8.payload != nullptr;
+  if (fp8 != static_cast<bool>(w_.up_fp8.payload) || fp8 != static_cast<bool>(w_.down_fp8.payload))
+    throw std::invalid_argument("LlamaDenseMlp: mixed fp8 and bf16 weights");
+  if (!fp8 && (!w_.gate || !w_.up || !w_.down)) throw std::invalid_argument("LlamaDenseMlp: unbound weights");
   const size_t M = static_cast<size_t>(max_tokens_), I = static_cast<size_t>(inter_);
   gate_ = dev_alloc<uint16_t>(M * I);
   up_ = dev_alloc<uint16_t>(M * I);
@@ -170,6 +192,17 @@ void LlamaDenseMlp::enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaSt
   if (tokens > max_tokens_) throw std::invalid_argument("LlamaDenseMlp: tokens exceed max_tokens");
   if (!x || !out) throw std::invalid_argument("LlamaDenseMlp: null pointer");
   const int H = hidden_, I = static_cast<int>(inter_);
+  if (w_.gate_fp8.payload) {
+    launch_scale_gemm_bf16(x, static_cast<size_t>(H), w_.gate_fp8.payload, w_.gate_fp8.scales, gate_, tokens, I, H,
+                           stream, static_cast<size_t>(I), g_.mma_from_rows, g_.ws, g_.ws_bytes);
+    launch_scale_gemm_bf16(x, static_cast<size_t>(H), w_.up_fp8.payload, w_.up_fp8.scales, up_, tokens, I, H, stream,
+                           static_cast<size_t>(I), g_.mma_from_rows, g_.ws, g_.ws_bytes);
+    launch_moe_swiglu_clamp(gate_, up_, act_, static_cast<int64_t>(tokens) * I,
+                            std::numeric_limits<float>::infinity(), stream);
+    launch_scale_gemm_bf16(act_, static_cast<size_t>(I), w_.down_fp8.payload, w_.down_fp8.scales, out, tokens, H, I,
+                           stream, static_cast<size_t>(H), g_.mma_from_rows, g_.ws, g_.ws_bytes);
+    return;
+  }
   g_.gemm->matmul(x, w_.gate, gate_, tokens, I, H, DType::BF16, GemmOut::BF16, static_cast<size_t>(H), g_.ws,
                   g_.ws_bytes, stream);
   g_.gemm->matmul(x, w_.up, up_, tokens, I, H, DType::BF16, GemmOut::BF16, static_cast<size_t>(H), g_.ws,

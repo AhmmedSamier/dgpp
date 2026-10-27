@@ -10,8 +10,9 @@ code edit prediction. The engine loads the release as shipped.
 16.5 GiB across 4 shards (291 tensors, all BF16): 32 layers ×
 (input_layernorm, q/k/v/o projections, post_attention_layernorm,
 gate/up/down MLP), plus `model.embed_tokens`, `model.norm` and the
-untied `lm_head`. The default chain is exact; there are no quantized
-paths and no lossy levers. The K/V cache is BF16 paged rows: 128 KiB a
+untied `lm_head`. The default chain is exact; the checkpoint ships no
+quantized form — the engine's own lossy lever is the fp8-at-load
+recipe below ([FP8 at load](#fp8-at-load)). The K/V cache is BF16 paged rows: 128 KiB a
 token (32 layers × 8 kv heads × 128 × K+V × 2 B).
 
 ## Architecture
@@ -61,3 +62,19 @@ at 2K, 2196 ms at 3K (steady state; first-ever shapes pay ~1 s of
 planner autotune once per process). Autocomplete guidance: keep prompts
 ≤1K tokens client-side (the dominant lever), prefix cache on (repeat
 edits skip cached blocks), stream with a small max_tokens cap.
+
+## FP8 at load
+
+`engine.dense_weights: "fp8"` encodes every dense projection and the lm
+head to block FP8 at boot — E4M3 codes, one fp32 scale per 128 x 128
+block (the block's amax fixes its scale; no calibration, the recipe of
+the FP8 releases) — and every projection and the head run the scale
+GEMM on bf16 activations. Roughly half the projection and head bytes
+go resident (the embeddings, the norms and the exact BF16 K/V are
+untouched). fp8 excludes `bf16_weights`: no bf12 companions are
+granted and nothing is packed in this mode. Output is lossy —
+tolerance-level agreement with the bf16 chain (near-tie argmax rows
+may flip), not the bitwise transcripts the exact residencies pin. The
+throughput row waits on a measured campaign; the decode-bound
+single-stream recipe is where the lever should pay (~1.5x the packed
+bf12 launches at the same batch, the projection+head reads halved).

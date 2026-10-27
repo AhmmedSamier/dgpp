@@ -19,6 +19,7 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "llama_fixture.hpp"
+#include "loaders/fp8_quant.hpp"
 #include "models/llama/binding.hpp"
 #include "models/llama/config.hpp"
 #include "models/llama/loader.hpp"
@@ -28,6 +29,7 @@ namespace fs = std::filesystem;
 using dgpp::LlamaExpectedTensor;
 using dgpp::LlamaLayerStream;
 using dgpp::LlamaTextConfig;
+namespace fp8_quant = dgpp::fp8_quant;
 
 void require(bool cond, const std::string& what) {
   if (!cond) throw std::runtime_error(what);
@@ -106,6 +108,113 @@ void check_layer(const Fixture& fx, const LlamaLayerStream& s, const dgpp::Llama
 }
 
 }  // namespace
+
+// The fp8 check: no bf16 projection bytes resident, the fp8 payload and
+// scale grid byte-identical to the public host encoder on the same slice
+// (the kernels' determinism makes the launcher's own encoding the
+// reference), and the formulas auto-deriving through the flag.
+void check_fp8_layer(const Fixture& fx, const LlamaLayerStream& s, const dgpp::LlamaLayerResident& r) {
+  const LlamaTextConfig& cfg = fx.cfg;
+  const dgpp::LlamaLocalGeometry& g = s.geometry();
+  const int world = s.world(), rank = s.rank();
+  const std::string p = "model.layers." + std::to_string(r.layer) + ".";
+  const std::string tag = "fp8 world " + std::to_string(world) + " rank " + std::to_string(rank) + " layer " +
+                          std::to_string(r.layer) + " ";
+  const int64_t d = cfg.head_dim, H = cfg.hidden_size;
+  const size_t H2 = static_cast<size_t>(H) * 2;
+  require(!r.attn.q_proj && !r.attn.k_proj && !r.attn.v_proj && !r.attn.o_proj, tag + "bf16 attn pointers null");
+  require(!r.mlp.gate && !r.mlp.up && !r.mlp.down, tag + "bf16 mlp pointers null");
+  require(r.attn.q_proj_fp8.payload && r.attn.q_proj_fp8.scales, tag + "q fp8 bound");
+  require(r.mlp.gate_fp8.payload && r.mlp.down_fp8.payload, tag + "mlp fp8 bound");
+  auto encode = [&](const std::vector<uint8_t>& slice, int64_t rows, int64_t cols, const void* payload,
+                    const void* scales, const std::string& what) {
+    std::vector<uint8_t> want_payload(static_cast<size_t>(rows) * cols);
+    std::vector<float> want_scales(static_cast<size_t>(fp8_quant::scale_rows(rows)) * fp8_quant::scale_cols(cols));
+    fp8_quant::encode_block128(reinterpret_cast<const uint16_t*>(slice.data()), static_cast<size_t>(cols), rows, cols,
+                               want_payload.data(), want_scales.data());
+    expect_device_equals(payload, want_payload, what + " codes");
+    expect_device_equals(scales,
+                         std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(want_scales.data()),
+                                              reinterpret_cast<const uint8_t*>(want_scales.data()) +
+                                                  want_scales.size() * 4),
+                         what + " scales");
+  };
+  const std::string ap = p + "self_attn.";
+  const int64_t q0 = static_cast<int64_t>(g.head_begin) * d, qn = static_cast<int64_t>(g.local_heads) * d;
+  const int64_t k0 = static_cast<int64_t>(g.kv_head_begin) * d, kn = static_cast<int64_t>(g.local_kv_heads) * d;
+  encode(host_rows(fx.bytes(ap + "q_proj.weight"), H2, q0, qn), qn, H, r.attn.q_proj_fp8.payload,
+         r.attn.q_proj_fp8.scales, tag + "q");
+  encode(host_rows(fx.bytes(ap + "k_proj.weight"), H2, k0, kn), kn, H, r.attn.k_proj_fp8.payload,
+         r.attn.k_proj_fp8.scales, tag + "k");
+  encode(host_rows(fx.bytes(ap + "v_proj.weight"), H2, k0, kn), kn, H, r.attn.v_proj_fp8.payload,
+         r.attn.v_proj_fp8.scales, tag + "v");
+  const int64_t Q = static_cast<int64_t>(cfg.num_attention_heads) * d;
+  encode(host_cols(fx.bytes(ap + "o_proj.weight"), H, Q * 2, q0 * 2, qn * 2), H, qn, r.attn.o_proj_fp8.payload,
+         r.attn.o_proj_fp8.scales, tag + "o");
+  expect_device_equals(r.input_norm, fx.bytes(p + "input_layernorm.weight"), tag + "input norm");
+  expect_device_equals(r.post_norm, fx.bytes(p + "post_attention_layernorm.weight"), tag + "post norm");
+  const std::string mp = p + "mlp.";
+  const int64_t I = g.local_inter;
+  require(r.mlp.local_inter == I, tag + "mlp inter");
+  encode(host_rows(fx.bytes(mp + "gate_proj.weight"), H2, rank * I, I), I, H, r.mlp.gate_fp8.payload,
+         r.mlp.gate_fp8.scales, tag + "gate");
+  encode(host_rows(fx.bytes(mp + "up_proj.weight"), H2, rank * I, I), I, H, r.mlp.up_fp8.payload,
+         r.mlp.up_fp8.scales, tag + "up");
+  encode(host_cols(fx.bytes(mp + "down_proj.weight"), H, static_cast<size_t>(cfg.intermediate_size) * 2, rank * I * 2,
+                  I * 2),
+         H, I, r.mlp.down_fp8.payload, r.mlp.down_fp8.scales, tag + "down");
+}
+
+DGPP_TEST(llama_loader_dense_weights_fp8) {
+  const Fixture fx = write_fixture();
+  const int layers = fx.cfg.num_hidden_layers;
+  {
+    struct Fp8On {
+      const bool saved;
+      Fp8On() : saved(LlamaLayerStream::dense_weights_fp8()) { LlamaLayerStream::set_dense_weights_fp8(true); }
+      ~Fp8On() { LlamaLayerStream::set_dense_weights_fp8(saved); }
+    } on;
+    // Streaming at worlds 1 and 2 (the vocab-sharded head at 2).
+    for (const int world : {1, 2}) {
+      const int rank = 0;
+      const auto head = world > 1 ? dgpp::LlamaHeadSharding::VocabSharded : dgpp::LlamaHeadSharding::Full;
+      LlamaLayerStream s(fx.cfg, fx.dir, rank, world, dgpp::LlamaResidency::Streaming, head);
+      for (int l = 0; l < layers; ++l) {
+        const uint64_t before = s.source_bytes_read();
+        const auto& r = s.load_layer(l);
+        require(r.layer == l, "fp8 layer index");
+        check_fp8_layer(fx, s, r);
+        require(r.bytes == LlamaLayerStream::layer_bytes(fx.cfg, l, rank, world), "fp8 layer bytes formula");
+        require(s.source_bytes_read() - before == LlamaLayerStream::planned_layer_source_bytes(fx.cfg, l, rank, world),
+                "fp8 source-byte plan");
+        s.release_layer();
+      }
+      const auto& g = s.load_globals();
+      require(!g.lm_head && g.lm_head_fp8.payload && g.lm_head_fp8.scales, "fp8 head bound, bf16 head null");
+      const size_t H2 = static_cast<size_t>(fx.cfg.hidden_size) * 2;
+      std::vector<uint8_t> head_payload(static_cast<size_t>(g.lm_vocab_count) * fx.cfg.hidden_size);
+      std::vector<float> head_scales(static_cast<size_t>(fp8_quant::scale_rows(g.lm_vocab_count)) *
+                                     fp8_quant::scale_cols(fx.cfg.hidden_size));
+      fp8_quant::encode_block128(reinterpret_cast<const uint16_t*>(host_rows(fx.bytes("lm_head.weight"), H2,
+                                                                                   g.lm_vocab_begin, g.lm_vocab_count)
+                                                                            .data()),
+                                 static_cast<size_t>(fx.cfg.hidden_size), g.lm_vocab_count, fx.cfg.hidden_size,
+                                 head_payload.data(), head_scales.data());
+      expect_device_equals(g.lm_head_fp8.payload, head_payload, "fp8 head codes");
+      expect_device_equals(g.lm_head_fp8.scales,
+                           std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(head_scales.data()),
+                                                reinterpret_cast<const uint8_t*>(head_scales.data()) +
+                                                    head_scales.size() * 4),
+                           "fp8 head scales");
+      require(g.lm_vocab_count == LlamaLayerStream::lm_vocab_count(fx.cfg, rank, world, head), "fp8 head count");
+      require(g.bytes == LlamaLayerStream::globals_bytes(fx.cfg, rank, world, head), "fp8 globals formula");
+    }
+  }
+  // The flag is process state: the RAII reset hands the next build bf16.
+  LlamaLayerStream plain(fx.cfg, fx.dir, 0, 1, dgpp::LlamaResidency::Streaming, dgpp::LlamaHeadSharding::Full);
+  const auto& r = plain.load_layer(0);
+  require(r.attn.q_proj && r.mlp.gate && !r.attn.q_proj_fp8.payload, "the fp8 flag's scope ends with the test");
+}
 
 DGPP_TEST(llama_loader_slices_every_class_byte_exact_at_worlds_1_2_4) {
   const Fixture fx = write_fixture();

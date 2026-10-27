@@ -5,8 +5,20 @@
 
 #include "kernels/bf12_gemv.hpp"
 
+#include "loaders/fp8_quant.hpp"
+
 namespace dgpp {
 namespace {
+
+// engine.dense_weights = "fp8" (the Qwen dense stack's lever, ported):
+// every dense projection and the lm head encode to block FP8 at load —
+// E4M3 codes [rows, cols], one fp32 scale per 128 x 128 block
+// (fp8_quant::encode_block128) — and the layers run the scale GEMM
+// (kernels/scale_gemm.hpp, bf16 activations; dequantized-weight numerics
+// pinned by scale_gemm_test). The checkpoint ships no quantized form;
+// this is the engine's own lever, so it is OFF by default and set once
+// before any model builds.
+bool g_dense_weights_fp8 = false;
 
 // The replicated set (rank-invariant reads at world > 1): the layer norms,
 // the embedding and the final norm. Everything else is a slice: the
@@ -54,6 +66,17 @@ struct LlamaLoaderFamily::Builder : WeightBuilder<LlamaExpectedTensor> {
     a.kv_head_begin = geo.kv_head_begin;
     const int64_t q0 = static_cast<int64_t>(geo.head_begin) * d, qn = static_cast<int64_t>(geo.local_heads) * d;
     const int64_t k0 = static_cast<int64_t>(geo.kv_head_begin) * d, kn = static_cast<int64_t>(geo.local_kv_heads) * d;
+    if (g_dense_weights_fp8) {
+      // Block FP8 (E4M3 codes + 128 x 128 scales), no bf16 bytes resident.
+      // The head slices (q0, k0 in units of the 128-wide head_dim) and the
+      // MLP slices (r * I, I = 14336 / W) are 128 multiples, so every
+      // slice's grid is the matrix's own blocks (weight_build.hpp).
+      a.q_proj_fp8 = load_bf16_rows_fp8(p + "q_proj.weight", q0, qn);
+      a.k_proj_fp8 = load_bf16_rows_fp8(p + "k_proj.weight", k0, kn);
+      a.v_proj_fp8 = load_bf16_rows_fp8(p + "v_proj.weight", k0, kn);
+      a.o_proj_fp8 = load_bf16_cols_fp8(p + "o_proj.weight", q0, qn);
+      return;
+    }
     // Packable: the model's 12-bit companions replace the four projections
     // (WeightBuilder::grant_bf16 — aside under bf12-only residency).
     a.q_proj = load_bf16_rows(p + "q_proj.weight", q0, qn, /*packable=*/true);
@@ -66,6 +89,12 @@ struct LlamaLoaderFamily::Builder : WeightBuilder<LlamaExpectedTensor> {
     const int64_t I = geo.local_inter, r = rank;
     LlamaDenseMlpResident& m = out.mlp;
     m.local_inter = I;
+    if (g_dense_weights_fp8) {
+      m.gate_fp8 = load_bf16_rows_fp8(p + "gate_proj.weight", r * I, I);
+      m.up_fp8 = load_bf16_rows_fp8(p + "up_proj.weight", r * I, I);
+      m.down_fp8 = load_bf16_cols_fp8(p + "down_proj.weight", r * I, I);
+      return;
+    }
     m.gate = load_bf16_rows(p + "gate_proj.weight", r * I, I, /*packable=*/true);
     m.up = load_bf16_rows(p + "up_proj.weight", r * I, I, /*packable=*/true);
     m.down = load_bf16_cols(p + "down_proj.weight", r * I, I, /*packable=*/true);
@@ -159,12 +188,20 @@ size_t LlamaLoaderFamily::globals_bytes(const LlamaTextConfig& cfg, int rank, in
   size_t b = 0;
   b += align_up_256(static_cast<size_t>(cfg.vocab_size) * H * 2);  // embed
   b += align_up_256(H * 2);                                        // final norm
-  b += align_up_256(static_cast<size_t>(LlamaLocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count) * H * 2);
+  // The head: BF16, or block FP8 (E4M3 codes + the fp32 128x128 scale grid)
+  // under engine.dense_weights = "fp8".
+  const int count = LlamaLocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count;
+  if (g_dense_weights_fp8)
+    b += align_up_256(static_cast<size_t>(count) * H) +
+         align_up_256(static_cast<size_t>(fp8_quant::scale_rows(count)) * fp8_quant::scale_cols(H) * 4);
+  else
+    b += align_up_256(static_cast<size_t>(count) * H * 2);
   return b;
 }
 
 size_t LlamaLoaderFamily::globals_side_bytes(const LlamaTextConfig& cfg, int rank, int world,
                                              LoaderHeadSharding head) {
+  if (g_dense_weights_fp8) return 0;  // no bf16 head bytes, so no bf12 side grant
   const int count = LlamaLocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count;
   if (!bf12_shape_ok(count, cfg.hidden_size)) return 0;
   return align_up_256(static_cast<size_t>(count) * static_cast<size_t>(cfg.hidden_size) * 2);
@@ -193,6 +230,27 @@ void LlamaLoaderFamily::build_globals(const LlamaTextConfig& cfg, const LlamaLoc
   const TensorInfo& t = lookup("lm_head.weight");
   const size_t row_bytes = static_cast<size_t>(cfg.hidden_size) * 2;
   const int begin = geo.lm_vocab_begin, count = geo.lm_vocab_count;
+  if (g_dense_weights_fp8) {
+    // Block FP8 head (codes + the 128x128 scale grid), no bf16 bytes
+    // resident — this mode excludes bf12 (the model refuses the pairing).
+    GlmQuantMatrix q;
+    q.rows = count;
+    q.cols = cfg.hidden_size;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(count) * cfg.hidden_size));
+    q.scales = static_cast<const float*>(bump.alloc(
+        static_cast<size_t>(fp8_quant::scale_rows(count)) * fp8_quant::scale_cols(cfg.hidden_size) * 4));
+    fp8_quant::encode_block128(static_cast<const uint16_t*>(t.data) + static_cast<size_t>(begin) * cfg.hidden_size,
+                               cfg.hidden_size, count, cfg.hidden_size,
+                               bump.host(const_cast<uint8_t*>(q.payload)),
+                               bump.host(const_cast<float*>(q.scales)));
+    source_bytes += static_cast<size_t>(count) * row_bytes;
+    if (head == LoaderHeadSharding::Full) verbatim_bytes += static_cast<size_t>(count) * row_bytes;
+    out.lm_head = nullptr;
+    out.lm_head_fp8 = q;
+    out.lm_vocab_begin = begin;
+    out.lm_vocab_count = count;
+    return;
+  }
   // The head is packable (the model's 12-bit companion replaces it).
   uint16_t* dst = static_cast<uint16_t*>(bf12_shape_ok(count, cfg.hidden_size)
                                              ? bump.alloc_side(static_cast<size_t>(count) * row_bytes)
@@ -205,6 +263,8 @@ void LlamaLoaderFamily::build_globals(const LlamaTextConfig& cfg, const LlamaLoc
   out.lm_vocab_begin = begin;
   out.lm_vocab_count = count;
 }
+
+uint64_t LlamaLoaderFamily::loader_format() { return g_dense_weights_fp8 ? 2 : 1; }
 
 template class ResidentLayerStream<LlamaLoaderFamily>;
 
@@ -222,5 +282,8 @@ void LlamaLayerStream::set_resident_image_dir(const std::string& dir) {
   resident_image_dir_storage() = dir;
 }
 const std::string& LlamaLayerStream::resident_image_dir() { return resident_image_dir_storage(); }
+
+void LlamaLayerStream::set_dense_weights_fp8(bool on) { g_dense_weights_fp8 = on; }
+bool LlamaLayerStream::dense_weights_fp8() { return g_dense_weights_fp8; }
 
 }  // namespace dgpp

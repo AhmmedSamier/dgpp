@@ -2975,6 +2975,7 @@ int main(int argc, char** argv) {
   dgpp::Dsv41Model::set_default_prefill_window_flash(prefill_window == "flash");
   dgpp::Dsv41Model::set_default_decode_window_flash(decode_window == "flash");
   dgpp::QwenLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
+  dgpp::LlamaLayerStream::set_dense_weights_fp8(dense_weights == "fp8");
   {
     // The L2 weight prefetcher's settings, before any model builds its prefetcher.
     if (l2_prefetch_window_mib < 1 || l2_prefetch_window_mib > 64 || l2_prefetch_boundary_window_mib < 0 ||

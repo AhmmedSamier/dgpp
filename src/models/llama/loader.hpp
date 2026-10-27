@@ -28,6 +28,7 @@
 #include "loaders/weight_build.hpp"
 #include "models/llama/binding.hpp"
 #include "models/llama/config.hpp"
+#include "models/quant_matrix.hpp"
 
 namespace dgpp {
 
@@ -40,6 +41,10 @@ struct LlamaAttnResident {
   const uint16_t* k_proj = nullptr;  // BF16 [lkv * d, hidden]
   const uint16_t* v_proj = nullptr;  // BF16 [lkv * d, hidden]
   const uint16_t* o_proj = nullptr;  // BF16 [hidden, lh * d] (packed columns)
+  // engine.dense_weights = "fp8": the same four in block FP8 (E4M3 codes +
+  // one fp32 scale per 128 x 128 block, loaders/fp8_quant.hpp); the BF16
+  // pointers are null in that mode.
+  GlmQuantMatrix q_proj_fp8, k_proj_fp8, v_proj_fp8, o_proj_fp8;
   int local_heads = 0;
   int head_begin = 0;
   int local_kv_heads = 0;
@@ -50,6 +55,7 @@ struct LlamaDenseMlpResident {
   const uint16_t* gate = nullptr;  // BF16 [I/W, hidden] (packed rows)
   const uint16_t* up = nullptr;    // BF16 [I/W, hidden] (packed rows)
   const uint16_t* down = nullptr;  // BF16 [hidden, I/W] (packed columns)
+  GlmQuantMatrix gate_fp8, up_fp8, down_fp8;  // dense_weights = "fp8"
   int64_t local_inter = 0;
 };
 
@@ -66,6 +72,7 @@ struct LlamaGlobalsResident {
   const uint16_t* embed = nullptr;       // BF16 [vocab, hidden]
   const uint16_t* final_norm = nullptr;  // BF16 [hidden]
   const uint16_t* lm_head = nullptr;     // BF16 [lm_vocab_count, hidden]
+  GlmQuantMatrix lm_head_fp8;            // dense_weights = "fp8"
   int lm_vocab_begin = 0;
   int lm_vocab_count = 0;
   size_t bytes = 0;
@@ -93,7 +100,7 @@ struct LlamaLoaderFamily {
   using PresentMap = std::unordered_map<std::string, LlamaTensorDesc>;
   struct Builder;  // models/llama/loader.cpp
   static const char* who() { return "llama loader"; }
-  static uint64_t loader_format() { return 1; }
+  static uint64_t loader_format();  // dense_weights fp8 bumps it (models/llama/loader.cpp)
   static int max_layer(const Config& c) { return c.num_hidden_layers; }
   static int main_layers(const Config& c) { return c.num_hidden_layers; }
   static std::vector<Expected> layer_table(const Config& c, int layer) {
@@ -125,6 +132,15 @@ class LlamaLayerStream : public ResidentLayerStream<LlamaLoaderFamily> {
 
   static void set_resident_image_dir(const std::string& dir);
   static const std::string& resident_image_dir();
+
+  // engine.dense_weights = "fp8": every dense projection and the lm head
+  // encode to block FP8 at load (E4M3 codes, one fp32 scale per 128 x 128
+  // block; loaders/fp8_quant.hpp) and the layers run the scale GEMM —
+  // weight-only quantization, bf16 activations (kernels/scale_gemm.hpp).
+  // Set before any model builds (the serve app does, beside the Qwen
+  // family's); the resident image format bumps so a mode switch rebuilds.
+  static void set_dense_weights_fp8(bool on);
+  static bool dense_weights_fp8();
 
  protected:
   const std::string& image_dir() const override { return resident_image_dir(); }

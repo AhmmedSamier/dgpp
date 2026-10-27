@@ -29,6 +29,10 @@ struct LlamaGemmWorkspace {
   IGemm* gemm = nullptr;
   void* ws = nullptr;
   size_t ws_bytes = 0;
+  // Rows from which the scale GEMM takes the streaming tensor-core form
+  // (kernels/scale_gemm.hpp): 0 keeps the chunked GEMV; the model sets 1
+  // under engine.dense_weights = "fp8" (every row's chain m-invariant).
+  int mma_from_rows = 0;
 };
 
 // The rows one attention enqueue serves: device [T] request ids and

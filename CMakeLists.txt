@@ -1847,6 +1847,8 @@ add_test(NAME llama_forward_smoke COMMAND llama_forward_test --smoke ${LLAMA_FOR
 set_tests_properties(llama_forward_smoke PROPERTIES DEPENDS llama_forward_fixture)
 add_test(NAME llama_forward_test COMMAND llama_forward_test --checkpoint-dir ${LLAMA_FORWARD_FIXTURE})
 set_tests_properties(llama_forward_test PROPERTIES DEPENDS llama_forward_fixture)
+add_test(NAME llama_forward_fp8 COMMAND llama_forward_test --fp8 ${LLAMA_FORWARD_FIXTURE})
+set_tests_properties(llama_forward_fp8 PROPERTIES DEPENDS llama_forward_fixture)
 
 add_executable(mimo_loader_test tests/cuda/mimo_loader_test.cpp)
 target_include_directories(mimo_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)

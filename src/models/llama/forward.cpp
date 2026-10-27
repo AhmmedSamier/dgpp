@@ -13,6 +13,7 @@
 #include "kernels/glm4_attn.hpp"
 #include "kernels/glm_norm.hpp"
 #include "kernels/kernels.hpp"
+#include "kernels/scale_gemm.hpp"
 
 namespace dgpp {
 namespace {
@@ -76,6 +77,10 @@ LlamaModel::LlamaModel(const LlamaTextConfig& cfg, const std::string& checkpoint
   gemm_ws_bytes_ = std::max<size_t>(64u << 20, gemm_.query_workspace_bytes(max_tokens_, lm_vocab_count_, H, DType::BF16));
   gemm_ws_ = dev_alloc<char>(gemm_ws_bytes_);
   gw_ = LlamaGemmWorkspace{&gemm_, gemm_ws_, gemm_ws_bytes_};
+  // engine.dense_weights = "fp8": every scale GEMM row from row one takes
+  // the streaming tensor-core form (kernels/scale_gemm.hpp) — one chain
+  // for every m.
+  gw_.mma_from_rows = 1;
   // The attention projections' lowering (kernels/gemm.hpp dense_gemv_rows):
   // the GEMV chunks to the bound, cuBLASLt's algorithm above it.
   gemm_.set_decode_rows(std::min(max_decode_rows_, dense_gemv_rows()));
@@ -148,9 +153,12 @@ LlamaModel::MemoryPlan LlamaModel::plan_memory(const LlamaTextConfig& cfg, int m
              largest + LlamaLayerStream::globals_bytes(cfg, tp_rank, tp_world, head));
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
-  if (Bf12Companions::enabled() && residency == LlamaResidency::Resident) {
+  if (Bf12Companions::enabled() && residency == LlamaResidency::Resident &&
+      !LlamaLayerStream::dense_weights_fp8()) {
     // The lossless 12-bit companions of every layer's q/k/v/o projections
     // and gate/up/down matrices plus the lm head (kernels/bf12_companions.hpp).
+    // engine.dense_weights = "fp8" plans none — its projection+head bytes
+    // are already resident in the fp8 form.
     const int64_t Hh = cfg.hidden_size;
     const int64_t Q = static_cast<int64_t>(geo.local_heads) * cfg.head_dim;
     const int64_t KV = static_cast<int64_t>(geo.local_kv_heads) * cfg.head_dim;
@@ -324,6 +332,16 @@ LlamaModel::Outputs LlamaModel::run_rows(const RowRun& run) {
   glm_rmsnorm_bf16(resid_, globals_.final_norm, h_, T, H, cfg_.rms_norm_eps, stream_);
   const bool packed_logits = project_head_rows(run, [&](int input_row, int output_row, int rows) {
     gemm_.set_bf12_wide(run.decode || input_row < run.decode_rows());
+    if (globals_.lm_head_fp8.payload) {
+      // The fp8 head (engine.dense_weights = "fp8"): the scale GEMM,
+      // every row from row one on the streaming tensor-core form.
+      launch_scale_gemm_f32(h_ + static_cast<size_t>(input_row) * H, H, globals_.lm_head_fp8.payload,
+                            globals_.lm_head_fp8.scales,
+                            logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, rows, lm_vocab_count_,
+                            H, stream_, static_cast<size_t>(lm_vocab_count_), gw_.mma_from_rows,
+                            /*last_row_only=*/false, gemm_ws_, gemm_ws_bytes_);
+      return;
+    }
     gemm_.matmul(h_ + static_cast<size_t>(input_row) * H, globals_.lm_head,
                  logits_ + static_cast<size_t>(output_row) * lm_vocab_count_, rows, lm_vocab_count_,
                  H, DType::BF16, GemmOut::F32, static_cast<size_t>(H), gemm_ws_, gemm_ws_bytes_,
@@ -369,8 +387,9 @@ void LlamaModel::graph_prepare() {
   // The bf16 decode weights' 12-bit companions are packed as each layer
   // lands (the caches already exist: under bf12-only residency the layer's
   // bf16 bytes go back at once, so no more than one layer's sit beside
-  // their companions).
-  const bool pack = Bf12Companions::enabled() && !bf12_built_;
+  // their companions). engine.dense_weights = "fp8" packs none — the fp8
+  // form is already resident and the bf16 pointers are null.
+  const bool pack = Bf12Companions::enabled() && !bf12_built_ && !LlamaLayerStream::dense_weights_fp8();
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const LlamaLayerResident& r = loader_.load_layer(layer);
     build_layer_objects(r);

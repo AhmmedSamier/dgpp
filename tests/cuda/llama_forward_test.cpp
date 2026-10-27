@@ -29,11 +29,13 @@
 #include "models/llama/attn_reference.hpp"
 #include "models/llama/config.hpp"
 #include "models/llama/forward.hpp"
+#include "models/llama/loader.hpp"
 #include "llama_fixture.hpp"
 
 namespace fs = std::filesystem;
 using dgpp::bf16_bits_to_float;
 using dgpp::float_to_bf16_bits;
+using dgpp::LlamaLayerStream;
 using dgpp::LlamaModel;
 using dgpp::LlamaTextConfig;
 
@@ -326,15 +328,59 @@ int run_host_parity(const std::string& dir) {
   return ok ? 0 : 1;
 }
 
+// engine.dense_weights = "fp8" (slice 7): the same forward under the fp8
+// stack — deterministic (the scale GEMM's kernels are), finite, and within
+// a tolerance of the bf16 run's logits (fp8 is lossy; the host parity's
+// bitwise gates do not apply).
+int run_fp8(const std::string& dir) {
+  const LlamaTextConfig cfg = LlamaTextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  const int T = 48;
+  const std::vector<int64_t> tokens = smoke_tokens(cfg, T);
+  LlamaModel bf16(cfg, dir, T, 256);
+  const LlamaModel::Outputs base = bf16.forward(tokens, true);
+
+  struct Fp8On {
+    const bool saved;
+    Fp8On() : saved(LlamaLayerStream::dense_weights_fp8()) { LlamaLayerStream::set_dense_weights_fp8(true); }
+    ~Fp8On() { LlamaLayerStream::set_dense_weights_fp8(saved); }
+  } on;
+  LlamaModel model(cfg, dir, T, 256);
+  const LlamaModel::Outputs out = model.forward(tokens, true);
+  const LlamaModel::Outputs again = model.forward(tokens, false);
+  require(again.final_hidden_bits == out.final_hidden_bits && again.logits == out.logits,
+          "fp8 forward is not deterministic across calls");
+  for (float v : out.logits) require(std::isfinite(v), "fp8: non-finite logit");
+
+  double sum_d2 = 0, sum_o2 = 0;
+  for (size_t i = 0; i < out.logits.size(); ++i) {
+    const double d = static_cast<double>(out.logits[i]) - static_cast<double>(base.logits[i]);
+    sum_d2 += d * d;
+    sum_o2 += static_cast<double>(base.logits[i]) * static_cast<double>(base.logits[i]);
+  }
+  const double l2 = std::sqrt(sum_d2) / std::sqrt(sum_o2 + 1e-30);
+  const auto got = LlamaModel::topk(out.logits, T, cfg.vocab_size, 4);
+  const auto want = LlamaModel::topk(base.logits, T, cfg.vocab_size, 4);
+  int top1_mismatch = 0;
+  for (int t = 0; t < T; ++t) top1_mismatch += got[t][0].first != want[t][0].first;
+  std::printf("[ .. ] fp8 logits: l2 %.3g against bf16, top-1 mismatches %d of %d rows; deterministic\n", l2,
+              top1_mismatch, T);
+  // fp8 is lossy: near-tie argmax rows may flip (the engine's near-tie
+  // rule); the gate is the l2 band and every logit finite.
+  require(l2 < 0.05 && top1_mismatch <= T / 8, "fp8 logits diverge from the bf16 forward");
+  std::printf("[ OK ] llama_forward_fp8\n");
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string fixture, smoke, checkpoint;
+  std::string fixture, smoke, checkpoint, fp8;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
+    else if (a == "--fp8" && i + 1 < argc) fp8 = argv[++i];
     else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
   }
   try {
@@ -345,7 +391,9 @@ int main(int argc, char** argv) {
     }
     if (!smoke.empty()) return run_smoke(smoke);
     if (!checkpoint.empty()) return run_host_parity(checkpoint);
-    std::fprintf(stderr, "usage: --write-fixture DIR | --smoke DIR | --checkpoint-dir DIR\n");
+    if (!fp8.empty()) return run_fp8(fp8);
+    std::fprintf(stderr,
+                 "usage: --write-fixture DIR | --smoke DIR | --checkpoint-dir DIR | --fp8 DIR\n");
     return 2;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "[FAIL] %s\n", e.what());

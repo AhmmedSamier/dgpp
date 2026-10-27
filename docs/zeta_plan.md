@@ -111,3 +111,19 @@ window, no vision.
   (client context ≤1K, prefix cache, stream, small cap).
   Next: multi-node TP shakeout (loader geometry covers worlds 2/4/8),
   DESIGN/PLAN status.
+* Slice 8: FP8 dense at load (2026-10-27). The Qwen dense stack's lever
+  ported: `engine.dense_weights: "fp8"` encodes every dense projection
+  and the lm head to block FP8 at load — E4M3 codes, one fp32 scale per
+  128 x 128 block (`loaders/fp8_quant.hpp`; no calibration, the block's
+  amax fixes its scale) — and the layers run the scale GEMM on bf16
+  activations (`kernels/scale_gemm.hpp`; `gw_.mma_from_rows = 1`, one
+  chain for every m). fp8 excludes bf12: the counting builds grant no
+  bf16 matrices, `graph_prepare` packs nothing, the bf12 plan is
+  skipped. Streaming and resident both work — the fp8 sizes auto-derive
+  and the image format bumps to 2. Tests: `llama_loader_test`'s fp8
+  case (codes + scales byte-identical to the host encoder at worlds
+  1/2, bf16 pointers null, formulas auto-deriving) and
+  `llama_forward_fp8` (deterministic; logits l2 0.041 vs bf16, 2 of 48
+  top-1 rows flip on near-ties). Expected ~1.5x decode (the
+  projection+head bytes halve); the throughput row waits on a
+  measured campaign.
