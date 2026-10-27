@@ -682,7 +682,7 @@ Tokenizer Tokenizer::load(const std::string& path, size_t word_cache_entries) {
     if (regex == kSplitPattern) t.pattern_ = 0;
     else if (regex == kSplitPatternQwen) t.pattern_ = 1;
     else if (regex == kSplitPatternQwen2) t.pattern_ = 3;
-    else if (regex == kSplitPatternZeta) t.pattern_ = 4;
+    else if (regex == kSplitPatternZeta) t.pattern_ = 5;
     else
       reject("Split pattern differs from the pinned regexes (the scanner "
              "hardcodes them — update the scanner or the checkpoint)");
