@@ -31,9 +31,9 @@ std::string NvmeCachePlan::describe() const {
 
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
                               size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
-                              bool create_directory, size_t reserve_bytes) {
+                              bool create_directory, size_t reserve_bytes, const std::string& binding) {
   NvmeCachePlan plan;
-  plan.directory = expand_home(path);
+  plan.directory = expand_home(path) + (binding.empty() ? "" : "/" + binding);
   plan.slab = plan.directory + "/rank" + std::to_string(rank) + ".slab";
   plan.reserve_bytes = reserve_bytes;
   if (!(capacity_gib > 0.0) || !std::isfinite(capacity_gib)) {
@@ -46,7 +46,12 @@ NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int 
   plan.pages = static_cast<int64_t>(plan.capacity_bytes / plan.page_bytes);
   const int64_t blocks_at_limit =
       block_tokens > 0 ? (context_limit + block_tokens - 1) / block_tokens : 0;
-  plan.minimum_bytes = static_cast<size_t>(plan.blob_pages + blocks_at_limit) * plan.page_bytes;
+  // The entry's token ids ride the slab too (8 bytes a token, behind the blob).
+  const int64_t ids_pages_at_limit =
+      (static_cast<int64_t>(context_limit) * 8 + static_cast<int64_t>(plan.page_bytes) - 1) /
+      static_cast<int64_t>(plan.page_bytes);
+  plan.minimum_bytes =
+      static_cast<size_t>(plan.blob_pages + ids_pages_at_limit + blocks_at_limit) * plan.page_bytes;
   // The directory: made now, so the probe below measures the filesystem
   // the slab lands on — or, for a dry run, the nearest ancestor that
   // exists (what mkdir -p would extend), left untouched.

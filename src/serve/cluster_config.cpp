@@ -526,7 +526,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         else if (p.key == "reserve_gib") {
           n.reserve_gib = number(p.value, nk, what);
           if (n.reserve_gib < 0.0) fail(what, "'" + nk + "' must be >= 0");
-        } else fail(what, "unknown key '" + nk + "'");
+        } else if (p.key == "persist") n.persist = boolean(p.value, nk, what);
+        else fail(what, "unknown key '" + nk + "'");
       }
       if (n.enabled && n.capacity_gib <= 0.0)
         fail(what, "'nvme_cache.capacity_gib' must be positive when the cache is enabled");

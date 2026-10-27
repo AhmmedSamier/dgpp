@@ -413,6 +413,7 @@ class SchedulerEngine {
     int64_t blob_pages = 0;   // pages one snapshot blob spans
     int64_t min_tokens = 0;   // entries below this position are not spilled
     int max_ops = 4;          // spills and restores started but not committed
+    bool persist = false;     // the slab outlives the process (its index is kept beside it)
   };
   virtual DiskInfo disk_info() const { return {}; }
   // Opens the tier: the slab file (created, sized to the capacity), the
@@ -428,6 +429,11 @@ class SchedulerEngine {
     int64_t min_tokens = 0;
     int max_ops = 4;              // ops in flight at most (the scheduler's bound)
     int rank = 0;
+    // The slab outlives the process: its index and CRC table are kept
+    // beside it under `binding` (the checkpoint, the settings, the slab
+    // geometry), and a start under the same binding offers them back.
+    bool persist = false;
+    std::string binding;
   };
   virtual void disk_enable(const DiskEnable& enable) {
     (void)enable;
@@ -454,6 +460,11 @@ class SchedulerEngine {
     int64_t blob_page = -1;
     std::vector<int64_t> pages;
     int64_t partial_page = -1;
+    // The entry's token ids, to the run of `ids_pages` pages at `ids_page`
+    // (right behind the blob): the slab describes its entries itself.
+    std::vector<int64_t> ids;
+    int64_t ids_page = -1;
+    int ids_pages = 0;
   };
   virtual void disk_spill_begin(const DiskSpill& spill) {
     (void)spill;
@@ -495,6 +506,25 @@ class SchedulerEngine {
     int64_t pending = 0;  // ops queued or running on the tier's worker
   };
   virtual DiskEngineStats disk_engine_stats() const { return {}; }
+  // ---- across restarts (nvme_cache.persist) ------------------------------
+  // The previous run's index the world adopted (empty: none), read at the
+  // scheduler's construction; each adopted entry's token ids come back
+  // through disk_read_pages (count pages from page into dst, CRC-checked).
+  virtual std::vector<uint8_t> disk_adopted_index() const { return {}; }
+  virtual bool disk_read_pages(int64_t page, int64_t count, void* dst) {
+    (void)page;
+    (void)count;
+    (void)dst;
+    return false;
+  }
+  // The committed index after every change, for the tier to keep beside
+  // the slab.
+  virtual void disk_persist_index(const std::vector<uint8_t>& bytes) { (void)bytes; }
+  // The warm handshake: this rank's candidate index digest ("0": none),
+  // and the world's verdict — keep the candidate for adoption or start
+  // the slab fresh.
+  virtual std::string disk_candidate_digest() const { return "0"; }
+  virtual void disk_adopt(bool keep) { (void)keep; }
 };
 
 // One request, in arrival (manifest) order. `prompt` ids are validated by
@@ -718,6 +748,7 @@ class Scheduler {
     int64_t disk_pending = 0;
     int64_t disk_tokens_restored = 0;
     int disk_pinned = 0;         // disk entries a prompt_cache_key pins
+    int64_t disk_adopted = 0;    // entries taken over from the previous run's index
   };
 
   // `eos_token_ids` — the config's end-of-sequence set (empty disables
@@ -966,6 +997,9 @@ class Scheduler {
   // Evicts one memory entry (LRU, unattached, not busy) and tells the
   // cold tier when it held the entry's state too. The victim's slot, or -1.
   int evict_memory_entry();
+  // The committed disk index to the tier's keeping (nvme_cache.persist),
+  // after every change to it.
+  void persist_disk_index();
   // A memory entry's cold copy went (a disk eviction): drops its link.
   void drop_disk_link(int memory_entry, int disk_entry);
 

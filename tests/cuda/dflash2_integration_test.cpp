@@ -303,6 +303,9 @@ void check_prefix_tier(Factory make, const char* tag) {
   spill.blob_page = 0;
   spill.pages = {tier->blob_pages()};
   spill.partial_page = tier->blob_pages() + 1;
+  spill.ids = prompt(80, 4);
+  spill.ids_page = tier->blob_pages() + 2;
+  spill.ids_pages = 1;
   tier->spill_begin(spill);
   require(wait(1), "tier: the spill completed");
   dgpp::sched::SchedulerEngine::DiskRestore rs;

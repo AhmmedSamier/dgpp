@@ -58,9 +58,10 @@ DGPP_TEST(disk_cache_spill_restore_state_machine_and_lookup) {
   const auto plan = d.begin_spill(prompt.data(), 12, -1, {}, 0, identities(3, 1000), 0, /*op=*/1, /*now=*/1,
                                   /*memory_entry=*/0);
   require(plan.ok && plan.entry == 0 && plan.pages.size() == 3 && plan.partial_page < 0, "the plan covers 3 blocks");
-  require(plan.blob_page == 14, "the blob run sits at the top: pages 14-15");
+  require(plan.blob_page == 13 && plan.ids_page == 15 && plan.ids_pages == 1,
+          "the blob run sits at the top: pages 13-14, the ids page 15");
   require(plan.pages[0] == 0 && plan.pages[1] == 1 && plan.pages[2] == 2, "block pages from the bottom");
-  require(d.pages_used() == 5, "5 pages in use");
+  require(d.pages_used() == 6, "6 pages in use");
   require(d.entry(0).state == DiskCache::State::kSpilling, "spilling until the commit");
   std::vector<int64_t> cuts;
   std::vector<uint64_t> hashes;
@@ -79,7 +80,7 @@ DGPP_TEST(disk_cache_spill_restore_state_machine_and_lookup) {
   require(d.lookup(prompt, cuts, hashes) < 0, "no cut at the entry's position: a miss");
   // The restore: pages come back; the entry is protected while restoring.
   const DiskCache::RestorePlan rp = d.begin_restore(0, /*op=*/2);
-  require(rp.blob_page == 14 && rp.pages.size() == 3 && rp.pages[2] == 2, "the restore reads the same pages");
+  require(rp.blob_page == 13 && rp.pages.size() == 3 && rp.pages[2] == 2, "the restore reads the same pages");
   require(d.entry(0).state == DiskCache::State::kRestoring, "restoring");
   require(d.evict_lru() < 0, "a restoring entry is never evicted");
   cuts_for(prompt, {4, 8, 12, 16}, &cuts, &hashes);
@@ -99,7 +100,7 @@ DGPP_TEST(disk_cache_spill_restore_state_machine_and_lookup) {
   d.on_memory_evicted(0);
   const int victim = d.evict_lru();
   require(victim == 0, "the older entry goes first");
-  require(d.live_blocks() == 4 && d.pages_used() == 4 + 2, "shared records survive, the blob run is freed");
+  require(d.live_blocks() == 4 && d.pages_used() == 4 + 2 + 1, "shared records survive, the blob run is freed");
   cuts_for(prompt, {4, 8, 12, 16}, &cuts, &hashes);
   require(d.lookup(prompt, cuts, hashes) == plan2.entry, "the deeper entry is offered now");
 }
@@ -110,7 +111,7 @@ DGPP_TEST(disk_cache_aborts_release_records_and_dedupes_identical_entries) {
   // A partial block: 10 tokens = two full blocks and one partial.
   const auto plan = d.begin_spill(prompt.data(), 10, 7, {}, 0, identities(2, 10), /*partial=*/77, 1, 1, 0);
   require(plan.ok && plan.partial_page >= 0 && plan.pages.size() == 2, "partial block gets a page");
-  require(d.pages_used() == 5, "2 + 1 + 2 blob pages");
+  require(d.pages_used() == 6, "2 + 1 + 2 blob pages + 1 ids page");
   d.abort_spill(plan.entry);
   require(d.pages_used() == 0 && d.live_entries() == 0 && d.live_blocks() == 0, "an aborted spill frees everything");
   require(d.stats().spill_failed == 1, "the failure counted");
@@ -147,11 +148,13 @@ DGPP_TEST(disk_cache_adoption_round_trips_the_committed_index) {
   // key, the ids come back from the slab, the uncommitted one is gone.
   DiskCache d(config(/*pages=*/64));
   std::map<int64_t, std::vector<int64_t>> slab;  // ids runs by page, as the tier would hold them
+  int64_t a_ids_page = -1;
   const auto spill = [&](const std::vector<int64_t>& prompt, int64_t position, const std::vector<uint64_t>& ids,
                          uint64_t op, int memory, const std::string& key = "") {
     const auto plan = d.begin_spill(prompt.data(), position, -1, {}, 0, ids, 0, op, op, memory, key);
     require(plan.ok && plan.ids_page == plan.blob_page + 2 && plan.ids_pages == 1, "the ids run follows the blob");
     slab[plan.ids_page] = std::vector<int64_t>(prompt.begin(), prompt.begin() + position);
+    if (a_ids_page < 0) a_ids_page = plan.ids_page;
     return plan.entry;
   };
   const auto a = counted(12, 1000), b = counted(12, 1000), c = counted(12, 3000);
@@ -176,11 +179,12 @@ DGPP_TEST(disk_cache_adoption_round_trips_the_committed_index) {
           "the shared records and the pages came back: blocks " + std::to_string(fresh.live_blocks()) +
               ", pages " + std::to_string(fresh.pages_used()) + " vs " + std::to_string(committed_pages));
   require(fresh.pinned_entries() == 1 && fresh.stats().adopted == 2, "the key survived");
+  const auto longer = counted(16, 1000);  // a's prompt with a tail: the entry at 12 is a cut of it
   const std::vector<int64_t> cuts{8, 12};
   const std::vector<uint64_t> hashes{
-      PrefixCache::with_images(PrefixCache::hash_prefix(a.data(), 8), 8, {}),
-      PrefixCache::with_images(PrefixCache::hash_prefix(a.data(), 12), 12, {})};
-  const int hit = fresh.lookup(a, cuts, hashes);
+      PrefixCache::with_images(PrefixCache::hash_prefix(longer.data(), 8), 8, {}),
+      PrefixCache::with_images(PrefixCache::hash_prefix(longer.data(), 12), 12, {})};
+  const int hit = fresh.lookup(longer, cuts, hashes);
   require(hit >= 0 && fresh.entry(hit).position == 12 && fresh.entry(hit).key == "agent-7",
           "a's prompt finds the adopted entry at its deepest cut");
   // Another slab geometry refuses the bytes outright.
@@ -189,7 +193,7 @@ DGPP_TEST(disk_cache_adoption_round_trips_the_committed_index) {
   // An ids run the slab cannot read drops that entry alone.
   DiskCache lossy(config(/*pages=*/64));
   const auto read_a_only = [&](int64_t page, int64_t count, void* dst) {
-    return page == slab.begin()->first && read(page, count, dst);
+    return page == a_ids_page && read(page, count, dst);
   };
   const DiskCache::Adopted partial = lossy.restore(bytes, read_a_only);
   require(partial.entries == 1 && partial.dropped == 1 && lossy.live_entries() == 1, "a bad run drops its entry");

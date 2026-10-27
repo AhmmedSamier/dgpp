@@ -835,6 +835,13 @@ DGPP_TEST(cluster_config_parses_nvme_cache) {
       "t");
   require(tuned.nvme_cache.chunk_mib == 32 && tuned.nvme_cache.max_ops == 2 && tuned.nvme_cache.reserve_gib == 2.5,
           "the pacing, op bound and reserve parse");
+  require(tuned.nvme_cache.persist && !dgpp::serve::parse_cluster_config(
+                                           "{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"persist\":false}}", "t")
+                                           .nvme_cache.persist,
+          "persist defaults on and parses off");
+  require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"persist\":1}}").find("nvme_cache.persist") !=
+              std::string::npos,
+          "a non-boolean persist is refused by name");
   for (const char* bad : {"\"chunk_mib\":2", "\"chunk_mib\":8192", "\"chunk_mib\":1.5", "\"max_ops\":0",
                           "\"max_ops\":257", "\"reserve_gib\":-1", "\"reserve_gib\":true"})
     require(refusal(std::string("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{") + bad + "}}")

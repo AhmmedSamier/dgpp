@@ -158,9 +158,11 @@ def deployment(path):
         raise ValueError("unknown deployment keys: " + ", ".join(sorted(unknown)))
     nvme = cfg.get("nvme_cache", {})
     if not isinstance(nvme, dict) or set(nvme) - {"enabled", "path", "capacity_gib", "min_tokens",
-                                                   "chunk_mib", "max_ops", "reserve_gib"}:
+                                                   "chunk_mib", "max_ops", "reserve_gib", "persist"}:
         raise ValueError("nvme_cache may only contain enabled, path, capacity_gib, min_tokens, chunk_mib, "
-                         "max_ops and reserve_gib")
+                         "max_ops, reserve_gib and persist")
+    if "persist" in nvme and not isinstance(nvme["persist"], bool):
+        raise ValueError("nvme_cache.persist must be true or false")
     if "chunk_mib" in nvme and (type(nvme["chunk_mib"]) is not int or not 4 <= nvme["chunk_mib"] <= 4096):
         raise ValueError("nvme_cache.chunk_mib must be an integer from 4 to 4096 MiB")
     if "max_ops" in nvme and (type(nvme["max_ops"]) is not int or not 1 <= nvme["max_ops"] <= 256):

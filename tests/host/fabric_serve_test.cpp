@@ -1892,11 +1892,22 @@ DGPP_TEST(journal_disk_commits_ride_the_tick_record) {
   on.nvme_cache_chunk_mib = 32;
   on.nvme_cache_max_ops = 2;
   on.nvme_cache_reserve_gib = 2.5;
+  on.nvme_cache_persist = false;
   require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(on)).world_settings == on,
           "the tier's settings round trip");
   require(dgpp::serve::encode_journal_settings(off).find("nvme") == std::string::npos, "off: absent");
   require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(off)).world_settings == off,
           "off decodes off");
+}
+
+DGPP_TEST(journal_warm_record_carries_the_disk_adoption) {
+  // The world's verdict on the previous run's index rides the warm record.
+  const auto with = dgpp::serve::decode_journal_line(
+      dgpp::serve::encode_journal_warm(dgpp::sched::AdmissionPolicy{}, 4, "cfg", true));
+  require(with.warm && with.disk_adopt && with.prefix_slots == 4, "adopt rides the warm record");
+  const auto without = dgpp::serve::decode_journal_line(
+      dgpp::serve::encode_journal_warm(dgpp::sched::AdmissionPolicy{}, 4, "cfg", false));
+  require(without.warm && !without.disk_adopt, "absent: the slabs start fresh");
 }
 
 DGPP_TEST(journal_disk_commit_collector_waits_for_every_rank) {

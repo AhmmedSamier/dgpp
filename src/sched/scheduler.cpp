@@ -138,6 +138,23 @@ Scheduler::Scheduler(SchedulerEngine* engine,
     dc.block_tokens = std::max<int64_t>(0, prefix_info_.block_tokens);
     dc.min_tokens = std::max<int64_t>(0, disk_info_.min_tokens);
     disk_ = DiskCache(dc);
+    // A previous run's index the world adopted: its entries, with their
+    // ids read back from the slab, become resident before the first tick
+    // — the same bytes on every rank, so the same index.
+    if (disk_info_.persist) {
+      const std::vector<uint8_t> adopted = engine_->disk_adopted_index();
+      if (!adopted.empty()) {
+        const DiskCache::Adopted a = disk_.restore(adopted, [this](int64_t page, int64_t count, void* dst) {
+          return engine_->disk_read_pages(page, count, dst);
+        });
+        if (!a.error.empty())
+          DGPP_LOG_WARN("sched: NVMe cache: the previous run's index was not adopted: {}", a.error);
+        else
+          DGPP_LOG_INFO("sched: NVMe cache: {} entries adopted from the previous run ({} dropped as unreadable)",
+                        a.entries, a.dropped);
+        if (a.dropped > 0 || !a.error.empty()) persist_disk_index();  // the file says what memory holds
+      }
+    }
   }
 }
 
@@ -1964,6 +1981,7 @@ Scheduler::Meters Scheduler::meters() const {
     m.disk_pending = static_cast<int64_t>(disk_ops_.size());
     m.disk_tokens_restored = ds.tokens_restored;
     m.disk_pinned = disk_.pinned_entries();
+    m.disk_adopted = ds.adopted;
   }
   return m;
 }
@@ -2191,6 +2209,7 @@ bool Scheduler::start_spill(int entry, const std::string& id) {
     emit_prefix(id, "disk_evict", v.position, -1);
   }
   if (!plan.ok) {
+    if (!plan.evicted.empty()) persist_disk_index();
     if (plan.duplicate)
       DGPP_LOG_DEBUG("sched: request '{}' entry at {} tokens is on the NVMe cache already", id, m.position);
     else
@@ -2206,6 +2225,9 @@ bool Scheduler::start_spill(int entry, const std::string& id) {
   req.blob_page = plan.blob_page;
   req.pages = plan.pages;
   req.partial_page = plan.partial_page;
+  req.ids = m.ids;
+  req.ids_page = plan.ids_page;
+  req.ids_pages = plan.ids_pages;
   engine_->disk_spill_begin(req);
   cache_.set_busy(entry, true);
   DiskOp o;
@@ -2219,7 +2241,12 @@ bool Scheduler::start_spill(int entry, const std::string& id) {
   disk_ops_.push_back(std::move(o));
   cache_.note(7, op, static_cast<uint64_t>(m.position));
   emit_prefix(id, "spill", m.position, m.slot);
+  persist_disk_index();  // the evictions; the entry itself joins at its commit
   return true;
+}
+
+void Scheduler::persist_disk_index() {
+  if (disk_.enabled() && disk_info_.persist) engine_->disk_persist_index(disk_.serialize());
 }
 
 bool Scheduler::start_restore(int disk_entry, Request& r) {
@@ -2343,6 +2370,7 @@ void Scheduler::apply_disk_commits(const std::vector<DiskCommit>& commits) {
                     o.id, o.position);
     }
   }
+  if (!commits.empty()) persist_disk_index();
 }
 
 std::vector<SchedulerEngine::DiskCompletion> Scheduler::poll_disk_completions() {

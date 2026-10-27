@@ -512,6 +512,9 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
     spill.slot = 0;
     spill.blob_page = 0;
     spill.partial_page = tier->blob_pages();
+    spill.ids.assign(A.begin(), A.begin() + 12);
+    spill.ids_page = tier->blob_pages() + 1;
+    spill.ids_pages = 1;
     tier->spill_begin(spill);
     require(wait(1), "tier: the spill completed");
     // The restore into slot 1: fresh blocks, the same bytes.
@@ -572,9 +575,71 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
     require(m.kv_blocks_in_use() == blocks_before, "tier: the failed restore's block was released");
     tier.reset();
     require(!fs::exists(en.slab_path), "tier: the slab is removed with the tier");
+    // 8. The slab outlives the tier (nvme_cache.persist): under a binding, a
+    //    spill writes the entry with its token ids and the tier takes an
+    //    index to keep; closed and reopened under the same binding it offers
+    //    the index back, reads the ids run bitwise, and restores the entry
+    //    from the retained pages; a refused adoption recreates the slab.
+    {
+      dgpp::sched::SchedulerEngine::DiskEnable pe = en;
+      const std::string bdir = slab_dir + "/binding-a";
+      fs::create_directories(bdir);
+      pe.slab_path = bdir + "/rank0.slab";
+      pe.persist = true;
+      pe.binding = "binding-a";
+      const auto wait_on = [&](dgpp::NvmeTier<QwenModel>& t, uint64_t op) {
+        for (int i = 0; i < 2000; ++i) {
+          t.pump();
+          for (const auto& c : t.poll())
+            if (c.op == op) return c.ok;
+          std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        throw std::runtime_error("persist: op " + std::to_string(op) + " never completed");
+      };
+      auto t2 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pe);
+      require(t2->candidate_index().empty() && t2->candidate_digest() == "0", "persist: nothing to adopt yet");
+      dgpp::sched::SchedulerEngine::DiskSpill ps = spill;  // slot 0's entry at 12, with its ids
+      ps.op = 4;
+      t2->spill_begin(ps);
+      require(wait_on(*t2, 4), "persist: the spill with its ids completed");
+      const std::vector<uint8_t> index{'i', 'n', 'd', 'e', 'x'};
+      t2->persist_index(index);
+      t2.reset();  // the worker lands the index; the slab stays
+      require(fs::exists(pe.slab_path) && fs::exists(bdir + "/index") && fs::exists(bdir + "/rank0.crc"),
+              "persist: the slab, its index and its CRC table stay");
+      auto t3 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pe);
+      require(t3->candidate_index() == index && t3->candidate_digest() != "0",
+              "persist: the index comes back for the binding");
+      std::vector<int64_t> ids_back(t3->page_bytes() / sizeof(int64_t));
+      require(t3->read_pages(ps.ids_page, 1, ids_back.data()) && std::equal(A.begin(), A.begin() + 12, ids_back.begin()),
+              "persist: the ids run reads back bitwise");
+      t3->adopt(true);
+      dgpp::sched::SchedulerEngine::DiskRestore pr = rs;  // into slot 1, from the retained pages
+      pr.op = 5;
+      (void)t3->restore_begin(pr);
+      require(wait_on(*t3, 5), "persist: the restore from the retained slab completed");
+      require(arena.filled(1) && arena.meta(1).position == 12, "persist: slot 1 holds the entry again");
+      {
+        std::vector<uint8_t> a(arena.bytes()), b(arena.bytes());
+        DGPP_CUDA_OK(cudaMemcpy(a.data(), arena.slot_data(0), a.size(), cudaMemcpyDeviceToHost));
+        DGPP_CUDA_OK(cudaMemcpy(b.data(), arena.slot_data(1), b.size(), cudaMemcpyDeviceToHost));
+        require(a == b, "persist: the restored blob is the spilled one");
+      }
+      arena.release(1);
+      t3.reset();
+      auto t4 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pe);
+      require(!t4->candidate_index().empty(), "persist: the index is offered again");
+      t4->adopt(false);
+      require(t4->candidate_index().empty() && !fs::exists(bdir + "/index"),
+              "persist: a refused adoption starts the slab fresh");
+      t4.reset();
+      require(fs::exists(pe.slab_path), "persist: the fresh slab stays for the next run");
+      fs::remove_all(bdir);
+    }
     arena.release(0);
     require(m.kv_blocks_in_use() == 0, "tier: every block released");
-    std::printf("[ OK ] NVMe tier: spill/restore bitwise, attach bitwise, corruption detected\n");
+    std::printf("[ OK ] NVMe tier: spill/restore bitwise, attach bitwise, corruption detected, the slab across a "
+                "restart\n");
   }
   // Two cuts in one prefill: an earlier document state for changed tails,
   // and the deepest state for identical repeats. Both include MTP state.

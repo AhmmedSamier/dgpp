@@ -393,6 +393,10 @@ struct ClusterConfig {
     int64_t max_ops = 4;
     // Free space the pre-flight leaves on the slab's filesystem, in GiB.
     double reserve_gib = 1.0;
+    // The slab outlives the process: a start with the same checkpoint,
+    // settings and slab geometry adopts its entries (when every rank holds
+    // the same index). False recreates the slab at every start.
+    bool persist = true;
   } nvme_cache;
   struct Paths {
     std::string log_dir = "~/dgpp/log";

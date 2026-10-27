@@ -3,7 +3,7 @@
 // Rank 0 accepts HTTP requests and sends newline-framed JSON over a TCP star:
 //
 //   {"op":"settings", ...}       model, world and engine settings, sent first
-//   {"op":"warm","adm":{...},"pc":N,"cfg":"<digest>"}
+//   {"op":"warm","adm":{...},"pc":N,"cfg":"<digest>","da":1}
 //   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"dk":[[op,1]],"pd":D,"od":F}
 //   {"op":"stop"}
 //
@@ -112,7 +112,8 @@ std::string encode_journal_stop();
 std::string encode_journal_warm(
     const dgpp::sched::AdmissionPolicy& policy = dgpp::sched::AdmissionPolicy{},
     int prefix_slots = 0,
-    const std::string& config_digest = "");
+    const std::string& config_digest = "",
+    bool disk_adopt = false);
 
 // The settings record (2026-09-06, the productionizing pass): what rank 0
 // pushes to every peer over the journal BEFORE anything builds — the first
@@ -233,6 +234,7 @@ struct WorldSettings {
   int64_t nvme_cache_chunk_mib = 64;   // the staging slice (pacing, the memory plan)
   int64_t nvme_cache_max_ops = 4;      // ops started but not committed (a decision input)
   double nvme_cache_reserve_gib = 1.0;  // the pre-flight's free-space reserve
+  bool nvme_cache_persist = true;      // the slab outlives the process
   bool operator==(const WorldSettings&) const = default;
 };
 std::string encode_journal_settings(const WorldSettings& s);
@@ -246,6 +248,7 @@ struct JournalRecord {
   dgpp::sched::AdmissionPolicy admission;
   int prefix_slots = 0;          // warm: rank 0's prefix cache slots
   std::string config_digest;     // warm: rank 0's effective-config digest ("cfg", 2026-09-06)
+  bool disk_adopt = false;       // warm: the world adopts its previous NVMe cache index ("da")
   bool has_prefix_digest = false;  // tick: rank 0's digest rode along
   uint64_t prefix_digest = 0;
   bool has_op_digest = false;      // tick: rank 0's op-stream fold rode along
@@ -320,7 +323,10 @@ class JournalWriter {
   // Hold the warm record until all have arrived, using the startup timeout,
   // so cold loading cannot spend the first collective's execution deadline.
   // Returns false on shutdown; throws on a missing, closed or malformed peer.
-  bool wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop);
+  // Every peer's "ready" line; a peer may append a note (the NVMe cache's
+  // candidate index digest), returned per rank through `notes`.
+  bool wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop,
+                        std::vector<std::pair<int, std::string>>* notes = nullptr);
 
   // One line to every peer. A peer that cannot take it is a dead
   // member of a live-serving world — the fabric is broken, and this
@@ -370,7 +376,7 @@ class JournalReader {
                 int connect_timeout_ms, int rank);
 
   // Called after settings and model construction, before waiting for warm.
-  void send_ready();
+  void send_ready(const std::string& note = "");
 
   // The next complete record (newline stripped). false when rank 0's
   // journal closed (clean stop or crash — EOF either way) or the
@@ -405,7 +411,8 @@ bool wait_journal_warm(JournalReader* reader,
                        const std::function<bool()>& should_stop,
                        dgpp::sched::AdmissionPolicy* policy = nullptr,
                        int* prefix_slots = nullptr,
-                       std::string* config_digest = nullptr);
+                       std::string* config_digest = nullptr,
+                       bool* disk_adopt = nullptr);
 // The peer's first read (2026-09-06): rank 0's settings record, sent right
 // after the journal star forms and before either side builds a model.
 // Returns false when the stream ended or a stop arrived first; throws when

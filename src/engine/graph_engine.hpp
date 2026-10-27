@@ -1627,6 +1627,19 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   sched::SchedulerEngine::DiskEngineStats disk_engine_stats() const override {
     return tier_ ? tier_->stats() : sched::SchedulerEngine::DiskEngineStats{};
   }
+  std::vector<uint8_t> disk_adopted_index() const override {
+    return tier_ ? tier_->candidate_index() : std::vector<uint8_t>{};
+  }
+  bool disk_read_pages(int64_t page, int64_t count, void* dst) override {
+    return tier_ && tier_->read_pages(page, count, dst);
+  }
+  void disk_persist_index(const std::vector<uint8_t>& bytes) override {
+    if (tier_) tier_->persist_index(bytes);
+  }
+  std::string disk_candidate_digest() const override { return tier_ ? tier_->candidate_digest() : "0"; }
+  void disk_adopt(bool keep) override {
+    if (tier_) tier_->adopt(keep);
+  }
 
  private:
   // The prefill's slot-side work around the model call that yields the

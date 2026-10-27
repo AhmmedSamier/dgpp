@@ -3262,6 +3262,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.disk_tokens_restored);
   out.append(",\"pinned\":");
   append_json_int(&out, m.disk_pinned);
+  out.append(",\"adopted\":");
+  append_json_int(&out, m.disk_adopted);
   out.append(",\"blocks_shared\":");
   append_json_int(&out, m.disk_blocks_shared);
   out.append(",\"evictions\":");

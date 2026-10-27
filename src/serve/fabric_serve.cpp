@@ -407,7 +407,7 @@ std::vector<dgpp::sched::Scheduler::DiskCommit> DiskCommitCollector::take_ready(
 }
 std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
                                 int prefix_slots,
-                                const std::string& config_digest) {
+                                const std::string& config_digest, bool disk_adopt) {
   std::string out = "{\"op\":\"warm\",\"adm\":" +
                     std::to_string(static_cast<int>(policy.mode)) +
                     ",\"win\":" + std::to_string(policy.window_tokens) +
@@ -427,6 +427,8 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
     out += ",\"cfg\":";
     append_json_string(&out, config_digest);
   }
+  // The NVMe cache's previous index: every rank adopts it, or none does.
+  if (disk_adopt) out += ",\"da\":1";
   out.push_back('}');
   return out;
 }
@@ -462,9 +464,9 @@ std::string encode_journal_settings(const WorldSettings& s) {
   // The NVMe cold tier (issue #26): written only when on, so a record
   // without it is byte for byte the earlier format.
   if (s.nvme_cache)
-    out += std::format(",\"nvme\":1,\"nvmegib\":{:.17g},\"nvmemin\":{},\"nvmechunk\":{},\"nvmeops\":{},\"nvmereserve\":{:.17g}",
+    out += std::format(",\"nvme\":1,\"nvmegib\":{:.17g},\"nvmemin\":{},\"nvmechunk\":{},\"nvmeops\":{},\"nvmereserve\":{:.17g},\"nvmepersist\":{}",
                        s.nvme_cache_capacity_gib, s.nvme_cache_min_tokens, s.nvme_cache_chunk_mib,
-                       s.nvme_cache_max_ops, s.nvme_cache_reserve_gib);
+                       s.nvme_cache_max_ops, s.nvme_cache_reserve_gib, s.nvme_cache_persist ? 1 : 0);
   out += ",\"ngt\":";
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
@@ -756,6 +758,7 @@ JournalRecord decode_journal_line(std::string_view line) {
         if (s.nvme_cache_chunk_mib < 4 || s.nvme_cache_chunk_mib > 4096 || s.nvme_cache_max_ops < 1 ||
             s.nvme_cache_max_ops > 256 || !(s.nvme_cache_reserve_gib >= 0.0))
           throw std::runtime_error("journal: settings record with a bad NVMe cache chunk, op bound or reserve");
+        s.nvme_cache_persist = v.find("nvmepersist") ? flag("nvmepersist") : true;
       }
     }
     // Records before 2026-09-10 carry no table residency: resident.
@@ -978,6 +981,10 @@ JournalRecord decode_journal_line(std::string_view line) {
       if (!pc->is_number() || pc->as_int() < 0)
         throw std::runtime_error("journal: warm record with a bad prefix slot count");
       rec.prefix_slots = static_cast<int>(pc->as_int());
+    }
+    if (const dgpp::minijson::Value* da = v.find("da")) {
+      if (!da->is_number() || da->as_int() != 1) throw std::runtime_error("journal: warm record with a bad 'da'");
+      rec.disk_adopt = true;
     }
     if (const dgpp::minijson::Value* cfg = v.find("cfg")) {
       if (!cfg->is_string() || cfg->as_string().empty())
@@ -1368,7 +1375,8 @@ void JournalWriter::broadcast(const std::string& line) {
   }
 }
 
-bool JournalWriter::wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop) {
+bool JournalWriter::wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop,
+                                     std::vector<std::pair<int, std::string>>* notes) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   std::vector<std::string> received(peers_.size());
   std::vector<bool> ready(peers_.size(), false);
@@ -1382,13 +1390,22 @@ bool JournalWriter::wait_peers_ready(int timeout_ms, const std::function<bool()>
         throw std::runtime_error(name + " closed before model readiness completed");
       if (ready[i]) continue;
       if (peers_[i].wait_readable(0)) {
-        char buf[16];
+        char buf[64];
         const int n = peers_[i].read_some(buf, sizeof buf);
         if (n <= 0) throw std::runtime_error(name + " closed before model readiness completed");
         received[i].append(buf, static_cast<size_t>(n));
-        if (!std::string_view("ready\n").starts_with(received[i]))
+        // "ready\n", or "ready <note>\n" (the NVMe cache's candidate digest).
+        const size_t nl = received[i].find('\n');
+        const std::string head = received[i].substr(0, std::min<size_t>(received[i].size(), 6));
+        const bool plausible = std::string_view("ready\n").starts_with(head) ||
+                               std::string_view("ready ").starts_with(head);
+        if (!plausible || received[i].size() > 96)
           throw std::runtime_error(name + " sent an invalid model readiness message");
-        if (received[i] == "ready\n") {
+        if (nl != std::string::npos) {
+          const std::string line = received[i].substr(0, nl);
+          if (line != "ready" && (line.rfind("ready ", 0) != 0 || line.size() == 6))
+            throw std::runtime_error(name + " sent an invalid model readiness message");
+          if (notes != nullptr) notes->emplace_back(peer_ranks_[i], line.size() > 6 ? line.substr(6) : "");
           ready[i] = true;
           --remaining;
           DGPP_LOG_INFO("journal: rank {} model ready ({} peer(s) remaining)", peer_ranks_[i], remaining);
@@ -1472,8 +1489,10 @@ JournalReader::JournalReader(const std::string& host, uint16_t port,
     throw std::runtime_error("journal: could not send the hello to rank 0");
 }
 
-void JournalReader::send_ready() {
-  constexpr std::string_view ready = "ready\n";
+void JournalReader::send_ready(const std::string& note) {
+  if (note.find_first_of(" \n") != std::string::npos)
+    throw std::invalid_argument("journal: a readiness note is one token");
+  const std::string ready = note.empty() ? "ready\n" : "ready " + note + "\n";
   if (!conn_.write_all(ready.data(), ready.size()))
     throw std::runtime_error("journal: could not send model readiness to rank 0");
 }
@@ -1540,7 +1559,7 @@ bool wait_journal_settings(JournalReader* reader,
 bool wait_journal_warm(JournalReader* reader,
                        const std::function<bool()>& should_stop,
                        dgpp::sched::AdmissionPolicy* policy, int* prefix_slots,
-                       std::string* config_digest) {
+                       std::string* config_digest, bool* disk_adopt) {
   std::string line;
   if (!reader->read_line(should_stop, &line)) {
     DGPP_LOG_INFO("journal: rank 0's stream ended before the warm record — "
@@ -1559,6 +1578,7 @@ bool wait_journal_warm(JournalReader* reader,
   if (policy != nullptr && rec.has_admission) *policy = rec.admission;
   if (prefix_slots != nullptr) *prefix_slots = rec.prefix_slots;
   if (config_digest != nullptr) *config_digest = rec.config_digest;
+  if (disk_adopt != nullptr) *disk_adopt = rec.disk_adopt;
   return true;
 }
 

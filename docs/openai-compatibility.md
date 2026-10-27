@@ -401,6 +401,7 @@ deployment key; `enabled` false leaves every count at zero):
 | `spills`, `spilled`, `spill_failed`, `spill_skipped` | Spills begun, committed by the world, failed on some rank, and skipped for want of room after evicting every unused entry. |
 | `restores`, `restored`, `restore_failed`, `tokens_restored` | Restores begun, committed, failed (a short read, a device error or a checksum mismatch on some rank), and the prompt tokens committed restores brought back. |
 | `blocks_shared` | Blocks a spill found already on disk (a document shared by attached variants). |
+| `pinned`, `adopted` | Entries a `prompt_cache_key` pins, and entries taken over from the previous run's index (`nvme_cache.persist`). |
 | `evictions` | Entries disk retention evicted for room. |
 | `pending`, `worker_pending` | Ops awaiting the world's verdict, and ops queued or running on this rank's worker. |
 | `bytes_written`, `bytes_read`, `failures`, `spill_ms_avg`, `restore_ms_avg` | This rank's file traffic, its failed ops and its average op times. |

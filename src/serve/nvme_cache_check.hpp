@@ -38,8 +38,12 @@ constexpr size_t kNvmeCacheReserveBytes = size_t{1} << 30;
 // leaves no trace) the probe takes the nearest existing ancestor, which
 // is where mkdir -p would put it. The plan's `error` names what to change
 // when it does not fit.
+// With a `binding` (nvme_cache.persist) the slab lives under
+// <path>/<binding>/, so another checkpoint's or configuration's slab is
+// never mistaken for this deployment's.
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
                               size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
-                              bool create_directory = true, size_t reserve_bytes = kNvmeCacheReserveBytes);
+                              bool create_directory = true, size_t reserve_bytes = kNvmeCacheReserveBytes,
+                              const std::string& binding = "");
 
 }  // namespace dgpp::serve

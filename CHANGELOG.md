@@ -6,7 +6,7 @@ project procedures and design guidance live in `docs/`.
 ## Unreleased
 - **NVMe cold tier for the prefix cache** (2026-10-27, issue #26, PR #53): the
   top-level `nvme_cache` deployment key (`enabled`, `path`, `capacity_gib`,
-  `min_tokens`, `chunk_mib`, `max_ops`, `reserve_gib`) keeps entries the snapshot arena evicts — the snapshot blob
+  `min_tokens`, `chunk_mib`, `max_ops`, `reserve_gib`, `persist`) keeps entries the snapshot arena evicts — the snapshot blob
   and every KV block it pins — in one preallocated slab file per rank on
   local NVMe, and restores an entry before a later matching request
   prefills its suffix. Blocks shared by a document and its attached
@@ -22,7 +22,10 @@ project procedures and design guidance live in `docs/`.
   at the context limit plus its blob) on every rank, `--memory-plan`
   included; `/v1/metrics` gains an `nvme_cache` block and the stats line an
   `nvme cache` field; a request's `prompt_cache_key` pins the entries it
-  creates or attaches to against eviction, in memory and on disk. New gates: `scheduler_test`'s nvmeCache cases,
+  creates or attaches to against eviction, in memory and on disk. The slab
+  outlives the process: its index and checksums live beside it under a
+  binding of the checkpoint, settings and geometry, and a restart under the
+  same binding adopts the entries when every rank holds the same index. New gates: `scheduler_test`'s nvmeCache cases,
   `unit_tests`' disk_cache cases, `fabric_serve_test`'s ok 10 (spill,
   evict, restore and attach across three ranks over real sockets) and
   `qwen_decode_test`'s tier block (bitwise spill/restore, attach parity,

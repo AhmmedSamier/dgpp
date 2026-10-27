@@ -17,6 +17,7 @@
 // The fake also enforces the engine interface: scripts are consumed in order,
 // each slot owns its pending transcript, and close() must find a live
 // reservation to release.
+#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -281,8 +282,32 @@ class FakeEngine : public SchedulerEngine {
     i.page_bytes = 4096;
     i.blob_pages = disk_blob_pages_;
     i.min_tokens = disk_min_tokens_;
+    i.persist = disk_persist_;
     return i;
   }
+  // Across a "restart" (nvme_cache.persist): the ids runs the spills wrote
+  // (by page), the index the scheduler handed over last, and what a new
+  // engine adopts from a previous one.
+  void set_disk_persist(bool on) { disk_persist_ = on; }
+  void adopt_from(const FakeEngine& previous) {
+    adopted_ = previous.index_;
+    disk_store_ = previous.disk_store_;
+  }
+  int index_writes() const { return index_writes_; }
+  std::vector<uint8_t> disk_adopted_index() const override { return adopted_; }
+  bool disk_read_pages(int64_t page, int64_t count, void* dst) override {
+    const auto it = disk_store_.find(page);
+    if (it == disk_store_.end()) return false;
+    const size_t bytes = static_cast<size_t>(count) * 4096;
+    std::memset(dst, 0, bytes);
+    std::memcpy(dst, it->second.data(), std::min(bytes, it->second.size() * sizeof(int64_t)));
+    return true;
+  }
+  void disk_persist_index(const std::vector<uint8_t>& bytes) override {
+    index_ = bytes;
+    ++index_writes_;
+  }
+  std::string disk_candidate_digest() const override { return adopted_.empty() ? "0" : "candidate"; }
   dgpp::sched::SchedulerEngine::DiskBlocks disk_entry_blocks(int slot) const override {
     require(pinned_.count(slot) != 0, "fake: disk blocks of an empty arena slot");
     dgpp::sched::SchedulerEngine::DiskBlocks b;
@@ -296,6 +321,7 @@ class FakeEngine : public SchedulerEngine {
   void disk_spill_begin(const dgpp::sched::SchedulerEngine::DiskSpill& sp) override {
     require(pinned_.count(sp.slot) != 0, "fake: spill of an empty arena slot");
     ops_.push_back("DS:" + std::to_string(sp.op) + ":" + std::to_string(sp.slot));
+    if (!sp.ids.empty()) disk_store_[sp.ids_page] = sp.ids;
     disk_pending_.push_back({sp.op, disk_latency_, !disk_fail_next_});
     disk_fail_next_ = false;
     ++disk_ops_begun_;
@@ -336,6 +362,10 @@ class FakeEngine : public SchedulerEngine {
   };
   int64_t disk_pages_ = 0, disk_blob_pages_ = 1, disk_min_tokens_ = 0;
   int disk_latency_ = 1;
+  bool disk_persist_ = false;
+  std::map<int64_t, std::vector<int64_t>> disk_store_;
+  std::vector<uint8_t> index_, adopted_;
+  int index_writes_ = 0;
   bool disk_fail_next_ = false;
   int64_t disk_ops_begun_ = 0;
   std::vector<PendingDisk> disk_pending_;
@@ -3338,6 +3368,43 @@ DGPP_TEST(scheduler_nvmeCache_spillsAnEvictedEntryAndRestoresItForALaterRequest)
           "the restore precedes the attach: " + ops);
   require(ids_joined(sched.results()[2].generated) == "6,7,8", "c's ids");
   require(m.disk_pages_used <= m.disk_pages_total, "within capacity");
+}
+
+DGPP_TEST(scheduler_nvmeCache_adoptsThePersistedIndexAfterARestart) {
+  // Run one: a keyed entry spills; the scheduler hands the committed index
+  // to the engine after every change. Run two, a fresh scheduler on an
+  // engine holding that index and the slab's ids runs: the entry is
+  // resident from the start, still pinned, and a request restores from it.
+  FakeEngine first(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  first.set_prefix_arena(/*slots=*/1, /*align=*/4);
+  first.set_disk(/*pages=*/64);
+  first.set_disk_persist(true);
+  first.arm(0, {1, 2, 3}, 3);
+  {
+    Scheduler sched(&first, {kEos});
+    auto a = make_cached_request("a", counted_prompt(21), {5, 13}, 3);
+    a.cache_key = "agent-7";
+    sched.submit(a);
+    settle(sched, first);
+    require(sched.meters().disk_spilled >= 1 && first.index_writes() >= 1,
+            "the index was handed over: " + first.op_stream());
+  }
+  FakeEngine second(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  second.set_prefix_arena(/*slots=*/1, /*align=*/4);
+  second.set_disk(/*pages=*/64);
+  second.set_disk_persist(true);
+  second.adopt_from(first);
+  second.arm(0, {1, 2, 3}, 3);
+  Scheduler sched(&second, {kEos});
+  Scheduler::Meters m = sched.meters();
+  require(m.disk_adopted >= 1 && m.disk_entries == m.disk_adopted && m.disk_pinned >= 1,
+          "the entries came back, pinned: adopted " + std::to_string(m.disk_adopted));
+  sched.submit(make_cached_request("b", counted_prompt(21), {5, 13}, 3));
+  settle(sched, second);
+  m = sched.meters();
+  require(m.disk_restores == 1 && m.disk_restored == 1 && m.prefix_hits == 1 && m.prefix_tokens_saved == 12,
+          "b restored the adopted entry and attached at 12: " + second.op_stream());
+  require(ids_joined(sched.results()[0].generated) == "1,2,3", "b's ids");
 }
 
 DGPP_TEST(scheduler_prefixCache_promptCacheKeyPinsEntries) {

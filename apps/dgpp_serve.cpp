@@ -1856,6 +1856,7 @@ int main(int argc, char** argv) {
   int64_t nvme_cache_chunk_mib = 64;
   int64_t nvme_cache_max_ops = 4;
   double nvme_cache_reserve_gib = 1.0;
+  bool nvme_cache_persist = true;
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<float> frequency_penalty, presence_penalty;
   std::optional<int> top_k;
@@ -2000,6 +2001,7 @@ int main(int argc, char** argv) {
     nvme_cache_chunk_mib = c.nvme_cache.chunk_mib;
     nvme_cache_max_ops = c.nvme_cache.max_ops;
     nvme_cache_reserve_gib = c.nvme_cache.reserve_gib;
+    nvme_cache_persist = c.nvme_cache.persist;
     admission_mode = e.admission;
     admission_window = e.admission_window;
     model_alias = e.model_alias;
@@ -2398,8 +2400,8 @@ int main(int argc, char** argv) {
                      : "off",
         dflash_model.empty() ? "off" : dflash_model, dflash_weights, lookup_draft ? 1 : 0,
         lookup_nmin, lookup_nstrong, lookup_agree, lookup_tail,
-        nvme_cache ? std::format("{}:{}:{}:{}:{}", nvme_cache_gib, nvme_cache_min_tokens, nvme_cache_chunk_mib,
-                                 nvme_cache_max_ops, nvme_cache_reserve_gib)
+        nvme_cache ? std::format("{}:{}:{}:{}:{}:{}", nvme_cache_gib, nvme_cache_min_tokens, nvme_cache_chunk_mib,
+                                 nvme_cache_max_ops, nvme_cache_reserve_gib, nvme_cache_persist ? 1 : 0)
                    : std::string("off"));
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
@@ -2521,6 +2523,7 @@ int main(int argc, char** argv) {
         ws.nvme_cache_chunk_mib = nvme_cache_chunk_mib;
         ws.nvme_cache_max_ops = nvme_cache_max_ops;
         ws.nvme_cache_reserve_gib = nvme_cache_reserve_gib;
+        ws.nvme_cache_persist = nvme_cache_persist;
         journal->broadcast(dgpp::serve::encode_journal_settings(ws));
         DGPP_LOG_INFO("journal: settings pushed to {} peer(s): {}", world - 1,
                       canonical());
@@ -2638,6 +2641,7 @@ int main(int argc, char** argv) {
           nvme_cache_chunk_mib = ws.nvme_cache_chunk_mib;
           nvme_cache_max_ops = ws.nvme_cache_max_ops;
           nvme_cache_reserve_gib = ws.nvme_cache_reserve_gib;
+          nvme_cache_persist = ws.nvme_cache_persist;
         }
         const std::string now = canonical();
         if (own != now)
@@ -3360,12 +3364,24 @@ int main(int argc, char** argv) {
     const size_t kNvmeChunkBytes = static_cast<size_t>(nvme_cache_chunk_mib) << 20;
     const size_t nvme_staging_bytes = nvme_cache ? dgpp::nvme_tier_staging_bytes(kNvmeChunkBytes) : 0;
     dgpp::serve::NvmeCachePlan nvme_plan;
+    // The binding a slab that outlives the process is kept under: the
+    // checkpoint, the effective settings (their digest) and the slab's
+    // geometry — a start under another one never sees these entries.
+    const std::string nvme_binding =
+        nvme_cache && nvme_cache_persist
+            ? dgpp::serve::config_digest(
+                  config_digest + "|" + ckpt + "|" +
+                  std::to_string(family->cache_block_bytes(world, mtp && graph_world)) + "|" +
+                  std::to_string(snapshot_bytes) + "|" + std::format("{:.17g}", nvme_cache_gib) + "|" +
+                  std::to_string(block_tokens) + "|" + std::to_string(world))
+            : std::string();
     if (nvme_cache) {
       nvme_plan = dgpp::serve::plan_nvme_cache(nvme_cache_path, nvme_cache_gib, rank,
                                                family->cache_block_bytes(world, mtp && graph_world),
                                                snapshot_bytes, block_tokens, context_limit,
                                                /*create_directory=*/!memory_plan_only,
-                                               static_cast<size_t>(nvme_cache_reserve_gib * 1024.0 * 1024.0 * 1024.0));
+                                               static_cast<size_t>(nvme_cache_reserve_gib * 1024.0 * 1024.0 * 1024.0),
+                                               nvme_binding);
       DGPP_LOG_INFO("rank {}: {}", rank, nvme_plan.describe());
       if (!nvme_plan.error.empty()) {
         DGPP_LOG_ERROR("rank {}: the NVMe cache does not fit — {}", rank, nvme_plan.error);
@@ -3392,6 +3408,8 @@ int main(int argc, char** argv) {
       en.min_tokens = nvme_cache_min_tokens;  // 0: every entry memory keeps (engine.prefix_min_tokens floors them)
       en.max_ops = static_cast<int>(nvme_cache_max_ops);
       en.rank = rank;
+      en.persist = nvme_cache_persist;
+      en.binding = nvme_binding;
       eng->disk_enable(en);
       const dgpp::sched::SchedulerEngine::DiskInfo info = eng->disk_info();
       // The pre-flight sized the slab from the family's static estimate of a
@@ -3421,6 +3439,9 @@ int main(int argc, char** argv) {
                     static_cast<double>(info.pages) * static_cast<double>(info.page_bytes) /
                         (1024.0 * 1024.0 * 1024.0),
                     info.min_tokens, nvme_cache_chunk_mib, info.max_ops);
+      // A world of one decides its own adoption; a fabric decides at the
+      // warm handshake, every rank's candidate compared.
+      if (world == 1 && nvme_cache_persist) eng->disk_adopt(eng->disk_candidate_digest() != "0");
     };
     if (memory_plan_only) {
       // The check alone, for the shape this rank would run (world > 1: the
@@ -3624,23 +3645,47 @@ int main(int argc, char** argv) {
           engine.reset();
           family->destroy_model();
         };
-        const auto start_warm = [&] {
+        const auto start_warm = [&](dgpp::sched::SchedulerEngine* eng) {
           // Any rank can be last out of cold checkpoint loading. Wait on TCP
           // before launching collectives, whose deadlines bound execution,
           // not disk I/O on a peer. Apply the same hold to graph and eager serving.
+          // The readiness lines carry each rank's NVMe cache candidate (the
+          // previous run's index digest): rank 0 adopts only when every
+          // rank holds the same one, and says so on the warm record.
+          const bool persisted = nvme_cache && nvme_cache_persist;
           if (rank == 0) {
             if (journal) {
+              std::vector<std::pair<int, std::string>> notes;
               if (!journal->wait_peers_ready(rendezvous_timeout_ms,
-                                             [rank] { return peer_should_stop(rank); })) return false;
+                                             [rank] { return peer_should_stop(rank); }, &notes)) return false;
+              bool adopt = false;
+              if (persisted) {
+                const std::string own = eng->disk_candidate_digest();
+                adopt = own != "0";
+                for (const auto& [peer, note] : notes)
+                  if (note != own) {
+                    if (adopt)
+                      DGPP_LOG_INFO("rank 0: NVMe cache: rank {}'s previous index ({}) is not rank 0's ({})", peer,
+                                    note.empty() ? "none" : note, own);
+                    adopt = false;
+                  }
+                DGPP_LOG_INFO("rank 0: NVMe cache: {}",
+                              adopt ? "every rank holds the same previous index; the world adopts it"
+                                    : "no previous index every rank holds; the slabs start fresh");
+                eng->disk_adopt(adopt);
+              }
               journal->broadcast(dgpp::serve::encode_journal_warm(
-                  knobs.admission, prefix_slots, config_digest));
+                  knobs.admission, prefix_slots, config_digest, adopt));
             }
             return true;
           }
-          reader->send_ready();
-          return dgpp::serve::wait_journal_warm(
+          reader->send_ready(persisted ? eng->disk_candidate_digest() : std::string());
+          bool adopt = false;
+          const bool ok = dgpp::serve::wait_journal_warm(
               &*reader, [rank] { return peer_should_stop(rank); },
-              &peer_policy, &peer_prefix_slots, &rank0_config);
+              &peer_policy, &peer_prefix_slots, &rank0_config, &adopt);
+          if (ok && persisted) eng->disk_adopt(adopt);
+          return ok;
         };
         if (decode_graph) {
           std::unique_ptr<ServeGraphEngine> graph_engine =
@@ -3709,6 +3754,7 @@ int main(int argc, char** argv) {
                           mtp_draft, mtp_draft_temperature);
           }
           enable_nvme_cache(graph_engine->engine());
+          dgpp::sched::SchedulerEngine* const warm_engine = graph_engine->engine();
           if (mtp_schedule) {
             // The value of decode time: the configured throughput, or the
             // reservation rate of the configured curve (a plain step's).
@@ -3726,7 +3772,7 @@ int main(int argc, char** argv) {
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so the journal releases it only after
           // every rank has finished constructing its model and engine.
-          if (!start_warm()) {
+          if (!start_warm(warm_engine)) {
             graph_engine.reset();
             family->destroy_model();
             cudaFreeHost(pick_scratch);
@@ -3758,7 +3804,7 @@ int main(int argc, char** argv) {
           enable_nvme_cache(engine.get());
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
-          if (!start_warm()) {
+          if (!start_warm(engine.get())) {
             engine_release();
             cudaFreeHost(pick_scratch);
             bus->stop();

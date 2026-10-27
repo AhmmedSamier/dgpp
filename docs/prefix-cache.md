@@ -256,8 +256,16 @@ attaches to, in memory and on disk: retention evicts unpinned entries first
 and a pinned one only when nothing unpinned is left, so an agent session's
 documents survive a burst of other work. The key does not change matching.
 
-**Restarts.** The slab is recreated at every start; entries are the
-process's and are not reused across restarts.
+**Restarts.** With `persist` (the default) the slab outlives the process:
+the token ids are written to the slab behind each blob, the page checksums
+and the index are kept beside it, under a directory named by the binding —
+the checkpoint, the deployment's effective settings and the slab geometry.
+A start under the same binding offers the previous index as a candidate;
+the ranks compare their candidates' digests at the warm handshake and adopt
+only when every rank holds the same one, else every slab starts fresh.
+Adopted entries are older than anything the new run makes, keep their pins,
+and restore exactly as before (`nvme_cache.adopted` in `/v1/metrics` counts
+them). A start under another binding, or with `persist` false, begins cold.
 
 **Sizing and checks.** `capacity_gib` must hold at least one entry at the
 request context limit plus its blob (startup prints the minimum) and must
