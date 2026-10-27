@@ -52,6 +52,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -423,6 +424,27 @@ class NvmeTier {
   }
 
   void open_slab() {
+    // Other ranks' slabs beside this one — a node that served another
+    // rank into the same directory, or a crash's leftovers — are nobody's
+    // to reclaim now; name them and their size so the operator can.
+    {
+      std::error_code ec;
+      const std::filesystem::path dir = std::filesystem::path(cfg_.slab_path).parent_path();
+      const std::string own = std::filesystem::path(cfg_.slab_path).filename().string();
+      size_t stale_bytes = 0;
+      std::string stale;
+      for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        const std::string name = entry.path().filename().string();
+        if (name == own || name.rfind("rank", 0) != 0 || entry.path().extension() != ".slab") continue;
+        if (!entry.is_regular_file(ec)) continue;
+        stale_bytes += static_cast<size_t>(entry.file_size(ec));
+        stale += (stale.empty() ? "" : ", ") + name;
+      }
+      if (!stale.empty())
+        DGPP_LOG_WARN("rank {}: NVMe cache: {} ({:.1f} GiB) beside {} belong to no running rank of this "
+                      "deployment — remove them to free the disk",
+                      cfg_.rank, stale, static_cast<double>(stale_bytes) / (1024.0 * 1024.0 * 1024.0), own);
+    }
     // Direct I/O first: the page cache would grow into the memory the
     // model plans on. A filesystem that refuses it (tmpfs, the tests) gets
     // buffered I/O, said out loud.
