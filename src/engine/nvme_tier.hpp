@@ -265,23 +265,30 @@ class NvmeTier {
     if (!active_ && !jobs_.empty()) start_job();
     if (!active_) return;
     Job& job = *active_;
-    // An op that outlives its expected time (a stuck write, a device that
-    // never signals): the scheduler holds the requests waiting on it and
-    // its deadlock diagnosis stands aside while ops pend, so the age is
-    // said out loud — at 30 s, then every minute.
-    const double age_s =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - job.started).count();
-    if (age_s >= job.next_age_note_s) {
-      DGPP_LOG_WARN("rank {}: NVMe cache {} op {} has run for {:.0f} s ({} of {} slices issued)", cfg_.rank,
-                    job.restore ? "restore" : "spill", job.op, age_s, job.next_slice, job.slices);
-      job.next_age_note_s = age_s + 60.0;
+    // An op that makes no progress (a stuck write, a device that never
+    // signals): the scheduler holds the requests waiting on it and its
+    // deadlock diagnosis stands aside while ops pend, so a stall is said
+    // out loud — 30 s without a slice issued or returned, then every
+    // minute. Age alone is not the signal: two slices move per tick, and
+    // a long prefill's ticks are chunk-long, so a 1.75 GiB spill beside a
+    // 31K-token prefill legitimately runs for half a minute.
+    const auto now = std::chrono::steady_clock::now();
+    const double stall_s = std::chrono::duration<double>(now - job.progressed).count();
+    if (stall_s >= job.next_stall_note_s) {
+      DGPP_LOG_WARN("rank {}: NVMe cache {} op {} has made no progress for {:.0f} s ({} of {} slices issued, "
+                    "{:.0f} s old)",
+                    cfg_.rank, job.restore ? "restore" : "spill", job.op, stall_s, job.next_slice, job.slices,
+                    std::chrono::duration<double>(now - job.started).count());
+      job.next_stall_note_s = stall_s + 60.0;
     }
+    bool progressed = false;
     // Slices whose device work landed (kDevice is the pump's own state to
     // set and clear, so the read needs no lock).
     for (Buffer& buf : buffers_) {
       if (buf.state != Buffer::kDevice) continue;
       const cudaError_t q = cudaEventQuery(buf.done);
       if (q == cudaErrorNotReady) continue;
+      progressed = true;
       if (q != cudaSuccess) {
         (void)cudaGetLastError();
         // The note is shared with the worker (it writes its own under the
@@ -307,6 +314,7 @@ class NvmeTier {
         if (buf.state == Buffer::kReady) ready.push_back(&buf);
     }
     for (Buffer* buf : ready) {
+      progressed = true;
       if (job.restore && !job.failed) {
         issue_restore_slice(job, *buf);
       } else {
@@ -321,6 +329,7 @@ class NvmeTier {
           std::lock_guard<std::mutex> lock(mutex_);
           if (buf.state != Buffer::kFree || job.next_slice >= job.slices) continue;
         }
+        progressed = true;
         if (job.restore) {
           std::lock_guard<std::mutex> lock(mutex_);
           buf.slice = job.next_slice++;
@@ -330,6 +339,10 @@ class NvmeTier {
           issue_spill_slice(job, buf, job.next_slice++);
         }
       }
+    }
+    if (progressed) {
+      job.progressed = now;
+      job.next_stall_note_s = 30.0;
     }
     // Done: every slice issued and every buffer back, or failed with the
     // buffers quiet (no device work in flight, no worker on them).
@@ -369,7 +382,8 @@ class NvmeTier {
     bool failed = false;
     std::string why;
     std::chrono::steady_clock::time_point started;
-    double next_age_note_s = 30.0;  // the next age the pump reports at
+    std::chrono::steady_clock::time_point progressed;  // the last slice issued or returned
+    double next_stall_note_s = 30.0;  // the next stall length the pump reports at
   };
   // A staging buffer's state machine. Spill: kFree -> kDevice (gather +
   // D2H on the model stream) -> kWorker (writing) -> kFree. Restore: kFree
@@ -479,6 +493,7 @@ class NvmeTier {
     job.slices = job.block_slices + (blob_pages_ + per_chunk_ - 1) / per_chunk_;
     job.next_slice = 0;
     job.started = std::chrono::steady_clock::now();
+    job.progressed = job.started;
   }
 
   void finish_job() {
