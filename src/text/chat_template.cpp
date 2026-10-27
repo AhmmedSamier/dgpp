@@ -1486,8 +1486,13 @@ struct Renderer {
       const size_t e = x.find_last_not_of(ws);
       return Value::string_value(x.substr(b, e - b + 1));
     }
-    if (name == "default") {  // undefined -> the default (boolean=false form)
-      if (args.size() != 1) fail(ctx_.line, "default: takes one argument");
+    if (name == "default") {  // undefined -> the default; the two-value
+                              // form (fallback, true) adds the truthiness
+                              // test — falsy wraps take the fallback too
+                              // (Dory's `content | default('', true)`).
+      if (args.empty() || args.size() > 2)
+        fail(ctx_.line, "default: takes one or two arguments");
+      if (args.size() == 2 && args[1].truthy() && !v.truthy()) return args[0];
       return v.is_defined() ? v : args[0];
     }
     if (name == "string") {  // str(x); strings stay themselves

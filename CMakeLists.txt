@@ -1025,6 +1025,16 @@ dgpp_set_common(chat_template_test)
 add_test(NAME chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_chat_template_goldens.jsonl)
 set_tests_properties(chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# The M6 tool-grammar regression harness (the templates' host machine over
+# the real Dory checkpoint, grammar spec included): the probe set behind
+# the serve-side list_mask hard failure of 2026-10-26.
+add_executable(dory_grammar_repro tests/host/dory_grammar_repro.cpp)
+target_include_directories(dory_grammar_repro PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dory_grammar_repro PRIVATE dgpp_models_glm Threads::Threads)
+dgpp_set_common(dory_grammar_repro)
+add_test(NAME dory_grammar_repro COMMAND dory_grammar_repro)
+set_tests_properties(dory_grammar_repro PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME qwen_chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen_chat_template_goldens.jsonl)
 set_tests_properties(qwen_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
