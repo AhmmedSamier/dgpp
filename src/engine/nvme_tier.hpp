@@ -73,17 +73,18 @@
 
 namespace dgpp {
 
+// The host and device bytes the tier allocates for a chunk size (the
+// memory plan): two device and two pinned staging buffers plus the
+// segment tables.
+inline size_t nvme_tier_staging_bytes(size_t chunk_bytes) { return 4 * chunk_bytes + (size_t{8} << 20); }
+
 template <class Model>
 class NvmeTier {
  public:
   using Config = sched::SchedulerEngine::DiskEnable;
   static constexpr size_t kAlign = 4096;
   static constexpr int kBuffers = 2;
-
-  // The host and device bytes the tier allocates for a chunk size (the
-  // memory plan): two device and two pinned staging buffers plus the
-  // segment tables.
-  static size_t staging_bytes(size_t chunk_bytes) { return 4 * chunk_bytes + (size_t{8} << 20); }
+  static size_t staging_bytes(size_t chunk_bytes) { return nvme_tier_staging_bytes(chunk_bytes); }
 
   NvmeTier(Model* model, PrefixArena<Model>* arena, const Config& cfg)
       : model_(model), arena_(arena), cfg_(cfg) {

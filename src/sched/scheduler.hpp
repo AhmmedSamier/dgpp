@@ -421,7 +421,9 @@ class SchedulerEngine {
   struct DiskEnable {
     std::string slab_path;        // this rank's slab file
     size_t capacity_bytes = 0;    // the slab's size (pages x page bytes below it)
-    size_t chunk_bytes = size_t{32} << 20;  // one staging buffer (two device + two pinned)
+    // One staging buffer (two device + two pinned): two slices of it move
+    // per tick, so 64 MiB is 128 MiB of cache state per tick.
+    size_t chunk_bytes = size_t{64} << 20;
     int64_t min_tokens = 0;
     int rank = 0;
   };
