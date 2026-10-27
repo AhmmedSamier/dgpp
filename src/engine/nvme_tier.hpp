@@ -213,6 +213,9 @@ class NvmeTier {
     const bool partial = bt > 0 && restore.position % bt != 0;
     if (partial != (restore.partial_page >= 0))
       throw std::invalid_argument("NvmeTier: the restore's partial page does not match the position");
+    // The pages first: a plan outside the slab is the scheduler's error and
+    // must not leave pool blocks taken.
+    check_pages(restore.blob_page, restore.pages, restore.partial_page);
     typename Model::SessionSnapshotMeta meta;
     meta.position = restore.position;
     meta.mtp_position = restore.mtp_position;
@@ -245,7 +248,6 @@ class NvmeTier {
       out.partial_identity = model_->cache_block_identity(b);
     }
     out.mtp_position = restore.mtp_position;
-    check_pages(job);
     // The slot owns the blocks from here: a release (a failed restore, an
     // eviction) returns them exactly as it returns a snapshot's.
     arena_->adopt(restore.slot, std::move(meta));
@@ -388,14 +390,23 @@ class NvmeTier {
     return out;
   }
 
-  void check_pages(const Job& job) const {
+  void check_pages(int64_t blob_page, const std::vector<int64_t>& pages, int64_t partial_page) const {
     const auto bad = [&](int64_t page) { return page < 0 || page >= pages_; };
-    if (bad(job.blob_page) || job.blob_page + blob_pages_ > pages_)
+    if (bad(blob_page) || blob_page + blob_pages_ > pages_)
       throw std::invalid_argument("NvmeTier: the blob's pages are outside the slab");
+    for (const int64_t page : pages)
+      if (page >= 0 && bad(page)) throw std::invalid_argument("NvmeTier: a block's page is outside the slab");
+    if (partial_page >= 0 && bad(partial_page))
+      throw std::invalid_argument("NvmeTier: the partial block's page is outside the slab");
+  }
+  void check_pages(const Job& job) const {
+    std::vector<int64_t> pages;
+    pages.reserve(job.blocks.size());
     for (const auto& [block, page] : job.blocks) {
       (void)block;
-      if (bad(page)) throw std::invalid_argument("NvmeTier: a block's page is outside the slab");
+      pages.push_back(page);
     }
+    check_pages(job.blob_page, pages, -1);
   }
 
   void open_slab() {
