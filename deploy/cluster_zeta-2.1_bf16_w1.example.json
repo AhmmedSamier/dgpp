@@ -5,7 +5,7 @@
     "max_concurrency": 2,
     "kv_capacity": 32768,
     "default_max_tokens": 1024,
-    "queue_limit": 4,
+    "queue_limit": 8,
     "max_connections": 64,
     "decode_graph": true,
     "mtp": false,
