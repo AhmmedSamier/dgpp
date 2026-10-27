@@ -30,7 +30,8 @@ std::string NvmeCachePlan::describe() const {
 }
 
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
-                              size_t blob_bytes, int64_t block_tokens, int64_t context_limit) {
+                              size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
+                              bool create_directory) {
   NvmeCachePlan plan;
   plan.directory = expand_home(path);
   plan.slab = plan.directory + "/rank" + std::to_string(rank) + ".slab";
@@ -47,20 +48,36 @@ NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int 
       block_tokens > 0 ? (context_limit + block_tokens - 1) / block_tokens : 0;
   plan.minimum_bytes = static_cast<size_t>(plan.blob_pages + blocks_at_limit) * plan.page_bytes;
   // The directory: made now, so the probe below measures the filesystem
-  // the slab lands on.
+  // the slab lands on — or, for a dry run, the nearest ancestor that
+  // exists (what mkdir -p would extend), left untouched.
+  std::string probe = plan.directory;
   std::error_code ec;
-  std::filesystem::create_directories(plan.directory, ec);
-  if (ec) {
-    plan.error = "nvme_cache.path " + plan.directory + " cannot be created: " + ec.message();
-    return plan;
+  if (create_directory) {
+    std::filesystem::create_directories(plan.directory, ec);
+    if (ec) {
+      plan.error = "nvme_cache.path " + plan.directory + " cannot be created: " + ec.message();
+      return plan;
+    }
+  } else {
+    std::filesystem::path p(plan.directory);
+    while (!p.empty() && !std::filesystem::is_directory(p, ec)) {
+      const std::filesystem::path parent = p.parent_path();
+      if (parent == p) break;
+      p = parent;
+    }
+    if (p.empty() || !std::filesystem::is_directory(p, ec)) {
+      plan.error = "nvme_cache.path " + plan.directory + ": no existing ancestor to probe";
+      return plan;
+    }
+    probe = p.string();
   }
-  if (::access(plan.directory.c_str(), W_OK | X_OK) != 0) {
-    plan.error = "nvme_cache.path " + plan.directory + " is not writable: " + std::strerror(errno);
+  if (::access(probe.c_str(), W_OK | X_OK) != 0) {
+    plan.error = "nvme_cache.path " + probe + " is not writable: " + std::strerror(errno);
     return plan;
   }
   struct statvfs vfs {};
-  if (::statvfs(plan.directory.c_str(), &vfs) != 0) {
-    plan.error = "nvme_cache.path " + plan.directory + ": statvfs failed: " + std::strerror(errno);
+  if (::statvfs(probe.c_str(), &vfs) != 0) {
+    plan.error = "nvme_cache.path " + probe + ": statvfs failed: " + std::strerror(errno);
     return plan;
   }
   plan.free_bytes = static_cast<size_t>(vfs.f_bavail) * static_cast<size_t>(vfs.f_frsize);

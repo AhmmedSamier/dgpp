@@ -32,10 +32,14 @@ constexpr size_t kNvmeCacheReserveBytes = size_t{1} << 30;
 // Plans the slab for a rank: `block_bytes` one cache block's bytes across
 // its planes (0: a family without a paged cache — blobs alone),
 // `blob_bytes` the snapshot size, `block_tokens` the pool's block (0: no
-// pool) and `context_limit` the longest request. Creates the directory
-// (mkdir -p) so the free-space probe sees the filesystem the slab will
-// live on. The plan's `error` names what to change when it does not fit.
+// pool) and `context_limit` the longest request. With `create_directory`
+// the directory is made (mkdir -p) so the free-space probe sees the
+// filesystem the slab will live on; without it (--memory-plan: a dry run
+// leaves no trace) the probe takes the nearest existing ancestor, which
+// is where mkdir -p would put it. The plan's `error` names what to change
+// when it does not fit.
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
-                              size_t blob_bytes, int64_t block_tokens, int64_t context_limit);
+                              size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
+                              bool create_directory = true);
 
 }  // namespace dgpp::serve

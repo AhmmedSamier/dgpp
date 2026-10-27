@@ -3349,7 +3349,8 @@ int main(int argc, char** argv) {
     if (nvme_cache) {
       nvme_plan = dgpp::serve::plan_nvme_cache(nvme_cache_path, nvme_cache_gib, rank,
                                                family->cache_block_bytes(world, mtp && graph_world),
-                                               snapshot_bytes, block_tokens, context_limit);
+                                               snapshot_bytes, block_tokens, context_limit,
+                                               /*create_directory=*/!memory_plan_only);
       DGPP_LOG_INFO("rank {}: {}", rank, nvme_plan.describe());
       if (!nvme_plan.error.empty()) {
         DGPP_LOG_ERROR("rank {}: the NVMe cache does not fit — {}", rank, nvme_plan.error);
