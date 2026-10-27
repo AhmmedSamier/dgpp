@@ -264,6 +264,17 @@ class NvmeTier {
     if (!active_ && !jobs_.empty()) start_job();
     if (!active_) return;
     Job& job = *active_;
+    // An op that outlives its expected time (a stuck write, a device that
+    // never signals): the scheduler holds the requests waiting on it and
+    // its deadlock diagnosis stands aside while ops pend, so the age is
+    // said out loud — at 30 s, then every minute.
+    const double age_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - job.started).count();
+    if (age_s >= job.next_age_note_s) {
+      DGPP_LOG_WARN("rank {}: NVMe cache {} op {} has run for {:.0f} s ({} of {} slices issued)", cfg_.rank,
+                    job.restore ? "restore" : "spill", job.op, age_s, job.next_slice, job.slices);
+      job.next_age_note_s = age_s + 60.0;
+    }
     // Slices whose device work landed (kDevice is the pump's own state to
     // set and clear, so the read needs no lock).
     for (Buffer& buf : buffers_) {
@@ -357,6 +368,7 @@ class NvmeTier {
     bool failed = false;
     std::string why;
     std::chrono::steady_clock::time_point started;
+    double next_age_note_s = 30.0;  // the next age the pump reports at
   };
   // A staging buffer's state machine. Spill: kFree -> kDevice (gather +
   // D2H on the model stream) -> kWorker (writing) -> kFree. Restore: kFree
