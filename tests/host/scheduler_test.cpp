@@ -3340,6 +3340,33 @@ DGPP_TEST(scheduler_nvmeCache_spillsAnEvictedEntryAndRestoresItForALaterRequest)
   require(m.disk_pages_used <= m.disk_pages_total, "within capacity");
 }
 
+DGPP_TEST(scheduler_prefixCache_promptCacheKeyPinsEntries) {
+  // A two-slot arena: a keyed request's entry outlives two unkeyed
+  // newcomers (LRU alone would have evicted it first), in memory and, with
+  // the tier on, in its spilled copy.
+  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
+  engine.set_prefix_arena(/*slots=*/2, /*align=*/4);
+  engine.set_disk(/*pages=*/64);
+  for (int i = 0; i < 4; ++i) engine.arm(0, {1}, 1);
+  Scheduler sched(&engine, {kEos});
+  auto keyed = make_cached_request("a", counted_prompt(21), {5, 13}, 1);
+  keyed.cache_key = "agent-7";
+  sched.submit(keyed);
+  settle(sched, engine);
+  require(sched.meters().prefix_pinned == 1 && sched.meters().disk_pinned == 1,
+          "the keyed request's entry is pinned in memory and on disk: " + engine.op_stream());
+  sched.submit(make_cached_request("b", counted_prompt(21, 300), {5, 13}, 1));
+  settle(sched, engine);
+  sched.submit(make_cached_request("c", counted_prompt(21, 600), {5, 13}, 1));
+  settle(sched, engine);
+  Scheduler::Meters m = sched.meters();
+  require(m.prefix_evictions == 1 && m.prefix_pinned == 1, "c evicted b, not the pinned entry");
+  sched.submit(make_cached_request("a2", counted_prompt(21), {5, 13}, 1));
+  settle(sched, engine);
+  m = sched.meters();
+  require(m.prefix_hits == 1 && m.prefix_tokens_saved == 12, "a's prompt attaches to the pinned entry at 12");
+}
+
 DGPP_TEST(scheduler_nvmeCache_restoreBeforeAChunkedPrefill) {
   // The chunked begin admits a long prompt without next_admissible (the
   // fabric smoke of 2026-10-27: a 25K-token document came back cold with

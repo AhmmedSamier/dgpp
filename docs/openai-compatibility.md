@@ -29,13 +29,22 @@ extensions. Model sampling defaults come from the checkpoint configuration.
 | Reasoning | `none/minimal/low/medium/high/xhigh/max` resolve through the model frontend into native effort and/or thinking switches. Unsupported settings and conflicting explicit switches return errors. `/v1/models` exposes `reasoning.effort_mapping`. `reasoning_content` and template switches are DGPP extensions. |
 | Request metadata | `store: false` (or omitted/null), text modality, bounded metadata, user and safety identifier accepted. Metadata is echoed on one-shot responses but not persisted. User/safety identifiers do not invoke an OpenAI safety or account service. `service_tier: auto/default` reports the actual `default` tier. |
 | Image inputs | GLM-5.3-Flash user messages accept `image_url` parts containing PNG/JPEG/WebP data URIs. `/v1/models` reports `input_modalities`. See [image inputs](vision.md) for budgets and caching behavior. |
-| Unsupported features | Stored-completion CRUD and `store: true`; remote image URLs, video/audio inputs and audio outputs; web search; predicted output; moderation configuration; explicit cache breakpoints/TTL/retention/key controls; verbosity; deprecated function-call API. Known unsupported API features return an error naming the field. |
+| Unsupported features | Stored-completion CRUD and `store: true`; remote image URLs, video/audio inputs and audio outputs; web search; predicted output; moderation configuration; explicit cache breakpoints/TTL/retention controls; verbosity; deprecated function-call API. Known unsupported API features return an error naming the field. |
 
 DGPP also accepts existing extensions: `top_k`, `min_p`,
 `repetition_penalty`, `prefix_cache`, `chat_template_kwargs`, object-valued
 historical tool arguments, flat function definitions, and template-specific
 tool output lists. These extensions should not be assumed portable to OpenAI.
 Historical function arguments must be valid JSON objects for DGPP's templates.
+
+Both completion endpoints accept `prompt_cache_key` (OpenAI's field, DGPP's
+semantics): a string of 1 to 256 bytes that pins the prefix-cache entries the
+request creates or attaches to — in memory and in the NVMe cache, unpinned
+entries are evicted first, and a pinned one only when nothing unpinned is
+left. The key is a priority, never a lookup key: matching stays by exact token
+prefix. Null is absent; other types return HTTP 400 naming the field.
+`prefix_cache.pinned` and `nvme_cache.pinned` in `/v1/metrics` count the
+pinned entries.
 
 Both completion endpoints accept the `ignore_eos` extension. It defaults to
 `false` and accepts only a boolean; explicit `null` and other non-boolean

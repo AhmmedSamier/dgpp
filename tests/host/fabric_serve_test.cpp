@@ -507,6 +507,7 @@ void test_journal_codec() {
     r.max_steps = 2;
     r.boundaries = {3, 6};
     r.no_cache = true;
+    r.cache_key = "agent-7";
     ev.submits.push_back(r);
     ev.has_prefix_digest = true;
     ev.prefix_digest = 18446744073709551557ull;  // above int64: the string form
@@ -515,12 +516,13 @@ void test_journal_codec() {
     const std::string line = dgpp::serve::encode_journal_tick(ev);
     require(line.find("\"b\":[3,6]") != std::string::npos &&
                 line.find("\"nc\":1") != std::string::npos &&
+                line.find("\"ck\":\"agent-7\"") != std::string::npos &&
                 line.find("\"pd\":\"18446744073709551557\"") != std::string::npos &&
                 line.find("\"od\":\"18446744073709551533\"") != std::string::npos,
             "codec: cache fields on the wire: " + line);
     const dgpp::serve::JournalRecord b2 = dgpp::serve::decode_journal_line(line);
     require(b2.submits.size() == 1 && b2.submits[0].boundaries == r.boundaries &&
-                b2.submits[0].no_cache && b2.has_prefix_digest &&
+                b2.submits[0].no_cache && b2.submits[0].cache_key == "agent-7" && b2.has_prefix_digest &&
                 b2.prefix_digest == ev.prefix_digest && b2.has_op_digest &&
                 b2.op_digest == ev.op_digest,
             "codec: cache fields round-trip");

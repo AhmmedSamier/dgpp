@@ -21,7 +21,8 @@ project procedures and design guidance live in `docs/`.
   free space (beside a 1 GiB reserve) and the minimum capacity (one entry
   at the context limit plus its blob) on every rank, `--memory-plan`
   included; `/v1/metrics` gains an `nvme_cache` block and the stats line an
-  `nvme cache` field. New gates: `scheduler_test`'s nvmeCache cases,
+  `nvme cache` field; a request's `prompt_cache_key` pins the entries it
+  creates or attaches to against eviction, in memory and on disk. New gates: `scheduler_test`'s nvmeCache cases,
   `unit_tests`' disk_cache cases, `fabric_serve_test`'s ok 10 (spill,
   evict, restore and attach across three ranks over real sockets) and
   `qwen_decode_test`'s tier block (bitwise spill/restore, attach parity,

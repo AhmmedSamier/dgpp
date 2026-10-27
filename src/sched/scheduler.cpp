@@ -1000,7 +1000,7 @@ void Scheduler::finish_prefill_snapshot(Request& r, int slot, int64_t position, 
   const int64_t next_token =
       prefix_info_.prefill_lookahead ? r.spec.prompt.at(static_cast<size_t>(position)) : -1;
   const int entry =
-      cache_.insert(r.spec.prompt.data(), position, slot, ticks_, r.cache_images, next_token);
+      cache_.insert(r.spec.prompt.data(), position, slot, ticks_, r.cache_images, next_token, r.spec.cache_key);
   if (entry < 0)
     free_arena_slot(slot);
   else {
@@ -1317,7 +1317,7 @@ void Scheduler::retire(int arrival, Result::Status status,
       if (gen > 0)
         ids.insert(ids.end(), r.generated.begin(), r.generated.begin() + gen);
       if (static_cast<int64_t>(ids.size()) == position) {
-        const int e = cache_.insert(ids.data(), position, slot, ticks_, r.cache_images);
+        const int e = cache_.insert(ids.data(), position, slot, ticks_, r.cache_images, -1, r.spec.cache_key);
         if (e >= 0) {
           kept = true;
           ++cache_.stats().close_entries;
@@ -1943,6 +1943,7 @@ Scheduler::Meters Scheduler::meters() const {
   m.prefix_skipped_image_bytes = cache_.stats().skipped_image_bytes;
   m.prefix_image_bytes = static_cast<int64_t>(cache_.image_bytes());
   m.prefix_blocks_pinned = cache_.blocks_pinned(prefix_info_.block_tokens);
+  m.prefix_pinned = cache_.pinned_entries();
   m.disk_enabled = disk_.enabled();
   if (disk_.enabled()) {
     const DiskCache::Stats& ds = disk_.stats();
@@ -1962,6 +1963,7 @@ Scheduler::Meters Scheduler::meters() const {
     m.disk_blocks_shared = ds.blocks_shared;
     m.disk_pending = static_cast<int64_t>(disk_ops_.size());
     m.disk_tokens_restored = ds.tokens_restored;
+    m.disk_pinned = disk_.pinned_entries();
   }
   return m;
 }
@@ -2182,7 +2184,7 @@ bool Scheduler::start_spill(int entry, const std::string& id) {
   const SchedulerEngine::DiskBlocks blocks = engine_->disk_entry_blocks(m.slot);
   const DiskCache::SpillPlan plan =
       disk_.begin_spill(m.ids.data(), m.position, m.next_token, m.images, blocks.mtp_position,
-                        blocks.identities, blocks.partial_identity, op, ticks_, entry);
+                        blocks.identities, blocks.partial_identity, op, ticks_, entry, m.key);
   for (const DiskCache::Evicted& v : plan.evicted) {
     if (v.memory >= 0) drop_disk_link(v.memory, v.entry);
     cache_.note(12, static_cast<uint64_t>(v.position), 0);
@@ -2317,7 +2319,7 @@ void Scheduler::apply_disk_commits(const std::vector<DiskCommit>& commits) {
       if (r.restore_op == o.op) r.restore_op = 0;
     if (c.ok) {
       const DiskCache::Entry& de = disk_.entry(o.disk_entry);
-      const int e = cache_.insert(de.ids.data(), de.position, o.slot, ticks_, de.images, de.next_token);
+      const int e = cache_.insert(de.ids.data(), de.position, o.slot, ticks_, de.images, de.next_token, de.key);
       if (e < 0) {
         // The memory index holds an identical entry already (a cold prefill
         // took it while the restore ran): the read copy is surplus.

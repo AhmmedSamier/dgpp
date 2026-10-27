@@ -251,6 +251,11 @@ verdict once every rank has reported — ok only when all succeeded. A
 failure on one rank is therefore the same cold miss everywhere, and the
 prefix digest the journal checks every tick covers the tier's decisions.
 
+**Pins.** A request's `prompt_cache_key` pins the entries it creates or
+attaches to, in memory and on disk: retention evicts unpinned entries first
+and a pinned one only when nothing unpinned is left, so an agent session's
+documents survive a burst of other work. The key does not change matching.
+
 **Restarts.** The slab is recreated at every start; entries are the
 process's and are not reused across restarts.
 

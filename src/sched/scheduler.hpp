@@ -536,6 +536,11 @@ struct SchedulerRequest {
   // the request out: no attach, no snapshot. Both ride the journal.
   std::vector<int64_t> boundaries;
   bool no_cache = false;
+  // prompt_cache_key: pins the prefix-cache entries this request creates
+  // or attaches to — memory and the NVMe tier evict unpinned entries
+  // first. A priority, never a lookup key (matching stays by exact token
+  // prefix). Rides the journal with the request.
+  std::string cache_key;
   // The logit bias: the request's entries, applied by the
   // engine on every rank; rides the journal.
   std::vector<LogitBias> logit_bias;
@@ -690,6 +695,7 @@ class Scheduler {
     int64_t prefix_skipped_image_bytes = 0;
     int64_t prefix_image_bytes = 0;
     int64_t prefix_blocks_pinned = 0;
+    int prefix_pinned = 0;       // entries a prompt_cache_key pins
     // The NVMe cold tier (issue #26): the slab's pages, the entries and
     // block records it holds, spills and restores begun / committed /
     // failed, spills skipped for room, disk evictions, the ops in flight
@@ -711,6 +717,7 @@ class Scheduler {
     int64_t disk_blocks_shared = 0;
     int64_t disk_pending = 0;
     int64_t disk_tokens_restored = 0;
+    int disk_pinned = 0;         // disk entries a prompt_cache_key pins
   };
 
   // `eos_token_ids` — the config's end-of-sequence set (empty disables

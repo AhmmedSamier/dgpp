@@ -139,6 +139,31 @@ DGPP_TEST(disk_cache_aborts_release_records_and_dedupes_identical_entries) {
   require(threw, "identities must cover every full block");
 }
 
+DGPP_TEST(disk_cache_retention_keeps_pinned_entries_past_unpinned_ones) {
+  // Two entries fit; the older one carries a prompt_cache_key. The third
+  // evicts the younger unpinned entry, not the pinned one; with only pinned
+  // entries left, the least recently used pinned one goes.
+  DiskCache d(config(/*pages=*/10));
+  const auto a = counted(12, 1000), b = counted(12, 2000), c = counted(12, 3000), e = counted(12, 4000);
+  auto plan = d.begin_spill(a.data(), 8, -1, {}, 0, identities(2, 100), 0, 1, 1, 0, "agent-7");
+  require(plan.ok, "a fits");
+  const int pinned = plan.entry;
+  d.commit_spill(pinned);
+  plan = d.begin_spill(b.data(), 8, -1, {}, 0, identities(2, 200), 0, 2, 2, 1);
+  require(plan.ok, "b fits");
+  d.commit_spill(plan.entry);
+  require(d.pinned_entries() == 1, "one pinned entry");
+  plan = d.begin_spill(c.data(), 8, -1, {}, 0, identities(2, 300), 0, 3, 3, 2, "agent-9");
+  require(plan.ok && plan.evicted.size() == 1 && plan.evicted[0].entry != pinned,
+          "the unpinned entry made room, the older pinned one stayed");
+  d.commit_spill(plan.entry);
+  require(d.entry(pinned).live && d.pinned_entries() == 2, "both pinned entries live");
+  plan = d.begin_spill(e.data(), 8, -1, {}, 0, identities(2, 400), 0, 4, 4, 3);
+  require(plan.ok && plan.evicted.size() == 1 && plan.evicted[0].entry == pinned,
+          "with every entry pinned, the least recently used pinned one goes");
+  d.commit_spill(plan.entry);
+}
+
 DGPP_TEST(disk_cache_retention_evicts_lru_within_the_capacity) {
   // 10 pages, 2 per blob: an entry of 2 blocks takes 4 pages, so two fit
   // and the third evicts the least recently used.

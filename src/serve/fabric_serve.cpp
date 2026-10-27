@@ -173,6 +173,10 @@ std::string encode_journal_tick(const GenerationService::PassEvents& events) {
         out += "]";
       }
       if (r.no_cache) out += ",\"nc\":1";
+      if (!r.cache_key.empty()) {
+        out += ",\"ck\":";
+        append_json_string(&out, r.cache_key);
+      }
       if (!r.images.empty()) {
         validate_image_inputs(r.images, r.prompt.size());
         out += ",\"images\":[";
@@ -1036,6 +1040,11 @@ JournalRecord decode_journal_line(std::string_view line) {
           throw std::runtime_error("journal: submit '" + r.id +
                                    "' has a bad no-cache flag");
         r.no_cache = nc->as_int() == 1;
+      }
+      if (const dgpp::minijson::Value* ck = item.find("ck")) {
+        if (!ck->is_string() || ck->as_string().empty())
+          throw std::runtime_error("journal: submit '" + r.id + "' has a bad cache key");
+        r.cache_key = std::string(ck->as_string());
       }
 
       if (const auto* images = item.find("images")) {

@@ -51,6 +51,7 @@ class DiskCache {
     int memory = -1;           // the PrefixCache entry holding it, or -1
     uint64_t last_use = 0;
     bool live = false;
+    std::string key;           // prompt_cache_key: evicted only after every unpinned entry
   };
   struct Block {
     int64_t page = -1;
@@ -103,6 +104,7 @@ class DiskCache {
   const Stats& stats() const { return stats_; }
   Stats& stats() { return stats_; }
   int live_entries() const;
+  int pinned_entries() const;  // live entries with a key
   int64_t pages_used() const { return used_pages_; }
   int64_t pages_total() const { return cfg_.pages; }
   int64_t live_blocks() const;
@@ -131,7 +133,7 @@ class DiskCache {
   SpillPlan begin_spill(const int64_t* ids, int64_t position, int64_t next_token,
                         const PrefixCache::Images& images, int64_t mtp_position,
                         const std::vector<uint64_t>& identities, uint64_t partial_identity,
-                        uint64_t op, uint64_t now, int memory_entry);
+                        uint64_t op, uint64_t now, int memory_entry, const std::string& key = "");
   void commit_spill(int entry);
   void abort_spill(int entry);
 
@@ -166,6 +168,7 @@ class DiskCache {
   int64_t take_run(int64_t n);
   void give_run(int64_t start, int64_t n);
   int find_block(uint64_t identity) const;
+  int lru_victim() const;
   int new_block(int64_t page, uint64_t identity);
   void release_block(int block);
   void kill_entry(int entry);

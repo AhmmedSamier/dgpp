@@ -35,6 +35,12 @@ int DiskCache::live_entries() const {
   return n;
 }
 
+int DiskCache::pinned_entries() const {
+  int n = 0;
+  for (const Entry& e : entries_) n += e.live && !e.key.empty() ? 1 : 0;
+  return n;
+}
+
 int64_t DiskCache::live_blocks() const {
   int64_t n = 0;
   for (const Block& b : blocks_) n += b.live ? 1 : 0;
@@ -181,6 +187,7 @@ void DiskCache::kill_entry(int entry) {
   e.partial = -1;
   e.blob_page = -1;
   e.memory = -1;
+  e.key.clear();
   std::vector<int64_t>().swap(e.ids);
   PrefixCache::Images().swap(e.images);
 }
@@ -191,7 +198,7 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
                                             const PrefixCache::Images& images, int64_t mtp_position,
                                             const std::vector<uint64_t>& identities,
                                             uint64_t partial_identity, uint64_t op, uint64_t now,
-                                            int memory_entry) {
+                                            int memory_entry, const std::string& key) {
   SpillPlan plan;
   if (!enabled()) return plan;
   if (position <= 0) throw std::invalid_argument("DiskCache: empty entry");
@@ -240,13 +247,7 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
     Evicted victim;
     int memory = -1;
     // The victim's position is read before the eviction kills the record.
-    int candidate = -1;
-    for (size_t i = 0; i < entries_.size(); ++i) {
-      const Entry& e = entries_[i];
-      if (!e.live || e.state != State::kResident) continue;
-      if (candidate < 0 || e.last_use < entries_[static_cast<size_t>(candidate)].last_use)
-        candidate = static_cast<int>(i);
-    }
+    const int candidate = lru_victim();
     if (candidate < 0) {
       undo_shares();
       ++stats_.spill_skipped;
@@ -271,6 +272,7 @@ DiskCache::SpillPlan DiskCache::begin_spill(const int64_t* ids, int64_t position
   e.memory = memory_entry;
   e.last_use = now;
   e.live = true;
+  e.key = key;
   plan.pages.assign(static_cast<size_t>(n_full), -1);
   for (int64_t i = 0; i < n_full; ++i) {
     const int b = shared[static_cast<size_t>(i)];
@@ -397,14 +399,27 @@ void DiskCache::touch(int entry, uint64_t now) {
   if (e.live) e.last_use = now;
 }
 
-int DiskCache::evict_lru(int* memory) {
+int DiskCache::lru_victim() const {
+  // The least recently used resident unpinned entry; a pinned one only
+  // when every resident entry is pinned.
   int victim = -1;
   for (size_t i = 0; i < entries_.size(); ++i) {
     const Entry& e = entries_[i];
     if (!e.live || e.state != State::kResident) continue;
-    if (victim < 0 || e.last_use < entries_[static_cast<size_t>(victim)].last_use)
+    if (victim < 0) {
+      victim = static_cast<int>(i);
+      continue;
+    }
+    const Entry& v = entries_[static_cast<size_t>(victim)];
+    const bool pinned = !e.key.empty(), victim_pinned = !v.key.empty();
+    if ((victim_pinned && !pinned) || (pinned == victim_pinned && e.last_use < v.last_use))
       victim = static_cast<int>(i);
   }
+  return victim;
+}
+
+int DiskCache::evict_lru(int* memory) {
+  const int victim = lru_victim();
   if (memory != nullptr) *memory = victim < 0 ? -1 : entries_[static_cast<size_t>(victim)].memory;
   if (victim < 0) return -1;
   ++stats_.evictions;

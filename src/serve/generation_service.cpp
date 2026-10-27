@@ -2060,7 +2060,7 @@ bool GenerationService::validate_chat_parameters(const minijson::Value& body, Pr
   const std::unordered_set<std::string> unsupported = {
       "web_search_options", "functions", "function_call", "prompt_cache_options"};
   const std::unordered_set<std::string> nullable_unsupported = {
-      "audio", "prediction", "moderation", "prompt_cache_key", "prompt_cache_retention", "verbosity"};
+      "audio", "prediction", "moderation", "prompt_cache_retention", "verbosity"};
   std::unordered_set<std::string> seen;
   for (const auto& m : body.members()) {
     if (!seen.insert(m.key).second) return refuse(m.key, "duplicate request parameter", "invalid_parameter");
@@ -2240,6 +2240,22 @@ void GenerationService::prepare_chat_completions(const HttpRequest& req,
       return;
     }
     prefix_cache = pcv->as_bool(true);
+  }
+  // prompt_cache_key (OpenAI's field, our semantics): a string that pins
+  // the prefix-cache entries this request creates or attaches to — memory
+  // and the NVMe tier keep them past unpinned entries under pressure. A
+  // pin is a priority, never a lookup key: matching stays by exact token
+  // prefix. Null is absent.
+  std::string prompt_cache_key;
+  if (const dgpp::minijson::Value* ckv = body.find("prompt_cache_key")) {
+    if (!ckv->is_null()) {
+      if (!ckv->is_string() || ckv->as_string().empty() || ckv->as_string().size() > 256) {
+        respond_error(w, 400, "prompt_cache_key must be a string of 1 to 256 bytes", "invalid_request_error",
+                      "prompt_cache_key");
+        return;
+      }
+      prompt_cache_key = std::string(ckv->as_string());
+    }
   }
 
   // Sampling: the spec over the model's defaults (M6 6b). temperature 0
@@ -2422,6 +2438,7 @@ void GenerationService::prepare_chat_completions(const HttpRequest& req,
     sr.id = record->sched_id;
     sr.boundaries = boundaries;
     sr.no_cache = !prefix_cache;
+    sr.cache_key = prompt_cache_key;
     sr.images = images;
     sr.prompt = prompt;
     sr.max_steps = steps;
@@ -2504,6 +2521,22 @@ void GenerationService::prepare_completions(const HttpRequest& req,
       return;
     }
     prefix_cache = pcv->as_bool(true);
+  }
+  // prompt_cache_key (OpenAI's field, our semantics): a string that pins
+  // the prefix-cache entries this request creates or attaches to — memory
+  // and the NVMe tier keep them past unpinned entries under pressure. A
+  // pin is a priority, never a lookup key: matching stays by exact token
+  // prefix. Null is absent.
+  std::string prompt_cache_key;
+  if (const dgpp::minijson::Value* ckv = body.find("prompt_cache_key")) {
+    if (!ckv->is_null()) {
+      if (!ckv->is_string() || ckv->as_string().empty() || ckv->as_string().size() > 256) {
+        respond_error(w, 400, "prompt_cache_key must be a string of 1 to 256 bytes", "invalid_request_error",
+                      "prompt_cache_key");
+        return;
+      }
+      prompt_cache_key = std::string(ckv->as_string());
+    }
   }
 
   sample::Params sampling;
@@ -2599,6 +2632,7 @@ void GenerationService::prepare_completions(const HttpRequest& req,
   sr.id = record->id;
   sr.boundaries = prompt_boundaries(ids);
   sr.no_cache = !prefix_cache;
+  sr.cache_key = prompt_cache_key;
   sr.prompt = std::move(ids);
   sr.max_steps = steps;
   sr.ignore_eos = ignore_eos;
@@ -2874,6 +2908,7 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.gauge("dgpp_prefix_cache_slots", "Prefix-cache snapshot slots (0: off).", int64_t{m.prefix_slots});
   out.gauge("dgpp_prefix_cache_entries", "Live prefix-cache entries.", int64_t{m.prefix_entries});
   out.gauge("dgpp_prefix_cache_blocks_pinned", "K/V pool blocks the entries pin.", m.prefix_blocks_pinned);
+  out.gauge("dgpp_prefix_cache_pinned", "Entries a prompt_cache_key pins against eviction.", static_cast<int64_t>(m.prefix_pinned));
   out.gauge("dgpp_prefix_cache_snapshot_bytes", "Bytes per arena snapshot.", pe.snapshot_bytes);
   out.counter("dgpp_prefix_cache_hits_total", "Admissions that attached to an entry.", m.prefix_hits);
   out.counter("dgpp_prefix_cache_misses_total", "Admissions that found no entry.", m.prefix_misses);
@@ -3172,6 +3207,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.prefix_image_bytes);
   out.append(",\"blocks_pinned\":");
   append_json_int(&out, m.prefix_blocks_pinned);
+  out.append(",\"pinned\":");
+  append_json_int(&out, m.prefix_pinned);
   out.append(",\"snapshot_bytes\":");
   append_json_int(&out, pe.snapshot_bytes);
   out.append(",\"arena_snapshots\":");
@@ -3223,6 +3260,8 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   append_json_int(&out, m.disk_restore_failed);
   out.append(",\"tokens_restored\":");
   append_json_int(&out, m.disk_tokens_restored);
+  out.append(",\"pinned\":");
+  append_json_int(&out, m.disk_pinned);
   out.append(",\"blocks_shared\":");
   append_json_int(&out, m.disk_blocks_shared);
   out.append(",\"evictions\":");

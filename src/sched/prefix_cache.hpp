@@ -51,6 +51,9 @@ class PrefixCache {
     // busy entry is never evicted (its slot and blocks are being copied).
     int disk = -1;
     bool busy = false;
+    // prompt_cache_key: a pinned entry gives way only when no unpinned
+    // entry can (the request's, or the first keyed attach's).
+    std::string key;
   };
   struct Stats {
     int64_t hits = 0;
@@ -159,10 +162,12 @@ class PrefixCache {
   // or -1 when an identical entry is live or pixel storage is full (the caller keeps the slot out
   // of the entry and gives it back).
   int insert(const int64_t* ids, int64_t position, int slot, uint64_t now,
-             const Images& images = {}, int64_t next_token = -1);
+             const Images& images = {}, int64_t next_token = -1, const std::string& key = "");
   const Entry& entry(int index) const { return entries_.at(static_cast<size_t>(index)); }
   int size() const { return static_cast<int>(entries_.size()); }  // records, live or dead
-  void attach(int index, uint64_t now);
+  // `key` (prompt_cache_key) pins the entry when it carries none yet.
+  void attach(int index, uint64_t now, const std::string& key = "");
+  int pinned_entries() const;  // live entries with a key
   void detach(int index);
   // Refreshes an entry's LRU stamp without a decision (no stats, no digest).
   void touch(int index, uint64_t now);
