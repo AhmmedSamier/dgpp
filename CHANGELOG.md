@@ -4,6 +4,34 @@ The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
 ## Unreleased
+- **NVMe cold tier for the prefix cache** (2026-10-27, issue #26, PR #53): the
+  top-level `nvme_cache` deployment key (`enabled`, `path`, `capacity_gib`,
+  `min_tokens`) keeps entries the snapshot arena evicts — the snapshot blob
+  and every KV block it pins — in one preallocated slab file per rank on
+  local NVMe, and restores an entry before a later matching request
+  prefills its suffix. Blocks shared by a document and its attached
+  variants are stored once; retention is least-recently-used within the
+  configured capacity; every page carries a CRC-32C; the device side of
+  every slice runs on the model stream from the engine thread (two 64 MiB
+  slices per tick), the file side on a worker. Spills and restores
+  are scheduler decisions on every rank and their outcomes ride the
+  journal (a new return path from the peers, the tick record's `dk`
+  commits), so a failure on any rank is the same cold miss everywhere and
+  the prefix digest covers the tier. Startup checks the directory, the
+  free space (beside a 1 GiB reserve) and the minimum capacity (one entry
+  at the context limit plus its blob) on every rank, `--memory-plan`
+  included; `/v1/metrics` gains an `nvme_cache` block and the stats line an
+  `nvme cache` field. New gates: `scheduler_test`'s nvmeCache cases,
+  `unit_tests`' disk_cache cases, `fabric_serve_test`'s ok 10 (spill,
+  evict, restore and attach across three ranks over real sockets) and
+  `qwen_decode_test`'s tier block (bitwise spill/restore, attach parity,
+  corruption detected); validated on four Sparks with GLM-5.3-Flash (a
+  25K-token document restored in 407 ms to first token against 18.8 s
+  cold, identical transcripts, op streams identical across ranks, decode
+  at 34 ms/step through the spills) and
+  on one Spark with Qwen3.8-Flash-Next. Documented in the
+  [configuration reference](docs/configuration.md#nvme-cache) and the
+  [prefix-cache guide](docs/prefix-cache.md#the-nvme-cold-tier).
 - **DFlash2 integration fixes** (2026-10-25): the shared drafter follows
   the active eager/capture reducer, copies complete draft KV blocks during
   prefix reuse, and arms sampled proposal distributions on Flash-Next.

@@ -18,6 +18,7 @@ Restart the deployment after changing either file.
 | Accept larger file uploads or keep them across restarts | [File inputs](#file-inputs) |
 | Serve longer prompts or more simultaneous requests | [Request capacity and memory](#request-capacity-and-memory) |
 | Reuse work from earlier prompts | [Prefix caching](#prefix-caching) |
+| Keep evicted prefix entries on local NVMe | [NVMe cache](#nvme-cache) |
 | Balance prompt processing against smooth streaming | [Prefill scheduling](#prefill-scheduling) |
 | Change model storage, precision or generation speed | [Execution and performance](#execution-and-performance) |
 | Extend a supported Qwen model's context limit | [Extended context](#extended-context) |
@@ -226,6 +227,32 @@ Its memory budget is separate from the KV token pool.
 
 See [prefix caching](prefix-cache.md#the-entry-floor-and-the-head-cut) for how
 snapshot positions and reuse work.
+
+### NVMe cache
+
+The `nvme_cache` block is a top-level deployment key beside `engine`. It keeps
+prefix-cache entries that memory evicts — the snapshot and the KV blocks it
+pins — in one preallocated slab file per rank on local NVMe, and restores an
+entry before a later matching request prefills its suffix. Startup checks the
+directory, the free space and the minimum size on every rank and refuses to
+boot when they do not fit; `dgpp-serve --memory-plan` runs the same check.
+See [the cold tier](prefix-cache.md#the-nvme-cold-tier) for what is stored,
+how much a token takes and how retention works.
+
+```json
+"nvme_cache": {
+  "enabled": true,
+  "path": "~/dgpp/nvme-cache",
+  "capacity_gib": 64
+}
+```
+
+| Key | What it controls and what to expect | Default |
+|---|---|---|
+| `nvme_cache.enabled` | Turns the cold tier on. Requires `engine.prefix_cache_gib` above 0 (the tier holds what the arena evicts) and a positive `capacity_gib`. Rank 0's value is applied on every rank. | false |
+| `nvme_cache.path` | Directory for the slab file, created at startup if missing; each rank writes `rank<N>.slab` under it on its own node, so choose a directory on every node's local NVMe. The slab is recreated at every start (entries are not reused across restarts), and a slab left behind by a crash or an earlier path is reclaimed only when a rank reopens that same file. | `~/dgpp/nvme-cache` |
+| `nvme_cache.capacity_gib` | Size of each rank's slab in GiB. Retention evicts the least recently used entries so the slab never grows past it. Must hold at least one entry at the request context limit plus its snapshot (startup names the number) and must fit the filesystem's free space beside a 1 GiB reserve. Every rank runs rank 0's value. | 0 |
+| `nvme_cache.min_tokens` | The shortest entry worth keeping cold, in prompt tokens; shorter entries stay memory-only. `0` keeps every entry memory keeps, which `engine.prefix_min_tokens` already floors. | 0 |
 
 ## Prefill scheduling
 

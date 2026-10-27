@@ -185,6 +185,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dense_mma_bf16w.cu
   src/kernels/dense_fp4_decode.cu
   src/kernels/l2_prefetch.cu
+  src/kernels/segment_copy.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/moe_w4a4.cu
@@ -262,6 +263,7 @@ target_link_libraries(dgpp_text PUBLIC dgpp_loaders dgpp_pcre2)
 dgpp_set_common(dgpp_text)
 
 add_library(dgpp_sched STATIC
+  src/sched/disk_cache.cpp
   src/sched/prefix_cache.cpp
   src/sched/scheduler.cpp)
 target_link_libraries(dgpp_sched PUBLIC dgpp_text dgpp_core)
@@ -929,6 +931,7 @@ endif()
 
 enable_testing()
 add_executable(unit_tests
+  tests/unit/disk_cache_test.cpp
   tests/unit/image_inputs_test.cpp
   tests/unit/file_inputs_test.cpp
   tests/unit/log_test.cpp
@@ -1122,6 +1125,7 @@ add_library(dgpp_serve STATIC
   src/serve/qwen_vision_frontend.cpp
   src/serve/file_inputs.cpp
   src/serve/cluster_config.cpp
+  src/serve/nvme_cache_check.cpp
   src/serve/http_server.cpp
   src/serve/generation_service.cpp
   src/serve/fabric_serve.cpp

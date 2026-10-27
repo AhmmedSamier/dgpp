@@ -55,7 +55,11 @@ never its own template: `--dflash-model DIR_OR_ID` selects the drafter on a
 template that names MTP (it takes the MTP draft's settings back to their
 defaults unless the command line names them) and `--no-dflash` runs plain,
 so one model, quant and world has one file however many worlds it serves.
-The shapes
+The long-context templates also carry a top-level `nvme_cache` block, off by
+default: set `enabled` to true and size `capacity_gib` to the node's free
+NVMe to keep evicted prefix entries on disk (the
+[configuration reference](../docs/configuration.md#nvme-cache) lists the
+keys; startup checks the space). The shapes
 a template does not name are knobs appended at boot:
 `scripts/dgpp-cluster up --config FILE --knobs "FLAGS"`.
 

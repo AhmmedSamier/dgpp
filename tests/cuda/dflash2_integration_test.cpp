@@ -1,6 +1,8 @@
 // Shared drafter lifecycle: prefix snapshots and eager/recorded reducer changes.
 #include <algorithm>
 #include <barrier>
+#include <chrono>
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -10,6 +12,7 @@
 
 #include "common/test.hpp"
 #include "engine/graph_engine.hpp"
+#include "engine/nvme_tier.hpp"
 #include "engine/prefix_arena.hpp"
 #include "engine/tp_bus.hpp"
 #include "models/qwen/forward.hpp"
@@ -205,7 +208,10 @@ auto check_graph(Factory make, uint16_t port, bool sampled = false, bool screene
           }
           if (step == 3) {
             engine.close(0);
-            live.erase(live.begin());  // scalar replay after fixed-batch replays
+            // Scalar replay after fixed-batch replays. A copy, not erase():
+            // GCC 13's -Warray-bounds misreads the erase's move once the
+            // TU's inlining changes (a one-element vector's end pointer).
+            live = std::vector<int>(live.begin() + 1, live.end());
           }
         }
         for (int req : live) engine.close(req);
@@ -248,8 +254,87 @@ auto qwen35_factory() {
 }
 }  // namespace
 
+// The NVMe cold tier's round trip (issue #26) over a drafter world: the
+// snapshot's blocks carry the drafter's K/V context on the shared table, so
+// the planes the tier lists must include the draft's — a restored entry
+// that attached with stale draft context would still verify exactly and
+// collapse the acceptance with no diagnostic.
+template <class Model, class Factory>
+void check_prefix_tier(Factory make, const char* tag) {
+  auto model = make(nullptr, 0, 1);
+  dgpp::PrefixArena<Model> arena(model.get(), 2);
+  model->session_prefill(0, prompt(40, 1));
+  model->session_prefill(1, prompt(80, 4));
+  const auto peer = context(*model, 0), original = context(*model, 1);
+  arena.snapshot(1, 0, 80);
+  model->session_close(1);
+  const int64_t blocks_before = model->kv_blocks_in_use();
+  const std::string slab_dir =
+      (std::filesystem::temp_directory_path() / ("dgpp_dflash2_tier_" + std::string(tag))).string();
+  std::filesystem::create_directories(slab_dir);
+  dgpp::sched::SchedulerEngine::DiskEnable en;
+  en.slab_path = slab_dir + "/rank0.slab";
+  en.capacity_bytes = size_t{64} << 20;
+  en.chunk_bytes = size_t{1} << 20;
+  en.rank = 0;
+  auto tier = std::make_unique<dgpp::NvmeTier<Model>>(model.get(), &arena, en);
+  const std::vector<dgpp::CachePlane> planes = model->cache_planes();
+  require(tier->block_bytes() == dgpp::cache_block_bytes(planes), "tier: the record is the planes' bytes");
+  const auto draft0 = draft_plane(*model, 0);
+  bool draft_listed = false;
+  for (const dgpp::CachePlane& pl : planes)
+    draft_listed = draft_listed || pl.base == reinterpret_cast<const uint8_t*>(draft0.k_cache);
+  require(draft_listed, "tier: the planes omit the drafter's K/V context");
+  const auto wait = [&](uint64_t op) {
+    for (int i = 0; i < 2000; ++i) {
+      tier->pump();
+      for (const auto& c : tier->poll())
+        if (c.op == op) return c.ok;
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    throw std::runtime_error("tier: op " + std::to_string(op) + " never completed");
+  };
+  // 80 tokens in 64-token blocks: one full block, one partial copy.
+  const dgpp::sched::SchedulerEngine::DiskBlocks ids = tier->entry_blocks(0);
+  require(ids.identities.size() == 1 && ids.partial_identity != 0, "tier: the entry is one full block and a partial");
+  dgpp::sched::SchedulerEngine::DiskSpill spill;
+  spill.op = 1;
+  spill.slot = 0;
+  spill.blob_page = 0;
+  spill.pages = {tier->blob_pages()};
+  spill.partial_page = tier->blob_pages() + 1;
+  tier->spill_begin(spill);
+  require(wait(1), "tier: the spill completed");
+  dgpp::sched::SchedulerEngine::DiskRestore rs;
+  rs.op = 2;
+  rs.slot = 1;
+  rs.position = 80;
+  rs.mtp_position = arena.meta(0).mtp_position;
+  rs.blob_page = 0;
+  rs.pages = {tier->blob_pages()};
+  rs.partial_page = tier->blob_pages() + 1;
+  (void)tier->restore_begin(rs);
+  require(wait(2), "tier: the restore completed");
+  require(model->kv_blocks_in_use() == blocks_before + 2, "tier: the restore took two fresh blocks");
+  // Attached from the restored slot: the draft context is the cold prefix's.
+  arena.attach(1, 1);
+  require(context(*model, 1) == original, "tier: the restored draft context differs from the cold prefix");
+  require(context(*model, 0) == peer, "tier: the restore overwrote a neighboring request's draft context");
+  std::vector<int32_t> drafts;
+  require(model->dflash2_draft(1, 7, &drafts) && drafts.size() == 7, "tier: the restored prefix cannot draft");
+  model->session_close(0);
+  model->session_close(1);
+  arena.release(0);
+  arena.release(1);
+  tier.reset();
+  require(model->kv_blocks_in_use() == 0, "tier: the round trip leaked blocks");
+  std::filesystem::remove_all(slab_dir);
+}
+
 DGPP_TEST(dflash2_flash_next_prefix_snapshot) { check_prefix<dgpp::QwenModel>(flash_factory()); }
+DGPP_TEST(dflash2_flash_next_prefix_tier) { check_prefix_tier<dgpp::QwenModel>(flash_factory(), "flash"); }
 DGPP_TEST(dflash2_qwen35_prefix_snapshot) { check_prefix<dgpp::Qwen35Model>(qwen35_factory()); }
+DGPP_TEST(dflash2_qwen35_prefix_tier) { check_prefix_tier<dgpp::Qwen35Model>(qwen35_factory(), "qwen35"); }
 DGPP_TEST(dflash2_flash_next_graph_reducer_tp) { check_graph<dgpp::QwenModel>(flash_factory(), 29978); }
 DGPP_TEST(dflash2_qwen35_graph_reducer_tp) { check_graph<dgpp::Qwen35Model>(qwen35_factory(), 29979); }
 DGPP_TEST(dflash2_flash_next_sampled_graph_tp) { check_graph<dgpp::QwenModel>(flash_factory(), 29978, true); }
