@@ -249,7 +249,7 @@ struct ServeGraphEngine {
   // The scheduled verify depth (engine/verify_schedule.hpp), before the
   // warm capture; throws for a family without a confidence head.
   virtual void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth, float base_ms,
-                                         bool adapt) = 0;
+                                         bool adapt, int max_options) = 0;
   // The sampled requests' draft rule (engine.mtp_draft), before the warm capture.
   virtual void set_proposal_drafts(bool on) = 0;
   // engine.mtp_draft_temperature: the drawn drafts' temperature as a fraction of the request's.
@@ -276,8 +276,8 @@ struct ServeGraphEngineOf final : ServeGraphEngine {
   dgpp::sched::SchedulerEngine* engine() override { return &eng; }
   void warm_captures(const std::vector<int64_t>& p) override { eng.warm_captures(p); }
   void configure_verify_schedule(bool on, float row_ms, float lambda, int min_depth, float base_ms,
-                                 bool adapt) override {
-    eng.configure_verify_schedule(on, row_ms, lambda, min_depth, base_ms, adapt);
+                                 bool adapt, int max_options) override {
+    eng.configure_verify_schedule(on, row_ms, lambda, min_depth, base_ms, adapt, max_options);
   }
   void set_proposal_drafts(bool on) override { eng.set_proposal_drafts(on); }
   void set_proposal_temperature_scale(float scale) override { eng.set_proposal_temperature_scale(scale); }
@@ -355,6 +355,13 @@ struct ServeFamily {
     if (!dir.empty())
       throw std::invalid_argument(std::string(name()) + ": no block drafter (dflash_model) support");
   }
+  // Whether this family records the block drafter's draft inside the decode
+  // graph step (the session_graph_capture_block_draft pair the graph engine
+  // duck-types). A family that takes a drafter but not the capture would
+  // replay a step that records no draft at all: the verify stays exact and the
+  // acceptance collapses with no diagnostic, so the combination is refused at
+  // startup instead. Opt-in: the capture is what earns the flag.
+  virtual bool block_draft_graph_ok() const { return false; }
 };
 
 // GLM-5.3-Flash: the DSA pool's block and pool-id geometry, the latent
@@ -440,6 +447,7 @@ struct GlmFamily final : ServeFamily {
 struct QwenFamily final : ServeFamily {
   dgpp::QwenTextConfig cfg;
   std::string ckpt;
+  std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
   std::unique_ptr<dgpp::QwenModel> model;
   bool fp8_head_mma;
   dgpp::LatentFormat kv_format;
@@ -522,9 +530,10 @@ struct QwenFamily final : ServeFamily {
   }
   dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
                         bool mtp, int decode_rows) const override {
-    return dgpp::QwenModel::plan_memory(cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
-                                        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
-                                        slots, fabric && mtp, decode_rows, /*serving_logits=*/true, kv_format);
+    return dgpp::QwenModel::plan_memory(
+        cfg, forward_rows, context, fabric ? rank : 0, fabric ? world_ : 1,
+        fabric || !dflash.empty() ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
+        slots, fabric && mtp, decode_rows, /*serving_logits=*/true, kv_format, dflash);
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::QwenModel::session_snapshot_bytes(cfg, world_, mtp);
@@ -536,19 +545,23 @@ struct QwenFamily final : ServeFamily {
     dgpp::QwenLayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
     model = std::make_unique<dgpp::QwenModel>(
         cfg, ckpt, forward_rows, pool_tokens,
-        fabric ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming, reducer,
+        fabric || !dflash.empty() ? dgpp::QwenResidency::Resident : dgpp::QwenResidency::Streaming,
+        reducer,
         fabric ? rank : 0, fabric ? world_ : 1, slots, fabric && mtp, decode_rows, fp8_head_mma,
-        /*serving_logits=*/true, kv_format);
-    if (fabric) {
-      // Eager parallel layer load (opt-in via DGPP_PRELOAD_THREADS, parsed
-      // by dgpp::loader_preload_threads; unset/<= 1 keeps the lazy
-      // behavior): materialize the stack now instead of faulting it in
-      // layer by layer during the graph warmup. Each worker holds one
-      // pinned staging mirror (~2.4 GiB transient) beside the weights.
-      const int preload_threads = dgpp::loader_preload_threads();
-      if (preload_threads > 1) model->preload_resident_layers(preload_threads);
-    }
+        /*serving_logits=*/true, kv_format, dflash);
+    // Opt-in eager parallel layer load (DGPP_PRELOAD_THREADS): no-op unless
+    // resident (fabric resident, or dflash data-parallel resident). Each
+    // worker holds one pinned staging mirror (~2.4 GiB transient) beside
+    // the weights.
+    if (const int preload_threads = dgpp::loader_preload_threads(); preload_threads > 1)
+      model->preload_resident_layers(preload_threads);
   }
+  // The drafter (2026-10-20 port of the Qwen35 DFlash2 walk): its recorded
+  // block draft (session_graph_capture_block_draft/_batch, mirrors and the
+  // capture-aware folds) re-hosted in commit 40da8852..0fae644e, so the
+  // decode graph records it (block_draft_graph_ok).
+  void set_draft_model(const std::string& dir) override { dflash = dir; }
+  bool block_draft_graph_ok() const override { return true; }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
   std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
@@ -1157,6 +1170,11 @@ struct Qwen35Family final : ServeFamily {
       model->preload_resident_layers(preload_threads);
   }
   void set_draft_model(const std::string& dir) override { dflash = dir; }
+  // The block draft records in this family's capture (the
+  // session_graph_capture_block_draft pair, the graph worlds since 2026-10-04,
+  // for both the DFlash2 and the DFlash v1 drafter), so the decode graph is a
+  // legal drafter world here.
+  bool block_draft_graph_ok() const override { return true; }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
   std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
@@ -1622,7 +1640,10 @@ int main(int argc, char** argv) {
       "    [--mtp-depth N]  draft tokens per step (1..5; the verify runs 1+N rows)\n"
       "    [--prefill-fp8-per-tensor]  Qwen3.8-27B: prefill GEMMs on cuBLASLt's per-tensor e4m3 kernels\n"
       "      (engine.prefill_fp8_per_tensor; ~2x the prefill rate, +23 GiB, changes greedy output)\n"
-      "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint (replaces --mtp; past world 1 on the decode graph)\n"
+      "    [--dflash-model DIR_OR_ID]  DFlash2 block drafter checkpoint: the drafter's world. It\n"
+      "      replaces the MTP draft on an MTP template (the draft's own settings go with the switch\n"
+      "      unless named; --mtp beside it is a contradiction and refused); past world 1 it runs on\n"
+      "      the decode graph\n"
       "    [--no-dflash]  run plain from a drafter template on the decode graph (the A/B knob; add --mtp for the MTP world)\n"
       "    [--no-dflash-verify-graph]  the multi-slot verify as an eager batch (engine.dflash_verify_graph)\n"
       "    [--no-prefill-group]  one cold prompt per prefill walk (engine.prefill_group false)\n"
@@ -1772,13 +1793,15 @@ int main(int argc, char** argv) {
   bool no_eos = false, decode_graph = false, mtp = false;
   int mtp_depth = 1;  // draft tokens per step (needs --mtp; 1..5)
   bool no_mtp_cli = false, mtp_depth_cli = false, mtp_schedule_cli = false;  // given on the command line
-  bool no_dflash_cli = false;
+  bool no_dflash_cli = false, dflash_model_cli = false, mtp_cli = false;
+  bool lookup_draft_cli = false, lookup_tail_cli = false, draft_head_cli = false;
   bool mtp_depth_explicit = false;  // named by the flag or the file (else the family's default)
   bool mtp_schedule = false;  // the confidence-scheduled verify depth (needs --mtp)
   double mtp_schedule_row_ms = 8.0;
   double mtp_schedule_base_ms = 28.0;
   double mtp_schedule_lambda = 0.0;  // 0: the reservation rate 1 / (base + row)
   int mtp_schedule_min_depth = 1;
+  int mtp_schedule_options = 0;  // engine.mtp_schedule_options: at most this many scheduled depths (0: the budget's count)
   bool mtp_schedule_adapt = true;  // lambda follows the modeled throughput (floored at the configured lambda)
   double mtp_schedule_sampled_scale = 0.93;  // engine.mtp_schedule_sampled_scale
   std::string mtp_draft = "auto";  // engine.mtp_draft: auto | sampled | greedy
@@ -1907,6 +1930,7 @@ int main(int argc, char** argv) {
     mtp_schedule_base_ms = e.mtp_schedule_base_ms;
     mtp_schedule_lambda = e.mtp_schedule_lambda;
     mtp_schedule_min_depth = e.mtp_schedule_min_depth;
+    mtp_schedule_options = e.mtp_schedule_options;
     mtp_schedule_adapt = e.mtp_schedule_adapt;
     mtp_schedule_sampled_scale = e.mtp_schedule_sampled_scale;
     mtp_draft = e.mtp_draft;
@@ -1991,8 +2015,10 @@ int main(int argc, char** argv) {
     else if (a == "--dense-weights") dense_weights = next();
     else if (a == "--fp8-head")
       fp8_head = next();
-    else if (a == "--draft-head") draft_head = next();
-    else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
+    else if (a == "--draft-head") {
+      draft_head = next();
+      draft_head_cli = true;
+    } else if (a == "--draft-head-blocks") draft_head_blocks = std::stoi(next());
     else if (a == "--mtp-expert-format") mtp_expert_format = next();
     else if (a == "--bf16-weights") bf16_weights = next();
     else if (a == "--draft-vocab") draft_vocab = next();
@@ -2019,15 +2045,20 @@ int main(int argc, char** argv) {
     else if (a == "--decode-graph") decode_graph = true;
     else if (a == "--graph-batch-min-live")
       graph_batch_min_live = std::stoi(next());
-    else if (a == "--mtp") mtp = true;
-    else if (a == "--dflash-model") dflash_model = next();
-    else if (a == "--no-dflash") {
+    else if (a == "--mtp") {
+      mtp = true;
+      mtp_cli = true;
+    } else if (a == "--dflash-model") {
+      dflash_model = next();
+      dflash_model_cli = true;
+    } else if (a == "--no-dflash") {
       // The plain world from a drafter template (the A/B knob): the drafter
       // runs on the eager engine, whose plain world without a drafter would
       // stream its layers (0.65 tok/s measured), so the knob lands on the
       // decode graph — the same resident plain world the MTP templates'
       // --no-mtp gives; --mtp [--mtp-depth N] beside it is the MTP world.
       dflash_model.clear();
+      dflash_model_cli = false;  // --no-dflash wins a --dflash-model on the same line
       decode_graph = true;
       no_dflash_cli = true;
     }
@@ -2065,6 +2096,7 @@ int main(int argc, char** argv) {
     else if (a == "--mtp-schedule-base-ms") mtp_schedule_base_ms = std::stod(next());
     else if (a == "--mtp-schedule-lambda") mtp_schedule_lambda = std::stod(next());
     else if (a == "--mtp-schedule-min-depth") mtp_schedule_min_depth = std::stoi(next());
+    else if (a == "--mtp-schedule-options") mtp_schedule_options = std::stoi(next());
     else if (a == "--mtp-schedule-adapt") mtp_schedule_adapt = true;
     else if (a == "--mtp-schedule-fixed-lambda") mtp_schedule_adapt = false;
     else if (a == "--mtp-schedule-sampled-scale") mtp_schedule_sampled_scale = std::stod(next());
@@ -2072,13 +2104,19 @@ int main(int argc, char** argv) {
     else if (a == "--mtp-draft-temperature") mtp_draft_temperature = std::stod(next());
     else if (a == "--mtp-verify") mtp_verify = next();
     else if (a == "--dflash-batch-rows") dflash_batch_rows = std::stoi(next());
-    else if (a == "--lookup-draft") lookup_draft = true;
-    else if (a == "--no-lookup-draft") lookup_draft = false;
-    else if (a == "--lookup-nmin") lookup_nmin = std::stoi(next());
+    else if (a == "--lookup-draft") {
+      lookup_draft = true;
+      lookup_draft_cli = true;
+    } else if (a == "--no-lookup-draft") {
+      lookup_draft = false;
+      lookup_draft_cli = true;
+    } else if (a == "--lookup-nmin") lookup_nmin = std::stoi(next());
     else if (a == "--lookup-nstrong") lookup_nstrong = std::stoi(next());
     else if (a == "--lookup-agree") lookup_agree = std::stoi(next());
-    else if (a == "--lookup-tail") lookup_tail = std::stoi(next());
-    else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
+    else if (a == "--lookup-tail") {
+      lookup_tail = std::stoi(next());
+      lookup_tail_cli = true;
+    } else if (a == "--sampling-candidates") sampling_candidates = std::stoi(next());
     else if (a == "--prefix-cache-gib") prefix_cache_gib = std::stod(next());
     else if (a == "--no-prefix-cache") prefix_cache_gib = 0.0;
     else if (a == "--admission") admission_mode = next();
@@ -2181,8 +2219,34 @@ int main(int argc, char** argv) {
   // schedule and its cost model are the drafter's — the plain world, and
   // the MTP world beside it (--mtp --mtp-depth N), run without it unless
   // the command line asked for it.
-  if (no_dflash_cli && !mtp_schedule_cli) mtp_schedule = false;
-  // The DFlash2 block drafter (models/qwen/dflash2.hpp): a standalone
+  if (no_dflash_cli) {
+    // An explicit disable wins regardless of the order of the CLI flags.
+    dflash_model.clear();
+    dflash_model_cli = false;
+    if (!mtp_schedule_cli) mtp_schedule = false;
+  }
+  // --dflash-model on the command line replaces the template's MTP world, as
+  // its usage has claimed since the drafter landed (until 2026-10-24 the flag
+  // only worked on a template that already set mtp false; on an MTP template
+  // it tripped the "not both" refusal below, which is why RadixArk NVFP4
+  // carried a second drafter template instead of a knob). The MTP group is the
+  // draft it replaces, so it goes with the switch the way --no-mtp's does: the
+  // depth, the schedule, the lookup drafts and the tail (the block drafter
+  // refuses a tail outright, engine/graph_engine.hpp), and the screened head
+  // — unless the command line named them. So an MTP template plus the flag is
+  // the drafter world the standalone template carried, setting for setting.
+  if (dflash_model_cli && !dflash_model.empty() && !mtp_cli) {
+    mtp = false;
+    if (!mtp_depth_cli) {
+      mtp_depth = 1;
+      mtp_depth_explicit = false;
+    }
+    if (!mtp_schedule_cli) mtp_schedule = false;
+    if (!lookup_draft_cli) lookup_draft = false;
+    if (!lookup_tail_cli) lookup_tail = 0;
+    if (!draft_head_cli) draft_head = "exact";
+  }
+  // The DFlash2 block drafter (models/dflash2/drafter.hpp): a standalone
   // checkpoint (a directory or a cached HF id) that replaces the MTP
   // draft. World 1 without the decode graph is the eager engine's drafter
   // (the batched verify graph, the stacked redrafts); the graph worlds —
@@ -2251,7 +2315,7 @@ int main(int argc, char** argv) {
         "model={} world={} fabric={} journal={} conc={} kv={} kvdt={} pfattn={} dcattn={} ngt={} dw={} mtpef={} bfw={} "
         "fp8head={} dh={} dhb={} mtph={} attw={} itopk={} ctb={} cbs={} pf={} pfd={} pfo={} pfw={} dcw={} ctr={} pdl={} "
         "emsh={} maxtok={} queue={} "
-        "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} "
+        "eos={} graph={} compact={} mtp={} mtpd={} mss={} msrow={} msbase={} mslam={} msmin={} msopt={} "
         "msad={} msss={} mdr={} mdt={} mvf={} dbr={} "
         "batchmin={} cand={} "
         "pcgib={} adm={} win={} pfbudget={} pfidle={} gapms={} ttftms={} pfhr={} pfgrow={} pfrec={} pfstart={} pfifloor={} pfearly={} pmin={} phead={} pace={} inflight={} "
@@ -2265,7 +2329,7 @@ int main(int argc, char** argv) {
         prefill_fold_overlap ? 1 : 0, prefill_window, decode_window, collective_transport, decode_pdl ? 1 : 0, embed_sharding,
         default_max_tokens, queue_limit, no_eos ? 0 : 1, decode_graph ? 1 : 0,
         compact_batches ? 1 : 0, mtp ? 1 : 0, mtp_depth, mtp_schedule ? 1 : 0, mtp_schedule_row_ms,
-        mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth,
+        mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_options,
         mtp_schedule_adapt ? 1 : 0, mtp_schedule_sampled_scale, mtp_draft, mtp_draft_temperature,
         mtp_verify, dflash_batch_rows, effective_batch_min_live,
         sampling_candidates, prefix_cache_gib,
@@ -2366,6 +2430,7 @@ int main(int argc, char** argv) {
         ws.mtp_schedule_base_ms = mtp_schedule_base_ms;
         ws.mtp_schedule_lambda = mtp_schedule_lambda;
         ws.mtp_schedule_min_depth = mtp_schedule_min_depth;
+        ws.mtp_schedule_options = mtp_schedule_options;
         ws.mtp_schedule_adapt = mtp_schedule_adapt;
         ws.mtp_schedule_sampled_scale = mtp_schedule_sampled_scale;
         ws.mtp_draft = mtp_draft;
@@ -2475,6 +2540,7 @@ int main(int argc, char** argv) {
         mtp_schedule_base_ms = ws.mtp_schedule_base_ms;
         mtp_schedule_lambda = ws.mtp_schedule_lambda;
         mtp_schedule_min_depth = ws.mtp_schedule_min_depth;
+        mtp_schedule_options = ws.mtp_schedule_options;
         mtp_schedule_adapt = ws.mtp_schedule_adapt;
         mtp_schedule_sampled_scale = ws.mtp_schedule_sampled_scale;
         mtp_draft = ws.mtp_draft;
@@ -2703,11 +2769,13 @@ int main(int argc, char** argv) {
     return 2;
   }
   dgpp::Qwen35Model::set_dflash2_weights_fp8(dflash_weights == "fp8");
+  dgpp::QwenModel::set_dflash2_weights_fp8(dflash_weights == "fp8");
   if (dflash_depth < 0 || dflash_depth > 7) {
     DGPP_LOG_ERROR("engine.dflash_depth (--dflash-depth) must be in [0, 7], got {}", dflash_depth);
     return 2;
   }
   dgpp::Qwen35Model::set_dflash_options(dflash_verify_graph, dflash_draft_batch, dflash_depth);
+  dgpp::QwenModel::set_dflash_options(dflash_verify_graph, dflash_draft_batch, dflash_depth);
   if (prefill_fp8_per_tensor)
     DGPP_LOG_INFO("serve: engine.prefill_fp8_per_tensor on — prefill GEMMs on per-tensor e4m3 (not transcript-preserving)");
   dgpp::QwenLayerStream::set_ngram_prestage(ngram_prestage);
@@ -2828,9 +2896,10 @@ int main(int argc, char** argv) {
   // config is read (the graph engine's configure_verify_schedule refuses a
   // min_depth past it).
   if (mtp_schedule && (!(mtp_schedule_row_ms > 0.0) || mtp_schedule_base_ms < 0.0 || mtp_schedule_lambda < 0.0 ||
-                       mtp_schedule_min_depth < 1 || (dflash_model.empty() && mtp_schedule_min_depth > mtp_depth))) {
-    DGPP_LOG_ERROR("--mtp-schedule: row_ms > 0, base_ms >= 0, lambda >= 0 and min_depth in [1, the draft width] (got {}, {}, {}, {})",
-                   mtp_schedule_row_ms, mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth);
+                       mtp_schedule_min_depth < 1 || (dflash_model.empty() && mtp_schedule_min_depth > mtp_depth) ||
+                       mtp_schedule_options < 0 || mtp_schedule_options > 6)) {
+    DGPP_LOG_ERROR("--mtp-schedule: row_ms > 0, base_ms >= 0, lambda >= 0, min_depth in [1, the draft width] and options in [0, 6] (got {}, {}, {}, {}, {})",
+                   mtp_schedule_row_ms, mtp_schedule_base_ms, mtp_schedule_lambda, mtp_schedule_min_depth, mtp_schedule_options);
     return 2;
   }
   if (!(mtp_schedule_sampled_scale >= 0.0 && mtp_schedule_sampled_scale <= 1.0)) {
@@ -2920,6 +2989,13 @@ int main(int argc, char** argv) {
         family->set_draft_model(dflash_dir);
       } catch (const std::exception& e) {
         DGPP_LOG_ERROR("{}", e.what());
+        return 2;
+      }
+      if (decode_graph && !family->block_draft_graph_ok()) {
+        DGPP_LOG_ERROR(
+            "engine.dflash_model on {} runs the eager engine: set engine.decode_graph false "
+            "(the recorded block draft is not ported to this family)",
+            family->name());
         return 2;
       }
     }
@@ -3494,7 +3570,8 @@ int main(int argc, char** argv) {
             graph_engine->set_sampled_schedule_scale(static_cast<float>(mtp_schedule_sampled_scale));
             graph_engine->configure_verify_schedule(true, static_cast<float>(mtp_schedule_row_ms), lambda,
                                                     mtp_schedule_min_depth,
-                                                    static_cast<float>(mtp_schedule_base_ms), mtp_schedule_adapt);
+                                                    static_cast<float>(mtp_schedule_base_ms), mtp_schedule_adapt,
+                                                    mtp_schedule_options);
           }
           // Record every graph variant now, on every rank at this same
           // point, so no capture pauses a live stream later. The warm-up

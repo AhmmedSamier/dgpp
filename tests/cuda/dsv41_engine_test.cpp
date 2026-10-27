@@ -571,7 +571,7 @@ void rank_work_sched(int r, const Dsv41TextConfig& cfg, const std::string& dir, 
 }
 
 // Six request slots at depth 4 (30 rows, the family's 32-row cap since
-// 2026-09-14; the vLLM recipe's six-stream shape): every slot batched in
+// 2026-09-14; the six-stream serving shape): every slot batched in
 // the 6-slot family under the scheduled depth (forced per-slot depths so
 // the reduced batch variants replay), every transcript the plain eager
 // engine's, both ranks identical.
@@ -604,9 +604,11 @@ void rank_work_wide(int r, const Dsv41TextConfig& cfg, const std::string& dir,
     // decode rows into short prefills (glm53-sixteen-row trap 1), so an
     // oracle at the default rows would prefill these prompts on another
     // kernel and diverge at near-ties.
-    Dsv41Model eager(cfg, dir, kMaxTokens, cache, Dsv41Residency::Resident, &reducer, r, kWorld, slots, /*mtp=*/false,
+    // The forward's rows hold the decode batch (sixteen slots x 5 = 80 > kMaxTokens).
+    const int max_tokens = std::max(kMaxTokens, decode_rows);
+    Dsv41Model eager(cfg, dir, max_tokens, cache, Dsv41Residency::Resident, &reducer, r, kWorld, slots, /*mtp=*/false,
                      decode_rows);
-    Dsv41Model mtp(cfg, dir, kMaxTokens, cache, Dsv41Residency::Resident, &reducer, r, kWorld,
+    Dsv41Model mtp(cfg, dir, max_tokens, cache, Dsv41Residency::Resident, &reducer, r, kWorld,
                    slots,
                    /*mtp=*/true, decode_rows, /*serving_logits=*/true);
     require(mtp.max_decode_rows() == decode_rows, "the model takes the slots x 5 decode batch");
@@ -806,6 +808,12 @@ DGPP_TEST(dsv41_engines_loopback_world_2_six_slots_at_depth_4_batched_scheduled_
 // (2026-10-23) — the same gates as the six-slot world at its widest.
 DGPP_TEST(dsv41_engines_loopback_world_2_twelve_slots_at_depth_4_batched_scheduled_is_exact) {
   check_wide_world(kPort + 12, 12);  // 29973: the dsv41 TP test holds kPort + 5
+}
+// Sixteen slots x depth 4 = 80 rows: the family's 96-row decode batch
+// (2026-10-23 pm; the cap left 64 for sixteen five-row draft blocks) —
+// the long expert runs cut into 64-row groups, the capped family unused.
+DGPP_TEST(dsv41_engines_loopback_world_2_sixteen_slots_at_depth_4_batched_scheduled_is_exact) {
+  check_wide_world(kPort + 13, 16);  // 29974
 }
 
 DGPP_TEST(dsv41_engines_loopback_world_2_graph_matches_eager) {

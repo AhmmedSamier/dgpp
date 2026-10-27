@@ -18,7 +18,7 @@ change again, keep each row's recorded configuration with its numbers.
 
 | Measurement set | Date (UTC) | Source revision | Scope |
 |---|---|---|---|
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 2026-10-23 | `a24e05b5` plus the EXL3 port working tree (binary `6f8bccfa5b70efef`) | The EXL3 3.5 bpw template as shipped on four nodes after the day's parity program — twelve slots on the family's 64-row decode batch, the balanced expert slices, the fused split reduce, the deep slot ring, the expert-run slot form, the 128-row dense tile, a 4,096-token first prefill chunk — every row from one `serve_campaign.py run` (with the five DSpark mode boots: plain and fixed depths 1/2/3/5 through `--no-mtp-schedule`): five classes at C1/C2/C4/C8, three cold probes each at 512/2K/8K/32K, the context matrix to 512K, the 300-item quality set, the API, greedy-transcript and isolation checks, every rank at zero swap, zero cached tokens in the 12 cold probes, matching operation streams in 7/7 launches. The morning's six-slot campaign on the same day's first binary (`c7efb833f88a06e3`) is superseded by this row set; the [model card](model_cards/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw.md) keeps both beside the release's |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 2026-10-23 | `b423d5db` plus the day's second program in the working tree (binary `9a179b15a6de02fa`) | The EXL3 3.5 bpw template as shipped on four nodes after the day's second program — sixteen slots on the family's 96-row decode batch (the morning's twelve on 64), the balanced expert slices, the fused split reduce, the deep slot ring, the 128-row dense tile, a 4,096-token first prefill chunk, the expert-run slot form with its 64-row run groups, the attention split groups merged in L2, the tiled router and mHC dots from sixteen rows, the tensor-core GEMV's one split chain to 128 rows, the verify schedule's row and base costs measured on the pack (2.95 / 19.9 ms) and the five-draft DSpark block under the schedule's three options (1, 3, 5; `engine.mtp_depth` 5, `engine.mtp_schedule_options` 3) — in one `serve_campaign.py run` on 2026-10-24 00:06–00:54 UTC (with the five DSpark mode boots: plain and fixed depths 1/2/3/5 through `--no-mtp-schedule`): five classes at C1/C2/C4/C8, three cold probes each at 512/2K/8K/32K, the context matrix to 512K, the 300-item quality set, the API, greedy-transcript and isolation checks, every rank at zero swap, zero cached tokens in the 12 cold probes, matching operation streams in 7/7 launches. The day's earlier campaigns (six slots on `c7efb833f88a06e3`, twelve on `dde85abfaa953cc1` and `6f8bccfa5b70efef`, sixteen at depth 4 on `9a179b15a6de02fa`) are superseded by this row set; the [model card](model_cards/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw.md) keeps them beside the release's |
 | Flint FP8/NVFP4 | 2026-10-22 | `b3f9b538` (binary `15ac3372bb2e3230`) | The three templates as shipped (one, two and four nodes), every row from one `serve_campaign.py run` per template: C1/C2/C4/C8, twelve cold prefill probes, the context matrix to the 262,144 positional ceiling, the 300-item quality set with the first use of the retry beyond the cap, the API, greedy-transcript and isolation checks; every rank at zero swap, zero cached tokens in the cold probes, matching operation streams; the resident image cache off (boot path only). An earlier run of the one-node template on `4709d8d6` exposed the model-opened `<think>` defect fixed in `b3f9b538` and is not tabled |
 | Qwen3.8-Flash-Next FP4-Local | 2026-10-21 | `7c3086939006` (binary `c8f6aaf59ce5d08a`); HumanEval scorer `9b7439b5` | The one-node template as shipped, all inference from one `serve_campaign.py run`: C1/C2/C4/C8, twelve cold prefill probes, context through 512K, 164 HumanEval / 300 GSM8K / 100 extraction cases, API and transcript checks. Saved HumanEval answers were re-scored after fixing supplied-context handling; answers and inference are unchanged. Both boots had zero swap and matching operation streams. |
 | DeepSeek-V4.1-Flash-1017 | 2026-10-20 | `283a52f7` (binary `f4e9e9cdb16acf86`) | The 1017 template as shipped on four nodes, every row from one `serve_campaign.py run` (with the five DSpark mode boots: plain and fixed depths 1/2/3/5 through `--no-mtp-schedule`): five classes at C1/C2/C4/C8, three cold probes each at 512/2K/8K/32K, the context matrix to 512K, the 300-item quality set, the API, greedy-transcript and isolation checks, every rank at zero swap, zero cached tokens in the 12 cold probes, matching operation streams. The six-slot template's C8 cell is six live requests and two queued, with a three-repeat spread the [model card](model_cards/DeepSeek-V4.1-Flash-1017.md) measures ("The six-slot template at C6 and C8"); the 2026-10-19 rows (`0d69d565`, binary `9350b38a1e5b4908`) and the `engine.index_topk` 2048 set are priced in the model card, not tabled here |
@@ -120,7 +120,7 @@ underlying quadratic cold-prefill work remains (see the
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 42.1–77.9 | — | — | — | 1.483 / 5.037 / 19.869 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 41.8–78.2 | — | — | — | 1.472 / 4.946 / 19.545 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 53.5–89.4 | 75.5–121.9 | 94.7–130.3 | 83.8–139.0 | 1.006 / 2.638 / 10.024 |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 70.6–119.3 | 96.7–170.3 | 126.4–183.7 | 167.7–224.0 | 1.166 / 3.398 / 13.326 |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 70.1–134.2 | 95.7–182.4 | 127.8–206.6 | 165.0–247.7 | 1.188 / 3.446 / 13.331 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 40.8–73.6 | — | — | — | 2.006 / 7.586 / 36.786 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 65.7–128.2 | — | — | — | 1.309 / 5.226 / 27.327 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 43.4–49.0 | — | — | — | 1.567 / 5.512 / 25.825 |
@@ -171,7 +171,7 @@ Request wall throughput, the service-level view: total completed output over the
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 40.9–73.2 | 62.9–102.0 | 79.1–109.3 | 66.8–95.3 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 40.8–73.7 | 62.4–102.2 | 78.8–111.2 | 67.1–97.9 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 52.0–84.6 | 73.4–115.8 | 92.2–125.2 | 81.7–132.7 |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 68.1–111.1 | 93.5–159.5 | 122.8–174.7 | 162.7–214.1 |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 67.6–124.3 | 92.9–170.4 | 124.3–195.6 | 160.3–235.8 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 39.5–68.6 | 54.0–93.0 | 68.2–101.4 | 65.7–97.3 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 63.1–117.2 | 89.8–157.7 | 120.9–169.3 | 109.5–158.0 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 41.5–46.2 | 57.0–63.6 | 75.1–84.7 | 74.4–83.2 |
@@ -270,7 +270,7 @@ a row exactly.
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 6 | 131,072 | FP4 blocks / FP8 window | 14 | 0 / 0 | DSpark adaptive ≤4 | — |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 6 | 1,048,576 | FP4 blocks / FP8 window | 14 | 0 / 0 | DSpark adaptive ≤4 | — |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 6 | 1,048,576 | FP4 blocks / FP8 window | 14 | adaptive (default) | DSpark adaptive ≤4 | [JSON](../deploy/cluster_deepseek-v4.1-flash-1017_mxfp4-fp8_w4.example.json) |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 12 | 1,048,576 | FP4 blocks / FP8 window | 14 | adaptive (default) | DSpark adaptive ≤4 | [JSON](../deploy/cluster_deepseek-v4.1-flash-1017_exl3-3.5bpw_w4.example.json) |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 16 | 1,048,576 | FP4 blocks / FP8 window | 14 | adaptive (default) | DSpark adaptive ≤5 | [JSON](../deploy/cluster_deepseek-v4.1-flash-1017_exl3-3.5bpw_w4.example.json) |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 4 | 1,048,576 | BF16 (quantized values) | 8 | 256 / 4,096 | DSpark adaptive ≤5 | — |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 6 | 1,048,576 | BF16 (quantized values) | 14 | 256 / 4,096 | DSpark adaptive ≤5 | — |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 4 | 131,072 | bf16 | 1.5 | 0 / 0 | MTP1 | — |
@@ -379,7 +379,7 @@ Engine tokens/s, greedy; median of three repetitions.
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 42.1 | 64.9 | 77.9 | 62.8 | 46.4 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 41.8 | 65.0 | 78.2 | 62.9 | 46.2 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 53.5 | 80.0 | 89.4 | 87.5 | 55.0 |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 70.6 | 96.2 | 119.3 | 111.3 | 70.9 |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 70.7 | 92.0 | 134.2 | 111.4 | 70.1 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 40.8 | 62.1 | 73.6 | 58.8 | 43.8 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 65.7 | 114.5 | 128.2 | 94.8 | 70.8 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 43.5 | 46.2 | 49.0 | 46.3 | 43.4 |
@@ -446,7 +446,7 @@ C1 engine tokens/s; each range spans the five class medians. **MTP1**, **MTP2** 
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | DSpark adaptive ≤4 | 31.8–32.1 | 39.4–47.5 | 43.0–61.4 | 40.3–70.1 | 34.2–84.9 | 42.1–77.9 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | DSpark adaptive ≤4 | 31.3–32.2 | 39.1–47.1 | 43.0–61.7 | 40.2–69.9 | 35.1–85.0 | 41.8–78.2 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | DSpark adaptive ≤4 | 41.7–41.9 | 50.2–59.5 | 50.1–76.5 | 47.8–82.6 | 39.6–96.7 | 53.5–89.4 |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | DSpark adaptive ≤4 | 52.9–53.1 | 65.0–75.9 | 71.2–100.6 | 66.8–107.6 | 57.2–129.8 | 70.6–119.3 |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | DSpark adaptive ≤5 | 52.6–53.0 | 65.0–76.6 | 69.2–99.3 | 67.0–110.9 | 58.3–135.1 | 70.1–134.2 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | DSpark adaptive ≤5 | 29.6–29.8 | 37.5–43.5 | 40.6–56.8 | 39.3–64.0 | 33.1–75.8 | 40.8–73.6 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | DSpark adaptive ≤5 | 43.6–44.0 | 59.4–69.2 | 64.5–88.3 | 63.3–106.0 | 57.2–128.7 | 65.7–128.2 |
 
@@ -498,7 +498,7 @@ These are the original campaigns' quality results, retained separately from the 
 | GLM-5.3 Mixed346 H32 A8 g128 | 4 | 272K FP8 KV | 157/164 | 291/300 | 100/100 | 0 | 0 |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 160/164 | 296/300 | 100/100 | 0 | 0 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 157/164 | 295/300 | 100/100 | 4 | — |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 159/164 | 293/300 | 100/100 | 6 | 6 (5 pass) |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 160/164 | 295/300 | 100/100 | 6 | 5 (3 pass) |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 141/164 | 295/300 | 100/100 | 0 | 0 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 139/164 | 296/300 | 100/100 | 0 | 0 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 154/164 | 295/300 | 100/100 | 0 | 0 |
@@ -579,7 +579,7 @@ DeepSeek-V4's strict HumanEval scores count responses with unclosed code fences 
 | GLM-5.3 int4/int8 | 4 | 208K FP8 KV | 3/3 | 5/5 classes | identical |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 5/5 | 5/5 classes | identical |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 9/9 | 5/5 classes | identical |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 9/9 | 5/5 classes | identical |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 9/9 | 5/5 classes | identical |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 6/6 | 5/5 classes | identical |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 6/6 | 5/5 classes | identical |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 3/3 | 5/5 classes | identical |
@@ -690,7 +690,7 @@ The original matrix refresh fixed the three bottlenecks below. The completion ca
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 131,072 | 19.131 | 51.99 | 61.3 | 53.67 | 55.2 | 53.88 | 51.4 | 56.32 | 50.3 | Limit | Limit | Limit | Limit |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 1,048,576 | 18.712 | 50.91 | 57.6 | 53.27 | 54.4 | 54.96 | 51.6 | 56.26 | 49.3 | 59.85 | 46.3 | 66.60 | 44.0 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 1,048,576 | 9.684 | 43.12 | 73.0 | 44.82 | 72.9 | 45.64 | 69.5 | 48.49 | 64.9 | 51.99 | 53.3 | 60.35 | 51.5 |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 1,048,576 | 12.516 | 33.18 | 94.3 | 35.59 | 93.0 | 37.37 | 85.3 | 38.78 | 78.3 | 42.81 | 77.4 | 50.58 | 59.3 |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 1,048,576 | 12.470 | 34.70 | 91.2 | 37.80 | 95.0 | 38.14 | 85.7 | 40.67 | 81.4 | 44.39 | 74.6 | 52.38 | 65.8 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 1,048,576 | 35.319 | 57.83 | 53.7 | 62.48 | 50.4 | 64.37 | 48.4 | 67.13 | 44.7 | 70.41 | 41.6 | 80.99 | 39.9 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 1,048,576 | 26.237 | 36.17 | 83.9 | 39.58 | 88.3 | 41.08 | 79.6 | 44.85 | 75.1 | 49.41 | 70.7 | 58.80 | 66.4 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 131,072 | 24.421 | 41.19 | 44.3 | 44.83 | 44.4 | 47.98 | 41.5 | 54.95 | 36.3 | Limit | Limit | Limit | Limit |
@@ -740,7 +740,7 @@ Engine prefill seconds at each context bucket, one uncached sample per cell:
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 128K compressed KV, 6 slots | 0.291 | 19.131 | 43.751 | 126.461 | Limit | Limit |
 | DeepSeek-V4.1-Flash MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 0.294 | 18.712 | 40.931 | 105.382 | 367.554 | 1908.016 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 1M compressed KV, 6 slots | 0.263 | 9.684 | 19.999 | 43.577 | 103.139 | 301.219 |
-| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 12 slots | 0.260 | 12.516 | 25.622 | 54.724 | 125.425 | 345.913 |
+| DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 4 | 1M compressed KV, 16 slots | 0.272 | 12.470 | 25.652 | 54.885 | 125.507 | 345.781 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 2 | 1M BF16 KV, 4 slots | 0.281 | 35.319 | 89.437 | 265.781 | 984.962 | 4679.601 |
 | DeepSeek-V4-Flash MXFP4/FP8 | 4 | 1M BF16 KV, 6 slots | 0.190 | 26.237 | 70.847 | 225.675 | 897.362 | 4473.733 |
 | MiMo-V2.6-Flash MXFP4/FP8 | 2 | 128K BF16 KV, 4 slots | 0.450 | 24.421 | 63.481 | 182.487 | Limit | Limit |

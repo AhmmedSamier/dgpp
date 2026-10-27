@@ -4,21 +4,89 @@ The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
 ## Unreleased
-- **Parallel eager layer load** (2026-10-07):
-  `ResidentLayerStream::load_layers_parallel` (new): each worker owns a
-  pinned staging mirror and a CUDA stream, so checkpoint slicing, host
-  packs and H2D uploads overlap across layers; the disk still serializes
-  at its line rate. `ResidentImage` takes a mutex (entry snapshot under
-  lock, blobs move outside it; concurrent captures reserve disjoint
-  ranges). Opt-in via `DGPP_PRELOAD_THREADS` (unset keeps the serial
-  loop), wired in serve for Qwen/MiMo/GLM-4/GLM-DSA/DSV4/DSV41/Qwen35 and
-  in the DSV41/DSV4 eager constructors; `qwen_load_check --threads N`
-  benchmarks it. Measured Qwen3.8-Flash-Next/Spark: cold build ~76s ->
-  ~47s at 4 workers (boot ~96s -> ~56s); restores stay ~20s either way
-  (disk-bound). Serial vs parallel captures are bitwise identical
-  (per-layer bytes+fold), and the grant-tail `memset` makes all captures
-  deterministic. Loader suites green (qwen 9, glm 13, mimo 5, dsv41 6,
-  dsv4 4, glm_dsa 4, glm4 4).
+- **DFlash2 integration fixes** (2026-10-25): the shared drafter follows
+  the active eager/capture reducer, copies complete draft KV blocks during
+  prefix reuse, and arms sampled proposal distributions on Flash-Next.
+  Memory plans use the local vocabulary slice. Flash-Next now honors the
+  explicitly requested draft-head screen and uses recurrent-state replay
+  for DFlash2, avoiding full recurrent snapshots at every speculative row.
+  Regression tests cover both model families, two-rank graph execution,
+  prefix reuse, screening, sampling and all eight accepted prefix lengths.
+  The paired probe reconciles completed requests and includes the bonus
+  token in mean acceptance length; explicit `--no-dflash` wins in either
+  command-line order.
+
+- **The draft mechanism is a knob, not a template fork** (2026-10-25):
+  `--dflash-model DIR_OR_ID` now replaces the template's MTP world the way its
+  usage text always claimed. The flag only worked on a template that
+  already set `mtp: false`; on an MTP template it hit the "enable one or the
+  other, not both" refusal (`apps/dgpp_serve.cpp`), which is why this work's
+  first cut shipped the RadixArk NVFP4 Flash-Next drafter as a second template
+  (`cluster_qwen-3.8-flash-next_nvfp4-radixark-dflash2_w1[_yarn512k]`). That is
+  a mechanism fork of the kind `deploy/README.md`'s one-template rule refuses
+  (the Qwen3.8-27B releases name `engine.dflash_model` in their single template
+  and reach the other worlds by knob), so the fork does not land: the two
+  templates are deleted here and the drafter ships as the knob. Giving the flag
+  on the command line takes the MTP group back to
+  its defaults unless the command line names the setting: `mtp` off,
+  `mtp_depth` 1, `mtp_schedule` off, `lookup_draft` off, `lookup_tail` 0 (the
+  block drafter refuses a tail outright, `engine/graph_engine.hpp`) and
+  `draft_head` exact — the same "the settings go with the switch" rule
+  `--no-mtp` and `--no-dflash` already follow. Explicit `--mtp` beside
+  `--dflash-model` is still the contradiction and still refused; `--no-dflash`
+  wins a `--dflash-model` on the same line. Gate: the drafter worlds of both
+  RadixArk shapes resolve to settings records identical to the deleted
+  templates' (digests `4b798c02e99efb2a` plain, `0a61b45aacd39d69` with
+  `--mtp-schedule`), verified with `--memory-plan` (no world forms). The two
+  fork templates are deleted, and the portability shape rule loses the
+  `-dflash2` marker that had been added to let the fork through, so a
+  drafter/MTP pair of one model, quant and world fails the gate again.
+  `deploy/README.md` and `docs/configuration.md` carry the drafter as the knob
+  it is; the benchmarks of record are untouched (the MTP templates are
+  byte-identical).
+
+- **DeepSeek-V4.1-Flash-1017 EXL3: sixteen slots on a 96-row decode
+  batch, and the step's cost past a few rows** (2026-10-23 evening,
+  `docs/deepseek_v41_flash_exl3_plan.md` §3.3, §3.6, §7). The family's
+  decode batch widens from 64 to 96 rows (the engine's `kDecodeRowsMax`
+  and every bound that mirrored it — the pick tables, the GEMM lowering,
+  the CSA2 select and layer, the batch-map upload, the tensor-core GEMV's
+  one split chain, now to 128 rows) and the EXL3 template ships at sixteen
+  slots (queue 24): sixteen streams decode live where twelve had queued
+  four. The forms that pay for it, each bitwise its predecessor per row or
+  a fixed function of the request alone: the expert-run slot form's long
+  runs as 64-row groups from a launch list (the 64-row launch no longer
+  puts 1,400 idle blocks on the GPU a layer); the decode attention's
+  splits merged eight at a time by the group's last block in L2, the dead
+  partials discarded before they write back (the finish reads five
+  partials a row instead of forty; a one-time rounding-class change of
+  the decode attention, the two-level merge at 5e-8 relative to the flat
+  combine, batch-invariant by construction); the router's tiled dots and
+  the mHC dots' token tile from sixteen decode rows; the graph-variant
+  budget at 256 so sixteen slots keep all their scheduled depths, with the
+  new key `engine.mtp_schedule_options` to cap the depth options at the
+  budget's even spread (the template pins three: 1, 3, 4 — every depth as
+  an option let the schedule stop at depth 2 on code, 8 % of its tokens a
+  step) and the schedule's row and base costs measured on the pack (2.95
+  and 19.9 ms, from the mode boots). On the
+  twelve-slot template the campaign-method C8 legs read code 191.1 → 206.1
+  tok/s, JSON 227.9 → 240.7, prose level, C1 level at equal rows; on the
+  sixteen-slot template sixteen identical streams decode at 128 ms a
+  step. Two defects the gates caught on the way are in the plan's record
+  (the discard racing the merge's own reads; the 65–128-row tensor-core
+  form's unsplit chain past 64 rows). Later that evening the template's
+  block widened to five drafts (`engine.mtp_depth` 5, the schedule's
+  options 1, 3 and 5): the code, table, JSON and counting classes had
+  saturated the four-draft block (counting 4.96 tokens a step of a
+  possible 5) — now 5.95 / 5.17 / 5.20 / 3.60 tokens a step, C1 JSON
+  120.8 → 133.1 tok/s and code 91.1 → 92.0 on the campaign prompts, prose
+  level (plan §3.6). The campaign of record on the shipped template
+  (binary `9a179b15a6de02fa`, 2026-10-24 00:06–00:54 UTC, every gate
+  green): C1 70.7 / 92.0 / 134.2 / 111.4 / 70.1 tok/s (prose / code /
+  JSON / math / chat), C2 95.7–182.4, C4 127.8–206.6, C8 165.0–247.7;
+  cold prefill 1.188 / 3.446 / 13.331 s; HumanEval 160/164, GSM8K
+  295/300, extraction 100/100 — docs/benchmarks.md and the model card
+  carry the rows.
 
 - **DeepSeek-V4.1-Flash-1017 in its EXL3 3.5 bpw re-pack** (2026-10-23,
   [LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw](https://huggingface.co/LibertAIDAI/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw)).
@@ -209,6 +277,37 @@ project procedures and design guidance live in `docs/`.
   NVFP4 column slices. Regression fixtures cover nested CSF checkpoints,
   TP slicing, independent forward references, graph replay and mixed prefill.
   See [docs/fp4local_plan.md](docs/fp4local_plan.md).
+
+- **The DFlash2 block drafter serves Qwen3.8-Flash-Next** (2026-10-20).
+  The Qwen3.5 drafter (`engine.dflash_model`, the block-diffusion proposal
+  model from a separate checkpoint) reaches the `qwen4_exp` family:
+  `incoai/Qwen3.8-Flash-Next-DFlash2` — five bidirectional sliding Qwen3
+  layers over a KV context built from the target's tapped features, the
+  mask rows' top-K through the chained selector walk, the embeddings and lm
+  head shared with the target. Re-hosted on `QwenModel`: the block forward
+  and the mask-row select, the feature store that feeds the draft planes,
+  the batched redraft, and the recorded block draft the decode graph
+  replays (the Qwen35 family's capture, re-hosted — the
+  `session_graph_capture_block_draft/_batch` pair), most of the arithmetic
+  riding the shared `kernels/dflash2` and the engine's `requires`-guarded
+  duck typing (one eager-engine dispatch guard for the families without the
+  captured static verify). Two family seams: the target-side taps read the
+  layer's output at the NEXT layer's attention-mix launch (a QSA stack has
+  no per-layer `[T, H]` residual stream to read, only the mixed hidden), and
+  the draft K/V rides new plain planes on the QSA pool's shared block table
+  (`QwenKvPoolShape::draft_layers`, copying with the request's blocks).
+  `engine.dflash_model` selects it (`mtp: false`) on the decode graph, and
+  `--mtp-schedule` sizes the verify depth
+  from the walk's published confidence. (At the time this shipped as its own
+  `nvfp4-radixark-dflash2` template; 2026-10-24 folded that fork back into the
+  one [RadixArk template](deploy/cluster_qwen-3.8-flash-next_nvfp4-radixark_w1.example.json)
+  as the `--dflash-model` knob.) Gates: the armed eager engine's
+  scalar and batched transcripts are bit-for-bit the plain engine's on the
+  world-1 fixture, the graph replay's published drafts are the eager
+  redraft's and its transcript the eager engine's bit-for-bit, the
+  drafter-armed plain walk is bitwise the no-drafter model's, and the block
+  proposes its seven drafts repeatably; the `validate_against` overload
+  cross-checks the qwen4_exp widths in the config unit suite.
 
 - **The day's DeepSeek-V4.1 levers ported where they apply; the campaign's
   C8 cell on a six-slot template read** (2026-10-20). Inventory of the
@@ -1349,6 +1448,22 @@ project procedures and design guidance live in `docs/`.
   latency/throughput tradeoffs are in
   [PR #112](https://github.com/HawkBearPig/dgpp/pull/112).
 
+- **Parallel eager layer load** (2026-10-07):
+  `ResidentLayerStream::load_layers_parallel` (new): each worker owns a
+  pinned staging mirror and a CUDA stream, so checkpoint slicing, host
+  packs and H2D uploads overlap across layers; the disk still serializes
+  at its line rate. `ResidentImage` takes a mutex (entry snapshot under
+  lock, blobs move outside it; concurrent captures reserve disjoint
+  ranges). Opt-in via `DGPP_PRELOAD_THREADS` (unset keeps the serial
+  loop), wired in serve for Qwen/MiMo/GLM-4/GLM-DSA/DSV4/DSV41/Qwen35 and
+  in the DSV41/DSV4 eager constructors; `qwen_load_check --threads N`
+  benchmarks it. Measured Qwen3.8-Flash-Next/Spark: cold build ~76s ->
+  ~47s at 4 workers (boot ~96s -> ~56s); restores stay ~20s either way
+  (disk-bound). Serial vs parallel captures are bitwise identical
+  (per-layer bytes+fold), and the grant-tail `memset` makes all captures
+  deterministic. Loader suites green (qwen 9, glm 13, mimo 5, dsv41 6,
+  dsv4 4, glm_dsa 4, glm4 4).
+
 - **Qwen3.5-122B-A10B-NVFP4: MoE support** (2026-10-07/08):
   the `nvidia/Qwen3.5-122B-A10B-NVFP4` release serves on the `qwen3_5`
   family (`qwen3_5_moe_text`): 48 layers (36 GDN + 12 Full, 3072 hidden),
@@ -2232,10 +2347,7 @@ project procedures and design guidance live in `docs/`.
   them; bitwise (the long-prompt sha on every leg; an in-situ self-check,
   `DGPP_QWEN_PLE_PRESTAGE_CHECK=1`, gathers both channels and compares
   them; `DGPP_QWEN_PLE_PRESTAGE=0` keeps the one channel). The round also
-  served the author's vLLM stack on the same box for a kernel-level
-  comparison (their expert GEMM 1.8x ours per token, their fp8 dense GEMMs
-  and bf16 partials; our attention, indexer, hyper-connection glue and
-  n-gram path level or ahead) and left two opt-in forms: the expert GEMM
+  left two opt-in forms: the expert GEMM
   with its weight fragments decoded in registers and three pipeline stages
   (`DGPP_PACKQ_GEMM=wide3`, bitwise, level), the gate and up projections
   as one launch (`DGPP_MOE_PACKQ_PAIR=1`, bitwise, level) and the down

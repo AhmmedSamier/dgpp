@@ -21,14 +21,15 @@
 // (a padded row never touches another row's accumulators), so a batched row is
 // bitwise the row alone at m = 1 through this kernel. It is not bitwise
 // the GEMV cores' chain (a different fp32 order, inside the oracle budgets).
-// With workspace, launches of at most kMmaGemvSplitRows (64, the decode
-// batch bound) may use split-K: the split count is a function of the
-// shape, the split ranges are 256-k units (a window boundary of every
-// tile form), and the 33..64-row form splits like the 1..32-row forms —
-// so a row's chain is the same at every decode row count 1..64, split or
-// not (2026-10-05: a request's rows in an eight-slot batch are bitwise its
-// rows alone). Above 64 rows (the prefill-sized groups) the launch runs
-// unsplit, a different chain from the split one.
+// With workspace, launches of at most kMmaGemvSplitRows (128, one launch
+// group — the decode batch bound is 96 since 2026-10-23) may use split-K:
+// the split count is a function of the shape, the split ranges are 256-k
+// units (a window boundary of every tile form), and the 33..64-row and
+// 65..128-row forms split like the 1..32-row forms — so a row's chain is
+// the same at every decode row count 1..128, split or not (2026-10-05: a
+// request's rows in an eight-slot batch are bitwise its rows alone;
+// 2026-10-23: the 65..128-row form had run unsplit, and sixteen DSpark
+// slots' transcripts diverged at near-ties where twelve matched).
 //
 // CONTRACT: m >= 1 (rows 1..128 in one launch — 1/2/4/8 sixteen-row tiles
 // by the count — and wider m in 128-row groups, each group its own launch
@@ -48,7 +49,7 @@ namespace dgpp {
 constexpr int kMmaGemvMaxRows = 32;
 // The decode batch bound: launches of up to this many rows share one chain
 // (split-K by the shape, the same ranges in every tile form).
-constexpr int kMmaGemvSplitRows = 64;
+constexpr int kMmaGemvSplitRows = 128;
 // Rows per launch: the widest single form (8 tiles); m above it runs in
 // groups of this many rows, the weights read once per group.
 constexpr int kMmaGemvMaxRowsPerLaunch = 128;
@@ -60,7 +61,7 @@ constexpr int kMmaGemvMaxRowsPerLaunch = 128;
 // the grid under-filled (fp32 partials in ws, one reduce launch; the split
 // count a function of the shape only and the ranges the same in every tile
 // form, so a row's chain is still the same whatever m rides in the launch,
-// 1..64). nullptr: the unsplit form, as before.
+// 1..128). nullptr: the unsplit form, as before.
 void launch_mma_gemv_fp8_bf16(const uint16_t* act, size_t act_stride, const uint8_t* w,
                               const float* scales, uint16_t* out, int m, int n, int k,
                               size_t out_stride, int rs, int cs, cudaStream_t stream,

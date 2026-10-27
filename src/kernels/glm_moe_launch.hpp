@@ -2,6 +2,7 @@
 // Launchers for the MoE kernels (DESIGN §7.4; semantics in
 // models/glm/moe.hpp). All deterministic (fixed reduction/selection order)
 // and CUDA-graph capturable: no scratch, no host reads.
+#include "common/dtypes.hpp"
 #include <cuda_runtime.h>
 
 #include "models/glm/moe.hpp"
@@ -193,6 +194,19 @@ void launch_moe_accum_ordered_f32_bf16down(float* out, const uint16_t* down, siz
 // the FFN all-reduce (bf16 on the wire).
 void launch_moe_round_bf16(uint16_t* out, const float* acc, int64_t n,
                            cudaStream_t stream);
+
+// The EXL3 slot kernels' expert-run classes (kernels/exl3_gemv.cu): a run
+// of up to kMoeRunTileRows rows takes the 16-row tile at its leader's
+// block; a longer run is cut into groups of up to kMoeRunGroupRows rows,
+// each a 64-row tile. The order kernel writes the groups after the run
+// lengths as a launch list (position | rows << 16, -1 past the last), so
+// the 64-row launch's grid is the list's bound, not every position
+// (2026-10-23: 1,400 returning blocks of a 64 KB-smem kernel cost ~240 us
+// a layer when no run exceeded 16 rows). A `runs` buffer holds
+// slots + moe_run_groups_max(slots) entries.
+constexpr int kMoeRunTileRows = 16;
+constexpr int kMoeRunGroupRows = 64;
+DGPP_HD inline int moe_run_groups_max(int slots) { return slots / (kMoeRunTileRows + 1) + 1; }
 
 // ---- decode-slot path (the sync-free MoE, 2026-09-01) --------------------
 //

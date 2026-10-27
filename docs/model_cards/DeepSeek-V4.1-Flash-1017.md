@@ -117,9 +117,8 @@ live), put the step at 27.0 ms for the plain row, 37.0 / 42.7 / 48.0 /
 185 at 30 rows: 5.2 ms per verify row all the way to the batch's 30 rows,
 the row's own expert bytes with no overlap benefit (six of 384 experts
 per row overlap under 20 % at 30 rows). A measured step-cost curve
-(TensorFold's round table, concave at its 48-row rounds) was implemented
-and measured here and adds nothing over the linear model, so it is not
-shipped. The same windows settle the earlier reading that fixed depth 4
+(concave in the rows) was implemented and measured here and adds nothing
+over the linear model, so it is not shipped. The same windows settle the earlier reading that fixed depth 4
 beat the schedule at eight requests: on code at six live the schedule
 commits 2.97 tokens per request per 116 ms step (154 tok/s sustained)
 against fixed depth 4's 3.7 per 182 ms (122 tok/s); the campaign's C8
@@ -147,9 +146,8 @@ rank: CPU idle states (level; the bus engine spins), GPU clock locks at
 rank arrives last about a quarter of the time, so no node is slow. The
 collective's remaining 40 µs per round is protocol latency, a bus
 project; the small kernels are a fusion project with exactness
-contracts. Against TensorFold's 14.5 ms round at one row on a 3.5-bpw
-format, this pass reads about 1.6× the bytes (4.25-bit experts and 8-bit
-dense, lossless) and carries about 12 ms of latency-bound work.
+contracts. Beyond its bytes (4.25-bit experts and 8-bit dense, lossless)
+this pass carries about 12 ms of latency-bound work.
 
 ## The collective transport (2026-10-19)
 
