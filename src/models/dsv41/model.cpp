@@ -523,13 +523,19 @@ Dsv41Model::MemoryPlan Dsv41Model::plan_memory(const Dsv41TextConfig& cfg, int m
   return plan;
 }
 
-size_t Dsv41Model::session_snapshot_bytes(const Dsv41TextConfig& cfg, int, bool) {
+size_t Dsv41Model::session_snapshot_bytes(const Dsv41TextConfig& cfg, int, bool mtp) {
   const size_t ring = static_cast<size_t>(std::max(kRingSlots, cfg.sliding_window + 32)) *
                       latent_row_bytes(Csa2StatePool::kRingFormat, kCsa2Latent);
   size_t tails = 0;
   for (const int l : cfg.kv_source_layer_ids)
     if (cfg.compress_ratio(l) == 2) ++tails;
-  return static_cast<size_t>(cfg.max_layer()) * ring + tails * 2 * kCsa2Latent * sizeof(float) + 16;
+  size_t b = static_cast<size_t>(cfg.max_layer()) * ring + tails * 2 * kCsa2Latent * sizeof(float) + 16;
+  // Under MTP the snapshot carries the draft window's row too ([h_t1 | h_t2
+  // | h_t3]: targets x H bf16 — SessionModel::session_snapshot_bytes adds
+  // draft_width * 2), which the estimate left out: the arena came out one
+  // page per slot above the plan (2026-10-27).
+  if (mtp) b += cfg.dspark_target_layer_ids.size() * static_cast<size_t>(cfg.hidden_size) * 2;
+  return b;
 }
 
 size_t Dsv41Model::snapshot_state_bytes() const { return session_snapshot_bytes(cfg_, world_, false); }
