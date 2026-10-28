@@ -2,7 +2,7 @@
   "model": "zed-industries/zeta-2.1-nvfp4",
   "world_size": 1,
   "engine": {
-    "max_concurrency": 2,
+    "max_concurrency": 8,
     "kv_capacity": 32768,
     "default_max_tokens": 1024,
     "queue_limit": 8,
