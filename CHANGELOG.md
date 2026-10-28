@@ -55,7 +55,11 @@ project procedures and design guidance live in `docs/`.
   `nvme_cache.op_timeout_s` (120) fails and its waiting requests admit
   cold (which also bounds a restore's wait for a busy arena slot); and
   `prompt_cache_key` pins protect at most
-  `engine.prefix_pin_max_pct` (50) of the arena and the slab. The tier is
+  `engine.prefix_pin_max_pct` (50) of the arena and the slab; a cold
+  review of that round fixed the pump's completion test after an abandoned
+  op, the job's publication under the lock, a bound on a corrupted index
+  record before anything is allocated from it, the index file per rank
+  (`rank<N>.index`) and the lock held across a recreation. The tier is
   exercised on MiMo, Flint and Qwen3.5 (`nvme_tier_families_test`), and
   the fabric fuzz gained concurrent clients, mid-flight cancels and rank
   crashes. Documented in the

@@ -2350,7 +2350,8 @@ void Scheduler::apply_disk_commits(const std::vector<DiskCommit>& commits) {
         // The entry's content on this rank's slab, bound into the index so
         // an adoption after a crash keeps it only while its pages still
         // hold these bytes.
-        disk_.set_content(o.disk_entry, engine_->disk_pages_digest(disk_.entry_pages(o.disk_entry)));
+        disk_.set_content(o.disk_entry, engine_->disk_pages_digest(disk_.entry_pages(o.disk_entry),
+                                                                     static_cast<uint64_t>(o.position)));
         cache_.set_disk(o.memory_entry, o.disk_entry);
         cache_.note(8, o.op, 1);
         emit_prefix(o.id, "spilled", o.position, o.slot);

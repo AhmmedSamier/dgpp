@@ -262,8 +262,12 @@ class NvmeTier {
   // binds an entry to the bytes its spill wrote with it. Distinct pages
   // are distinct elements of the table, so the worker's writes of other
   // pages race nothing here.
-  uint64_t pages_digest(const std::vector<int64_t>& pages) const {
+  uint64_t pages_digest(const std::vector<int64_t>& pages, uint64_t salt) const {
     uint64_t h = 0xcbf29ce484222325ull;
+    for (int i = 0; i < 8; ++i) {
+      h ^= (salt >> (8 * i)) & 0xffu;
+      h *= 0x100000001b3ull;
+    }
     for (const int64_t p : pages) {
       const uint32_t crc = p >= 0 && p < pages_ ? crc_[static_cast<size_t>(p)] : 0;
       for (int i = 0; i < 4; ++i) {
@@ -329,6 +333,13 @@ class NvmeTier {
 
   sched::SchedulerEngine::DiskBlocks restore_begin(const sched::SchedulerEngine::DiskRestore& restore) {
     if (restore.position <= 0) throw std::invalid_argument("NvmeTier: restore at position 0");
+    // The file worker is one thread: while it is inside the I/O of an op
+    // the timeout abandoned, nothing can be read from the slab. A restore
+    // asked for now is refused the way a full pool refuses one (the
+    // scheduler keeps the entry and admits the request cold at once)
+    // instead of waiting out another timeout and dropping the entry.
+    if (worker_stuck())
+      throw CachePoolExhausted("NvmeTier: the file worker is stuck in an earlier op's I/O; the restore is refused");
     const int64_t bt = model_->kv_block_tokens();
     const int64_t n_full = bt > 0 ? restore.position / bt : 0;
     if (static_cast<int64_t>(restore.pages.size()) != n_full)
@@ -421,7 +432,10 @@ class NvmeTier {
     // Slices whose device work landed (kDevice is the pump's own state to
     // set and clear, so the read needs no lock).
     for (Buffer& buf : buffers_) {
-      if (buf.state != Buffer::kDevice) continue;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (buf.state != Buffer::kDevice) continue;
+      }
       const cudaError_t q = cudaEventQuery(buf.done);
       if (q == cudaErrorNotReady) continue;
       progressed = true;
@@ -490,7 +504,8 @@ class NvmeTier {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       for (const Buffer& buf : buffers_)
-        quiet = quiet && (buf.state == Buffer::kFree || (job.abandoned && buf.state == Buffer::kWorker));
+        quiet = quiet && (buf.state == Buffer::kFree ||
+                          (buf.state == Buffer::kWorker && (job.abandoned || buf.job_seq != job.seq)));
     }
     if (!quiet) return;
     if (!job.failed && job.next_slice < job.slices) return;
@@ -601,7 +616,10 @@ class NvmeTier {
     const fs::path slab(cfg_.slab_path);
     const fs::path dir = slab.parent_path();
     crc_path_ = (dir / ("rank" + std::to_string(cfg_.rank) + ".crc")).string();
-    index_path_ = (dir / "index").string();
+    // This rank's: the scheduler's bytes are the world's, the digests
+    // behind them this rank's, so ranks sharing a directory (one host, a
+    // shared filesystem) never overwrite each other's.
+    index_path_ = (dir / ("rank" + std::to_string(cfg_.rank) + ".index")).string();
     // Other ranks' slabs beside this one, and other bindings' directories
     // beside this one (another model or configuration served from this
     // node) — nobody's to reclaim now; name them and their size so the
@@ -739,13 +757,20 @@ class NvmeTier {
     }
     std::vector<sched::DiskCache::Record> kept;
     std::vector<uint64_t> kept_digests;
-    int stale = 0, unreadable = 0;
+    int stale = 0, unreadable = 0, invalid = 0;
     for (size_t i = 0; i < records.size(); ++i) {
       const sched::DiskCache::Record& rec = records[i];
-      const std::vector<int64_t> pages = sched::DiskCache::record_pages(rec, blob_pages_);
-      bool ok = rec.position > 0 && rec.blob_page >= 0;
+      // The record's counts against the slab before any list is built from
+      // them: a corrupted ids_pages must prune the entry, not allocate.
+      bool ok = rec.position > 0 && rec.blob_page >= 0 && rec.blob_page < pages_ &&
+                static_cast<int64_t>(rec.ids_pages) <= pages_ &&
+                rec.blob_page + blob_pages_ + static_cast<int64_t>(rec.ids_pages) <= pages_ &&
+                static_cast<int64_t>(rec.block_pages.size()) <= pages_ && rec.partial_page < pages_;
+      std::vector<int64_t> pages;
+      if (ok) pages = sched::DiskCache::record_pages(rec, blob_pages_);
       for (const int64_t p : pages) ok = ok && p >= 0 && p < pages_;
-      if (ok && pages_digest(pages) != adopted_digests_[i]) {
+      if (!ok) ++invalid;
+      if (ok && pages_digest(pages, static_cast<uint64_t>(rec.position)) != adopted_digests_[i]) {
         ok = false;
         ++stale;
       }
@@ -768,11 +793,11 @@ class NvmeTier {
       kept.push_back(rec);
       kept_digests.push_back(adopted_digests_[i]);
     }
-    if (stale + unreadable > 0) candidate_ = sched::DiskCache::write(header, kept);
+    if (kept.size() != records.size()) candidate_ = sched::DiskCache::write(header, kept);
     adopted_digests_ = std::move(kept_digests);
     DGPP_LOG_INFO("rank {}: NVMe cache: a previous run's index for this binding is the candidate — {} entries kept, "
-                  "{} pruned (their pages hold other bytes now), {} unreadable",
-                  cfg_.rank, kept.size(), stale, unreadable);
+                  "{} pruned (their pages hold other bytes now), {} unreadable, {} outside the slab",
+                  cfg_.rank, kept.size(), stale, unreadable, invalid);
     return true;
   }
 
@@ -797,6 +822,14 @@ class NvmeTier {
   // truncated and its whole capacity claimed now (unwritten extents): a
   // full disk is a startup error, never a torn write later.
   void open_fd(bool keep_contents) {
+    if (fd_ >= 0 && !keep_contents) {
+      // A recreation on the descriptor already held: the contents go, the
+      // lock stays — a duplicate deployment finds no gap to take it in.
+      if (::ftruncate(fd_, 0) != 0)
+        throw std::runtime_error("NvmeTier: cannot truncate " + cfg_.slab_path + ": " + std::strerror(errno));
+      size_slab();
+      return;
+    }
     if (fd_ >= 0) ::close(fd_);
     const int flags = O_RDWR | O_CREAT | O_CLOEXEC | (keep_contents ? 0 : O_TRUNC);
     fd_ = ::open(cfg_.slab_path.c_str(), flags | O_DIRECT, 0600);
@@ -823,6 +856,11 @@ class NvmeTier {
                                "nvme_cache.allow_buffered");
     }
     if (keep_contents) return;
+    size_slab();
+  }
+  // The whole capacity claimed now (unwritten extents): a full disk is a
+  // startup error, never a torn write later.
+  void size_slab() {
     const off_t bytes = static_cast<off_t>(static_cast<size_t>(pages_) * page_bytes_);
     if (::posix_fallocate(fd_, 0, bytes) != 0) {
       const int err = errno;
@@ -856,23 +894,23 @@ class NvmeTier {
     fresh_files();
   }
 
+  // A buffer with the worker that belongs to no running job: the worker is
+  // inside a stuck call for it (it frees a stale buffer the moment the call
+  // returns), so no slice of any op can move until then.
+  bool worker_stuck() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const Buffer& buf : buffers_)
+      if (buf.state == Buffer::kWorker && (!active_ || buf.job_seq != active_->seq)) return true;
+    return false;
+  }
+
   void start_job() {
-    active_ = std::move(jobs_.front());
+    // The job is whole before the worker can see it: a buffer abandoned to
+    // the worker by an earlier op keeps the worker reading `active_` under
+    // the lock at any time, so the publication is under the lock too.
+    Job job = std::move(jobs_.front());
     jobs_.pop_front();
-    Job& job = *active_;
     job.seq = ++job_seq_;
-    {
-      // Every buffer with the worker on an abandoned op: nothing can move
-      // until one returns, and that may be never — the op fails now.
-      std::lock_guard<std::mutex> lock(mutex_);
-      bool any_free = false;
-      for (const Buffer& buf : buffers_) any_free = any_free || buf.state == Buffer::kFree;
-      if (!any_free) {
-        job.failed = true;
-        job.abandoned = true;
-        job.why = "the staging buffers are held by the stuck I/O of earlier ops";
-      }
-    }
     job.block_slices = (static_cast<int64_t>(job.blocks.size()) + per_chunk_ - 1) / per_chunk_;
     job.blob_slices = (blob_pages_ + per_chunk_ - 1) / per_chunk_;
     const int64_t ids_slices = job.restore ? 0 : (job.ids_pages + per_chunk_ - 1) / per_chunk_;
@@ -880,6 +918,20 @@ class NvmeTier {
     job.next_slice = 0;
     job.started = std::chrono::steady_clock::now();
     job.progressed = job.started;
+    std::lock_guard<std::mutex> lock(mutex_);
+    // A buffer with the worker on an abandoned op: the worker is inside
+    // that call and nothing can move until it returns, which may be never
+    // — the op fails now (a spill's entry stays in memory; a restore
+    // queued before the stall is a cold miss) instead of waiting out the
+    // timeout too.
+    bool stuck = false;
+    for (const Buffer& buf : buffers_) stuck = stuck || buf.state == Buffer::kWorker;
+    if (stuck) {
+      job.failed = true;
+      job.abandoned = true;
+      job.why = "the file worker is stuck in an earlier op's I/O";
+    }
+    active_ = std::move(job);
   }
 
   void finish_job() {
@@ -907,6 +959,7 @@ class NvmeTier {
       if (!ok) ++stats_.failures;
     }
     completions_.push_back({job.op, ok});
+    std::lock_guard<std::mutex> lock(mutex_);
     active_.reset();
   }
 

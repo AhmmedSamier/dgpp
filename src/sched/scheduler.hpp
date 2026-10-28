@@ -541,8 +541,9 @@ class SchedulerEngine {
   }
   // This rank's digest of the pages' checksums as they stand (the index
   // binds an entry to its content with it; 0: no tier).
-  virtual uint64_t disk_pages_digest(const std::vector<int64_t>& pages) const {
+  virtual uint64_t disk_pages_digest(const std::vector<int64_t>& pages, uint64_t position) const {
     (void)pages;
+    (void)position;
     return 0;
   }
   // The adopted index's content digests, in its order.

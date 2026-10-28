@@ -316,8 +316,12 @@ class FakeEngine : public SchedulerEngine {
   }
   // The fake slab's checksums: one counter per page, bumped by every spill
   // that writes it, folded the way the real tier folds its CRC table.
-  uint64_t disk_pages_digest(const std::vector<int64_t>& pages) const override {
+  uint64_t disk_pages_digest(const std::vector<int64_t>& pages, uint64_t position) const override {
     uint64_t h = 0xcbf29ce484222325ull;
+    for (int i = 0; i < 8; ++i) {
+      h ^= (position >> (8 * i)) & 0xffu;
+      h *= 0x100000001b3ull;
+    }
     for (const int64_t p : pages) {
       const auto it = fake_crc_.find(p);
       const uint32_t crc = it == fake_crc_.end() ? 0 : it->second;

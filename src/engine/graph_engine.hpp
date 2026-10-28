@@ -1636,8 +1636,8 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   void disk_persist_index(const std::vector<uint8_t>& bytes, const std::vector<uint64_t>& digests) override {
     if (tier_) tier_->persist_index(bytes, digests);
   }
-  uint64_t disk_pages_digest(const std::vector<int64_t>& pages) const override {
-    return tier_ ? tier_->pages_digest(pages) : 0;
+  uint64_t disk_pages_digest(const std::vector<int64_t>& pages, uint64_t position) const override {
+    return tier_ ? tier_->pages_digest(pages, position) : 0;
   }
   std::vector<uint64_t> disk_adopted_digests() const override {
     return tier_ ? tier_->adopted_digests() : std::vector<uint64_t>{};

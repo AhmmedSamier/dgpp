@@ -623,11 +623,11 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
         r.ids_pages = 1;
         r.partial_page = ps.partial_page;
         index = dgpp::sched::DiskCache::write(h, {r});
-        index_digests.assign(1, t2->pages_digest(dgpp::sched::DiskCache::record_pages(r, t2->blob_pages())));
+        index_digests.assign(1, t2->pages_digest(dgpp::sched::DiskCache::record_pages(r, t2->blob_pages()), 12));
       }
       t2->persist_index(index, index_digests);
       t2.reset();  // the worker lands the index; the slab stays
-      require(fs::exists(pe.slab_path) && fs::exists(bdir + "/index") && fs::exists(bdir + "/rank0.crc"),
+      require(fs::exists(pe.slab_path) && fs::exists(bdir + "/rank0.index") && fs::exists(bdir + "/rank0.crc"),
               "persist: the slab, its index and its CRC table stay");
       auto t3 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pe);
       require(t3->candidate_index() == index && t3->candidate_digest() != "0" && t3->adopted_digests() == index_digests,
@@ -652,7 +652,7 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       auto t4 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pe);
       require(!t4->candidate_index().empty(), "persist: the index is offered again");
       t4->adopt(false);
-      require(t4->candidate_index().empty() && !fs::exists(bdir + "/index"),
+      require(t4->candidate_index().empty() && !fs::exists(bdir + "/rank0.index"),
               "persist: a refused adoption starts the slab fresh");
       t4.reset();
       require(fs::exists(pe.slab_path), "persist: the fresh slab stays for the next run");
@@ -733,7 +733,7 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
         fs::create_directories(cdir);
         pc.slab_path = cdir + "/rank0.slab";
         pc.binding = "binding-c";
-        const std::string index_file = cdir + "/index", crc_file = cdir + "/rank0.crc";
+        const std::string index_file = cdir + "/rank0.index", crc_file = cdir + "/rank0.crc";
         size_t pbytes = 0;
         int64_t npages = 0, nblob = 0;
         {
@@ -760,7 +760,7 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           r.blob_page = cspill.blob_page;
           r.ids_pages = 1;
           r.partial_page = cspill.partial_page;
-          digests->assign(1, t.pages_digest(dc::DiskCache::record_pages(r, t.blob_pages())));
+          digests->assign(1, t.pages_digest(dc::DiskCache::record_pages(r, t.blob_pages()), 12));
           return dc::DiskCache::write(h, {r});
         };
         const auto records_of = [&](const std::vector<uint8_t>& bytes) {
@@ -798,6 +798,14 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
             refused = std::string(e.what()).find("held by another process") != std::string::npos;
           }
           require(refused, "lock: a second tier on the same slab is refused");
+          t->adopt(false);  // a recreation on the held descriptor keeps the lock
+          refused = false;
+          try {
+            Tier other(&m, &arena, pc);
+          } catch (const std::runtime_error& e) {
+            refused = std::string(e.what()).find("held by another process") != std::string::npos;
+          }
+          require(refused, "lock: still held across a recreation of the slab");
           t.reset();
         }
         // (b) A clean restart offers the entry with its digest.
@@ -869,6 +877,29 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
             patch_file(index_file, 7, &v1, 1);  // the previous file format's magic
           }
           fresh_after("the previous index format");
+          // A record whose ids run claims more pages than the slab holds (a
+          // flipped high byte): pruned before any list is built from it,
+          // never a 32 GiB allocation at startup.
+          {
+            auto t = std::make_unique<Tier>(&m, &arena, pc);
+            t->adopt(false);
+            dc::DiskCache::Header h;
+            h.pages = static_cast<uint64_t>(npages);
+            h.page_bytes = pbytes;
+            h.blob_pages = static_cast<uint64_t>(nblob);
+            h.block_tokens = static_cast<uint64_t>(m.kv_block_tokens());
+            dc::DiskCache::Record r;
+            r.position = 12;
+            r.blob_page = cspill.blob_page;
+            r.ids_pages = 0xffffffffu;
+            r.partial_page = cspill.partial_page;
+            t->persist_index(dc::DiskCache::write(h, {r}), {0});
+            t.reset();
+            auto t2 = std::make_unique<Tier>(&m, &arena, pc);
+            require(records_of(t2->candidate_index()) == 0 && t2->adopted_digests().empty(),
+                    "damage: a record with an impossible ids run is pruned");
+            t2.reset();
+          }
         }
         // (f) The op timeout: reads that hang against a one-second bound —
         //     the restore fails (the request would admit cold), the buffer
@@ -895,11 +926,34 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           require(t->stats().failures == 1, "timeout: the failure counted");
           arena.release(1);
           require(m.kv_blocks_in_use() == blocks_before, "timeout: the failed restore's blocks came back");
-          std::this_thread::sleep_for(std::chrono::milliseconds(3000));  // the hung read returns, the buffer with it
+          // While the hung read still holds the worker: a restore asked for
+          // now is refused at once the way a full pool refuses one (the
+          // scheduler keeps the entry and admits cold), nothing taken; a
+          // spill queued now fails at once (the review of 2026-10-28: a
+          // one-thread worker inside a stuck call serves nobody, and every
+          // later op used to wait out the timeout and drop its entry).
           delay_ms = 0;
           tr.op = op++;
+          bool refused = false;
+          try {
+            (void)t->restore_begin(tr);
+          } catch (const dgpp::CachePoolExhausted& e) {
+            refused = std::string(e.what()).find("stuck") != std::string::npos;
+          }
+          require(refused, "timeout: a restore while the worker is stuck is refused at once");
+          require(m.kv_blocks_in_use() == blocks_before && !arena.filled(1), "timeout: the refused restore took nothing");
+          dgpp::sched::SchedulerEngine::DiskSpill ss = spill;
+          ss.op = op++;
+          const auto t1 = std::chrono::steady_clock::now();
+          t->spill_begin(ss);
+          require(!wait_on(*t, ss.op), "timeout: a spill queued while the worker is stuck fails at once");
+          require(std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count() < 1.0,
+                  "timeout: it failed without waiting out another timeout");
+          std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // the hung read returns, the buffer with it
+          for (int i = 0; i < 50; ++i) t->pump();  // the worker freed the stale buffer; nothing else moves
+          tr.op = op++;
           (void)t->restore_begin(tr);
-          require(wait_on(*t, tr.op), "timeout: the next restore completed");
+          require(wait_on(*t, tr.op), "timeout: the restore after the recovery completed");
           {
             std::vector<uint8_t> a(arena.bytes()), b(arena.bytes());
             DGPP_CUDA_OK(cudaMemcpy(a.data(), arena.slot_data(0), a.size(), cudaMemcpyDeviceToHost));

@@ -262,7 +262,10 @@ order applies, so one client's keys cannot push everyone else out.
 
 **Restarts.** With `persist` (the default) the slab outlives the process:
 the token ids are written to the slab behind each blob, the page checksums
-and the index are kept beside it, under a directory named by the binding —
+and the index are kept beside it (`rank<N>.crc`, `rank<N>.index`: the index
+bytes are the world's, the digests behind them each rank's own, so ranks
+sharing a directory never overwrite each other's), under a directory named
+by the binding —
 the binary's version, the checkpoint, the deployment's effective settings
 and the slab geometry (a release upgrade starts fresh: a later build may lay
 a block's planes out differently at the same byte count). The index also
