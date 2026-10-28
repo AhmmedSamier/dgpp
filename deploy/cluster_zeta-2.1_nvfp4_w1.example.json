@@ -1,0 +1,23 @@
+{
+  "model": "zed-industries/zeta-2.1-nvfp4",
+  "world_size": 1,
+  "engine": {
+    "max_concurrency": 2,
+    "kv_capacity": 32768,
+    "default_max_tokens": 1024,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": true,
+    "mtp": false,
+    "bf16_weights": "checkpoint",
+    "prefix_cache_gib": 0.5,
+    "stats_interval_s": 10
+  },
+  "paths": {
+    "resident_cache": ""
+  },
+  "http": {
+    "bind_host": "0.0.0.0",
+    "port": 8000
+  }
+}

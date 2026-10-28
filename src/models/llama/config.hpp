@@ -5,9 +5,10 @@
 // parsed into a known-supported value or rejected with a message naming
 // the field, at load time. The reference is transformers' modeling_llama.py.
 //
-// Dense BF16 scope: 32 GQA layers (full RoPE, no bias, no qk-norm), dense
+// Dense scope: 32 GQA layers (full RoPE, no bias, no qk-norm), dense
 // SwiGLU MLPs, untied embeddings/head. No MoE, no draft layer, no
-// quantization_config, no rope_scaling.
+// rope_scaling. Weight-only NVFP4 (ModelOpt W4A16_NVFP4 export) is the one
+// supported quantization; activations and globals stay BF16.
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -38,6 +39,14 @@ struct LlamaTextConfig {
 
   // --- dense SwiGLU MLP ----------------------------------------------------
   int intermediate_size = 14336;
+
+  // --- weight quantization (ModelOpt weight-only NVFP4 export) ---------------
+  // Set by quantization_config quant_algo W4A16_NVFP4: every Linear's
+  // weights are e2m1 pairs + e4m3 group-16 scales + one fp32 global
+  // (weight_scale_2, the raw amax/(6*448) multiplier — the loader
+  // reciprocates it for the kernels' division). Embeddings, the norms and
+  // the head stay unquantized.
+  bool weights_nvfp4 = false;
 
   // Parses config.json's root object. Throws std::runtime_error naming the
   // offending field on anything unsupported.

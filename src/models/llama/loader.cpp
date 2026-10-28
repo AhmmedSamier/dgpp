@@ -1,5 +1,6 @@
 #include "models/llama/loader.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 
@@ -19,6 +20,12 @@ namespace {
 // this is the engine's own lever, so it is OFF by default and set once
 // before any model builds.
 bool g_dense_weights_fp8 = false;
+
+// A ModelOpt weight-only NVFP4 checkpoint (quantization_config quant_algo
+// W4A16_NVFP4): the projections load the e2m1/e4m3/fp32-global triple
+// verbatim — no engine lever encodes anything. Checkpoint-driven; the
+// static mirrors it for the resident image format beside the fp8 knob's.
+bool g_weights_nvfp4 = false;
 
 // The replicated set (rank-invariant reads at world > 1): the layer norms,
 // the embedding and the final norm. Everything else is a slice: the
@@ -57,6 +64,110 @@ struct LlamaLoaderFamily::Builder : WeightBuilder<LlamaExpectedTensor> {
 
   bool replicated(const LlamaExpectedTensor& e) const override { return is_replicated(e); }
 
+  // ---- the ModelOpt NVFP4 triple ------------------------------------------
+  // `module.weight` U8 [N, K/2] (e2m1 pairs), `module.weight_scale` F8_E4M3
+  // [N, K/16], `module.weight_scale_2` F32 [1]. ModelOpt stores the global
+  // RAW as the amax/(6*448) multiplier ('no reciprocation' — vLLM's
+  // modelopt.py, verified at export time: multiplying reproduces the source
+  // bf16 to the format's precision, dividing is off by ~1434x), while the
+  // kernels divide the finished dot by the global once
+  // (models/quant_matrix.hpp) — so the resident slot holds 1/weight_scale_2.
+  // The e4m3 scale bytes are the same in both conventions.
+  const LlamaExpectedTensor& fp4_module(const std::string& module, int64_t& N, int64_t& K) {
+    const std::string pname = module + ".weight";
+    const LlamaExpectedTensor& e = expected(pname);
+    if (e.shape.size() != 2 || e.shape[1] <= 0)
+      fail("'" + pname + "': the packed matrix needs 2 dims");
+    N = e.shape[0];
+    K = e.shape[1] * 2;
+    if (K % kFp4Group != 0) fail("'" + pname + "': fp4 K must be a multiple of 16");
+    const LlamaExpectedTensor& se = expected(module + ".weight_scale");
+    if (se.shape.size() != 2 || se.shape[0] != N || se.shape[1] != K / kFp4Group)
+      fail("'" + se.name + "': the NVFP4 scale grid must be [N, K/16]");
+    return e;
+  }
+
+  void load_fp4_global_mo(const std::string& module, float* slot) {
+    const LlamaExpectedTensor& eg = expected(module + ".weight_scale_2");
+    if (eg.numel() != 1) fail("'" + eg.name + "' is not a fp32 [1] global scale");
+    if (copy) {
+      const TensorInfo& t = source(eg.name);
+      float ws2 = 0.f;
+      std::memcpy(&ws2, t.data, 4);
+      if (!(ws2 > 0.0f) || !std::isfinite(ws2))
+        fail("'" + eg.name + "' is not a positive finite scale");
+      *bump.host(slot) = 1.0f / ws2;
+      consumed(t);
+    }
+    note_read(eg, 4);
+  }
+
+  GlmFp4Matrix load_fp4_rows_mo(const std::string& module, int64_t r0, int64_t rn, float* slot) {
+    int64_t N = 0, K = 0;
+    const LlamaExpectedTensor& e = fp4_module(module, N, K);
+    check_range(module + ".weight", r0, rn, N);
+    const int64_t pc = K / 2, sc = K / kFp4Group;
+    GlmFp4Matrix q;
+    q.rows = rn;
+    q.cols = K;
+    q.scale_group = kFp4Group;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rn) * pc));
+    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(rn) * sc));
+    if (copy) {
+      const TensorInfo& tp = source(module + ".weight");
+      const TensorInfo& ts = source(module + ".weight_scale");
+      std::memcpy(bump.host(const_cast<uint8_t*>(q.payload)),
+                  static_cast<const uint8_t*>(tp.data) + static_cast<size_t>(r0) * pc,
+                  static_cast<size_t>(rn) * pc);
+      std::memcpy(bump.host(const_cast<uint8_t*>(q.scales)),
+                  static_cast<const uint8_t*>(ts.data) + static_cast<size_t>(r0) * sc,
+                  static_cast<size_t>(rn) * sc);
+      consumed(tp);
+      consumed(ts);
+    }
+    note_read(e, static_cast<size_t>(rn) * pc);
+    note_read(expected(module + ".weight_scale"), static_cast<size_t>(rn) * sc);
+    load_fp4_global_mo(module, slot);
+    q.global_scale = slot;
+    return q;
+  }
+
+  // Whole scale blocks on the sliced axis (16-aligned bounds), every row's
+  // payload and scale rows packed (o_proj, down_proj).
+  GlmFp4Matrix load_fp4_cols_mo(const std::string& module, int64_t c0, int64_t cn, float* slot) {
+    int64_t N = 0, K = 0;
+    const LlamaExpectedTensor& e = fp4_module(module, N, K);
+    check_range(module + ".weight cols", c0, cn, K);
+    if (c0 % kFp4Group != 0 || cn % kFp4Group != 0)
+      fail("'" + module + "': fp4 column slice needs 16-aligned bounds");
+    const int64_t pc = K / 2, lc = cn / 2, sc = K / kFp4Group, lsc = cn / kFp4Group;
+    GlmFp4Matrix q;
+    q.rows = N;
+    q.cols = cn;
+    q.scale_group = kFp4Group;
+    q.payload = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * lc));
+    q.scales = static_cast<const uint8_t*>(bump.alloc(static_cast<size_t>(N) * lsc));
+    if (copy) {
+      const TensorInfo& tp = source(module + ".weight");
+      const TensorInfo& ts = source(module + ".weight_scale");
+      const uint8_t* sp = static_cast<const uint8_t*>(tp.data);
+      const uint8_t* ss = static_cast<const uint8_t*>(ts.data);
+      uint8_t* hp = bump.host(const_cast<uint8_t*>(q.payload));
+      uint8_t* hs = bump.host(const_cast<uint8_t*>(q.scales));
+      for (int64_t r = 0; r < N; ++r) {
+        std::memcpy(hp + r * lc, sp + r * pc + c0 / 2, lc);
+        std::memcpy(hs + r * lsc, ss + r * sc + c0 / kFp4Group, lsc);
+      }
+      consumed(tp);
+      consumed(ts);
+    }
+    note_read(e, static_cast<size_t>(N) * lc);
+    note_read(expected(module + ".weight_scale"), static_cast<size_t>(N) * lsc);
+    load_fp4_global_mo(module, slot);
+    q.global_scale = slot;
+    return q;
+  }
+
   void build_attention(const std::string& p) {
     const int64_t d = cfg.head_dim;
     LlamaAttnResident& a = out.attn;
@@ -66,6 +177,15 @@ struct LlamaLoaderFamily::Builder : WeightBuilder<LlamaExpectedTensor> {
     a.kv_head_begin = geo.kv_head_begin;
     const int64_t q0 = static_cast<int64_t>(geo.head_begin) * d, qn = static_cast<int64_t>(geo.local_heads) * d;
     const int64_t k0 = static_cast<int64_t>(geo.kv_head_begin) * d, kn = static_cast<int64_t>(geo.local_kv_heads) * d;
+    if (cfg.weights_nvfp4) {
+      // ModelOpt NVFP4: the triple verbatim, the global's reciprocal staged
+      // into the layer's gathered slot (slot(i) is null while counting).
+      a.q_proj_fp4 = load_fp4_rows_mo(p + "q_proj", q0, qn, slot(0));
+      a.k_proj_fp4 = load_fp4_rows_mo(p + "k_proj", k0, kn, slot(1));
+      a.v_proj_fp4 = load_fp4_rows_mo(p + "v_proj", k0, kn, slot(2));
+      a.o_proj_fp4 = load_fp4_cols_mo(p + "o_proj", q0, qn, slot(3));
+      return;
+    }
     if (g_dense_weights_fp8) {
       // Block FP8 (E4M3 codes + 128 x 128 scales), no bf16 bytes resident.
       // The head slices (q0, k0 in units of the 128-wide head_dim) and the
@@ -89,6 +209,12 @@ struct LlamaLoaderFamily::Builder : WeightBuilder<LlamaExpectedTensor> {
     const int64_t I = geo.local_inter, r = rank;
     LlamaDenseMlpResident& m = out.mlp;
     m.local_inter = I;
+    if (cfg.weights_nvfp4) {
+      m.gate_fp4 = load_fp4_rows_mo(p + "gate_proj", r * I, I, slot(4));
+      m.up_fp4 = load_fp4_rows_mo(p + "up_proj", r * I, I, slot(5));
+      m.down_fp4 = load_fp4_cols_mo(p + "down_proj", r * I, I, slot(6));
+      return;
+    }
     if (g_dense_weights_fp8) {
       m.gate_fp8 = load_bf16_rows_fp8(p + "gate_proj.weight", r * I, I);
       m.up_fp8 = load_bf16_rows_fp8(p + "up_proj.weight", r * I, I);
@@ -106,9 +232,20 @@ struct LlamaLoaderFamily::Builder : WeightBuilder<LlamaExpectedTensor> {
     out.layer = layer;
     out.input_norm = load_bf16(p + "input_layernorm.weight");
     out.post_norm = load_bf16(p + "post_attention_layernorm.weight");
+    // The NVFP4 layer's seven global-scale slots (q, k, v, o, gate, up,
+    // down), one 256-aligned grant; the matrices point into it.
+    if (cfg.weights_nvfp4) fp4_slots = static_cast<float*>(bump.alloc(7 * sizeof(float)));
     build_attention(p + "self_attn.");
     build_mlp(p + "mlp.");
   }
+
+ private:
+  float* fp4_slots = nullptr;  // device, inside the layer bump; null counting
+
+ public:
+  // The i-th of the seven fp4 global slots (null while counting — the
+  // helper's writes are copy-guarded).
+  float* slot(int i) const { return fp4_slots ? fp4_slots + i : nullptr; }
 };
 
 namespace {
@@ -201,7 +338,10 @@ size_t LlamaLoaderFamily::globals_bytes(const LlamaTextConfig& cfg, int rank, in
 
 size_t LlamaLoaderFamily::globals_side_bytes(const LlamaTextConfig& cfg, int rank, int world,
                                              LoaderHeadSharding head) {
-  if (g_dense_weights_fp8) return 0;  // no bf16 head bytes, so no bf12 side grant
+  // No bf12 side grant under either quantized-head mode (fp8: no bf16 head
+  // bytes; nvfp4: the model refuses the bf12 pairing — the projections'
+  // bf16 pointers are null, so pack_layer_companions has no subject).
+  if (g_dense_weights_fp8 || cfg.weights_nvfp4) return 0;
   const int count = LlamaLocalGeometry::from_config(cfg, rank, world, head).lm_vocab_count;
   if (!bf12_shape_ok(count, cfg.hidden_size)) return 0;
   return align_up_256(static_cast<size_t>(count) * static_cast<size_t>(cfg.hidden_size) * 2);
@@ -251,10 +391,12 @@ void LlamaLoaderFamily::build_globals(const LlamaTextConfig& cfg, const LlamaLoc
     out.lm_vocab_count = count;
     return;
   }
-  // The head is packable (the model's 12-bit companion replaces it).
-  uint16_t* dst = static_cast<uint16_t*>(bf12_shape_ok(count, cfg.hidden_size)
-                                             ? bump.alloc_side(static_cast<size_t>(count) * row_bytes)
-                                             : bump.alloc(static_cast<size_t>(count) * row_bytes));
+  // The head is packable (the model's 12-bit companion replaces it). Under
+  // the NVFP4 checkpoint it loads plain: bf12 is refused for this model.
+  uint16_t* dst = static_cast<uint16_t*>(
+      (!cfg.weights_nvfp4 && bf12_shape_ok(count, cfg.hidden_size))
+          ? bump.alloc_side(static_cast<size_t>(count) * row_bytes)
+          : bump.alloc(static_cast<size_t>(count) * row_bytes));
   std::memcpy(bump.host(dst), static_cast<const uint8_t*>(t.data) + static_cast<size_t>(begin) * row_bytes,
               static_cast<size_t>(count) * row_bytes);
   source_bytes += static_cast<size_t>(count) * row_bytes;
@@ -264,7 +406,9 @@ void LlamaLoaderFamily::build_globals(const LlamaTextConfig& cfg, const LlamaLoc
   out.lm_vocab_count = count;
 }
 
-uint64_t LlamaLoaderFamily::loader_format() { return g_dense_weights_fp8 ? 2 : 1; }
+uint64_t LlamaLoaderFamily::loader_format() {
+  return g_dense_weights_fp8 ? 2 : (g_weights_nvfp4 ? 3 : 1);
+}
 
 template class ResidentLayerStream<LlamaLoaderFamily>;
 
@@ -275,6 +419,7 @@ LlamaLayerStream::LlamaLayerStream(const LlamaTextConfig& cfg, const std::string
                                    LlamaHeadSharding head, bool resident_mtp)
     : ResidentLayerStream<LlamaLoaderFamily>(cfg, checkpoint_dir, rank, world, residency, head,
                                              resident_mtp) {
+  g_weights_nvfp4 = cfg.weights_nvfp4;
   open_resident_image();
 }
 
@@ -285,5 +430,8 @@ const std::string& LlamaLayerStream::resident_image_dir() { return resident_imag
 
 void LlamaLayerStream::set_dense_weights_fp8(bool on) { g_dense_weights_fp8 = on; }
 bool LlamaLayerStream::dense_weights_fp8() { return g_dense_weights_fp8; }
+
+void LlamaLayerStream::set_weights_nvfp4(bool on) { g_weights_nvfp4 = on; }
+bool LlamaLayerStream::weights_nvfp4() { return g_weights_nvfp4; }
 
 }  // namespace dgpp

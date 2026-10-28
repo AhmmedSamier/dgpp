@@ -11,6 +11,12 @@
 //                        combine, o_proj
 //   LlamaDenseMlp        gate/up, swiglu, down on the GEMM interface
 //                        (BF16 throughout)
+//
+// Weight forms per projection: BF16 on the GEMM interface, block FP8 on
+// the scale GEMM (engine.dense_weights = "fp8"), or the ModelOpt NVFP4
+// triple (a W4A16_NVFP4 checkpoint) on the fp4 GEMV core (decode rows)
+// and the fp4 tile GEMM (prefill; bf16 outs — the attention's q/k/v widen
+// to fp32 through cast_bf16_to_f32_rows).
 #include <cstddef>
 #include <cstdint>
 
@@ -18,9 +24,11 @@
 
 #include "common/paged_attention_rows.hpp"
 #include "kernels/gemm.hpp"
+#include "kernels/fp4_gemv.hpp"
 #include "models/llama/config.hpp"
 #include "models/llama/kv_pool.hpp"
 #include "models/llama/loader.hpp"
+#include "models/quant_matrix.hpp"
 
 namespace dgpp {
 
@@ -62,7 +70,7 @@ class LlamaAttentionLayer {
                uint16_t* out, cudaStream_t stream);
 
   static size_t scratch_bytes(const LlamaTextConfig& cfg, int local_heads, int local_kv_heads, int max_tokens,
-                              int decode_rows, int n_split_decode);
+                              int decode_rows, int n_split_decode, bool fp4_weights = false);
   // The default decode split count (DGPP_LLAMA_ATTN_SPLITS overrides).
   static int default_decode_splits();
   int local_heads() const { return lh_; }
@@ -84,12 +92,17 @@ class LlamaAttentionLayer {
   float* l_ws_ = nullptr;
   float* c_ws_ = nullptr;        // [part_rows, lh, D]
   uint16_t* o_ = nullptr;        // [M, lh * D] bf16
+  // The NVFP4 prefill's bf16 GEMM outs for k/v (the fp4 tile kernel has no
+  // fp32 epilogue; q reuses q_ as its scratch — the projections run before
+  // the RoPE overwrites it), widened to fp32 by cast_bf16_to_f32_rows.
+  uint16_t* k4b_ = nullptr;
+  uint16_t* v4b_ = nullptr;
 };
 
 class LlamaDenseMlp {
  public:
   LlamaDenseMlp(const LlamaDenseMlpResident& w, const LlamaGemmWorkspace& gemm, const LlamaTextConfig& cfg,
-                int max_tokens);
+                int max_tokens, int decode_rows = 0);
   ~LlamaDenseMlp();
   LlamaDenseMlp(const LlamaDenseMlp&) = delete;
   LlamaDenseMlp& operator=(const LlamaDenseMlp&) = delete;
@@ -102,6 +115,7 @@ class LlamaDenseMlp {
   LlamaDenseMlpResident w_;
   LlamaGemmWorkspace g_;
   int hidden_, max_tokens_;
+  int decode_rows_ = 0;  // the GEMV/mma boundary of the fp4 path (0: always mma... fp4 requires > 0)
   int64_t inter_;
   uint16_t* gate_ = nullptr;  // [M, I]
   uint16_t* up_ = nullptr;    // [M, I]

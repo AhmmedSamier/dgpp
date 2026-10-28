@@ -130,9 +130,46 @@ LlamaTextConfig LlamaTextConfig::parse(const minijson::Value& root) {
   if (c.intermediate_size <= 0 || c.intermediate_size % 32 != 0)
     reject("intermediate_size", "must be a positive multiple of 32");
 
-  // --- scope guards: dense BF16 Llama only ----------------------------------
-  if (const minijson::Value* qc = root.find("quantization_config"); qc && !qc->is_null())
-    reject("quantization_config", "quantized Llama checkpoints are not implemented");
+  // --- scope guards: dense Llama only ---------------------------------------
+  c.weights_nvfp4 = false;
+  if (const minijson::Value* qc = root.find("quantization_config"); qc && !qc->is_null()) {
+    // Weight-only NVFP4 (ModelOpt export): every Linear's weights are e2m1
+    // pairs + e4m3 group-16 scales + one fp32 global; activations stay bf16
+    // and the head/embeddings stay unquantized. Anything else is rejected.
+    if (!qc->is_object()) reject("quantization_config", "not an object");
+    if (optional_string(*qc, "quant_method", "") != "modelopt")
+      reject("quantization_config",
+             "unsupported quant_method (only modelopt NVFP4 is implemented)");
+    if (optional_string(*qc, "quant_algo", "") != "W4A16_NVFP4")
+      reject("quantization_config", "unsupported quant_algo (only W4A16_NVFP4 is implemented)");
+    const minijson::Value* groups = qc->find("config_groups");
+    if (!groups || !groups->is_object() || groups->members().size() != 1)
+      reject("quantization_config", "expected exactly one config group");
+    const minijson::Value& grp = groups->members().front().value;
+    const minijson::Value* w = grp.find("weights");
+    if (!w || !w->is_object()) reject("quantization_config", "missing weights group");
+    if (optional_int(*w, "num_bits", 0) != 4 || optional_int(*w, "group_size", 0) != 16 ||
+        optional_string(*w, "type", "") != "float")
+      reject("quantization_config", "weights must be NVFP4 (4-bit float, group size 16)");
+    if (optional_bool(*w, "dynamic", true))
+      reject("quantization_config", "dynamic weight quantization is not supported");
+    bool saw_linear = false;
+    if (const minijson::Value* t = grp.find("targets"); t && t->is_array())
+      for (const auto& v : t->items())
+        if (v.is_string() && v.as_string() == "Linear") saw_linear = true;
+    if (!saw_linear) reject("quantization_config", "weights targets must be 'Linear'");
+    bool ignored_head = false, ignored_embed = false;
+    if (const minijson::Value* ig = qc->find("ignore"); ig && ig->is_array())
+      for (const auto& v : ig->items()) {
+        if (!v.is_string()) continue;
+        const std::string s(v.as_string());
+        if (s == "lm_head" || s == "lm_head.weight") ignored_head = true;
+        if (s == "model.embed_tokens" || s == "model.embed_tokens.weight") ignored_embed = true;
+      }
+    if (!ignored_head || !ignored_embed)
+      reject("quantization_config", "lm_head and model.embed_tokens must stay unquantized");
+    c.weights_nvfp4 = true;
+  }
   if (optional_int(root, "num_nextn_predict_layers", 0) != 0)
     reject("num_nextn_predict_layers", "only the plain (no-draft) stack is implemented");
   if (optional_int(root, "num_key_value_groups", 0) != 0 &&
