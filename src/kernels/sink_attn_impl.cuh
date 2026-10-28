@@ -200,8 +200,8 @@ __global__ void qkv_finish_kernel(const float* __restrict__ qkv, int64_t qkv_str
                                   int block_tokens, uint16_t* __restrict__ q_out, int64_t q_out_stride,
                                   uint16_t* __restrict__ k_cache, uint16_t* __restrict__ v_cache,
                                   float* __restrict__ k_scale, float* __restrict__ v_scale) {
-  using HL = HeadLane<DK, R>;
   dgpp_pdl_wait();
+  using HL = HeadLane<DK, R>;
   const int heads_total = local_heads + 2 * kv_heads;
   const int item = static_cast<int>(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;
   if (item >= rows * heads_total) return;
@@ -330,8 +330,8 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_st
                                     float* __restrict__ c_ws,
                                     const float* __restrict__ k_scale,
                                     const float* __restrict__ v_scale) {
-  constexpr int kRowStride = Geo<DK>::kRowStride;
   dgpp_pdl_wait();
+  constexpr int kRowStride = Geo<DK>::kRowStride;
   extern __shared__ __align__(16) uint16_t smem[];
   const int hpk = local_heads / kv_heads;
   const int r = static_cast<int>(blockIdx.x);
@@ -678,9 +678,9 @@ __device__ __forceinline__ void store_tile_pieces(int64_t t0, int64_t t_end, con
 
 template <int DK, int R, bool kFp8>
 __global__ void __launch_bounds__(kFusedMaxThreads) attn_fused_kernel(SinkAttnFusedArgs a) {
+  dgpp_pdl_wait();
   using HL = HeadLane<DK, R>;
   constexpr int kRowStride = Geo<DK>::kRowStride;
-  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t smem[];
   __shared__ int s_last;
   const int hpk = a.local_heads / a.kv_heads;

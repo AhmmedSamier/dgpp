@@ -10,10 +10,12 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <cuda_runtime.h>
 
 #include "common/cuda_check.hpp"
+#include "engine/cache_planes.hpp"
 
 namespace dgpp {
 
@@ -101,6 +103,17 @@ class DraftKvPlanes {
                                    span, cudaMemcpyDeviceToDevice, stream));
       DGPP_CUDA_OK(cudaMemcpyAsync(v.v + static_cast<size_t>(dst) * block_elems, v.v + static_cast<size_t>(src) * block_elems,
                                    span, cudaMemcpyDeviceToDevice, stream));
+    }
+  }
+  // The NVMe cold tier's view (engine/cache_planes.hpp): every draft
+  // layer's K and V plane, one block's bytes each, appended to `out` in
+  // the order copy_block walks them.
+  void append_planes(std::vector<CachePlane>& out) const {
+    const size_t block_bytes = static_cast<size_t>(block_tokens_) * kv_heads_ * dim_ * sizeof(uint16_t);
+    for (int l = 0; l < layers_; ++l) {
+      const View v = view(l);
+      out.push_back({reinterpret_cast<uint8_t*>(v.k), block_bytes});
+      out.push_back({reinterpret_cast<uint8_t*>(v.v), block_bytes});
     }
   }
   // Cold start / snapshot restore: zero every plane (the table rows are the

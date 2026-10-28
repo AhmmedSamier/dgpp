@@ -70,6 +70,7 @@
 #include "loaders/hf_cache.hpp"
 #include "serve/cluster_config.hpp"
 #include "serve/rank_metrics.hpp"
+#include "serve/nvme_cache_check.hpp"
 #include "dgpp_version.hpp"
 #include "text/chat_template.hpp"
 #include "engine/eager_engine.hpp"
@@ -335,6 +336,9 @@ struct ServeFamily {
   virtual dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world, bool fabric,
                                 int slots, bool mtp, int decode_rows) const = 0;
   virtual size_t snapshot_bytes(int world, bool mtp) const = 0;
+  // One cache block's bytes across the pool's planes (the NVMe cold tier's
+  // record, issue #26) at this shape; 0 for a family without a paged cache.
+  virtual size_t cache_block_bytes(int world, bool mtp) const = 0;
   virtual void build_model(dgpp::BoundaryReducer* reducer, int rank, int world, bool fabric,
                            int forward_rows, int64_t pool_tokens, int slots, bool mtp, int decode_rows) = 0;
   virtual void destroy_model() = 0;
@@ -407,6 +411,9 @@ struct GlmFamily final : ServeFamily {
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::GlmDiagnosticModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  size_t cache_block_bytes(int world_, bool mtp) const override {
+    return dgpp::GlmDiagnosticModel::kv_block_bytes_static(cfg, world_, mtp, kv_format);
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
@@ -537,6 +544,9 @@ struct QwenFamily final : ServeFamily {
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::QwenModel::session_snapshot_bytes(cfg, world_, mtp);
   }
+  size_t cache_block_bytes(int world_, bool mtp) const override {
+    return dgpp::QwenModel::kv_block_bytes_static(cfg, 0, world_, mtp, kv_format, dflash);
+  }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     // The resident image cache: the same directory the process configured
@@ -612,6 +622,9 @@ struct Glm4Family final : ServeFamily {
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::Glm4Model::session_snapshot_bytes(cfg, world_, mtp);
   }
+  size_t cache_block_bytes(int world_, bool mtp) const override {
+    return dgpp::Glm4Model::kv_block_bytes_static(cfg, 0, world_, mtp);
+  }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     dgpp::Glm4LayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
@@ -683,6 +696,9 @@ struct GlmDsaFamily final : ServeFamily {
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::GlmDsaModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  size_t cache_block_bytes(int world_, bool mtp) const override {
+    return dgpp::GlmDsaModel::kv_block_bytes_static(cfg, world_, mtp, kv_format);
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
@@ -785,6 +801,9 @@ struct Dsv41Family final : ServeFamily {
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::Dsv41Model::session_snapshot_bytes(cfg, world_, mtp);
   }
+  size_t cache_block_bytes(int, bool) const override {
+    return dgpp::Dsv41Model::kv_block_bytes_static(cfg);
+  }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     dgpp::Dsv41LayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
@@ -865,6 +884,7 @@ struct Dsv4Family final : ServeFamily {
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::Dsv4Model::session_snapshot_bytes(cfg, world_, mtp);
   }
+  size_t cache_block_bytes(int, bool) const override { return dgpp::Dsv4Model::kv_block_bytes_static(cfg); }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
     dgpp::Dsv4LayerStream::set_resident_image_dir(dgpp::GlmLayerStream::resident_image_dir());
@@ -942,6 +962,9 @@ struct MimoFamily final : ServeFamily {
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::MimoModel::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  size_t cache_block_bytes(int world_, bool mtp) const override {
+    return dgpp::MimoModel::kv_block_bytes_static(cfg, 0, world_, mtp, kv_format);
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
@@ -1025,6 +1048,10 @@ struct FlintFamily final : ServeFamily {
   size_t snapshot_bytes(int world_, bool mtp) const override {
     refuse_mtp(mtp);
     return dgpp::FlintModel::session_snapshot_bytes(cfg, world_, false);
+  }
+  size_t cache_block_bytes(int world_, bool mtp) const override {
+    refuse_mtp(mtp);
+    return dgpp::FlintModel::kv_block_bytes_static(cfg, 0, world_, kv_format);
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
@@ -1137,6 +1164,9 @@ struct Qwen35Family final : ServeFamily {
   }
   size_t snapshot_bytes(int world_, bool mtp) const override {
     return dgpp::Qwen35Model::session_snapshot_bytes(cfg, world_, mtp);
+  }
+  size_t cache_block_bytes(int world_, bool mtp) const override {
+    return dgpp::Qwen35Model::kv_block_bytes_static(cfg, 0, world_, mtp, dflash, kv_format);
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world_, bool fabric, int forward_rows,
                    int64_t pool_tokens, int slots, bool mtp, int decode_rows) override {
@@ -1381,6 +1411,30 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
   if (oplog) service.set_audit_observer(oplog);
   if (k.world > 1)
     service.set_rank_metrics({0, k.world, DGPP_VERSION, DGPP_GIT_SHA}, collective_progress);
+  // The NVMe cold tier's verdicts (issue #26) on a fabric: every rank's
+  // completion of an op lands in the collector — the peers' over the
+  // journal's return path, this rank's from its own tier after each pass —
+  // and the commits ready at a pass ride that pass's record.
+  std::optional<dgpp::serve::DiskCommitCollector> disk_commits;
+  if (journal && engine->disk_info().enabled) {
+    disk_commits.emplace(k.world);
+    service.set_disk_hooks(
+        [&]() {
+          for (const auto& [peer, line] : journal->poll_peer_lines()) {
+            uint64_t op = 0;
+            bool ok = false;
+            if (!dgpp::serve::decode_disk_status(line, &op, &ok)) {
+              DGPP_LOG_WARN("journal: rank {} sent an unexpected line: '{}'", peer, line);
+              continue;
+            }
+            disk_commits->add(peer, op, ok);
+          }
+          return disk_commits->take_ready();
+        },
+        [&](const std::vector<dgpp::sched::SchedulerEngine::DiskCompletion>& done) {
+          for (const auto& c : done) disk_commits->add(0, c.op, c.ok);
+        });
+  }
   dgpp::serve::HttpServer http(k.http_port, &service, k.max_connections, k.http_bind,
                                k.http_max_body_bytes, k.stream_flush == "wake");
   DGPP_LOG_INFO("serve: HTTP request body limit {} bytes", k.http_max_body_bytes);
@@ -1764,6 +1818,7 @@ int main(int argc, char** argv) {
   // and a cold prompt keeps the cut at its first structural boundary.
   int prefix_min_tokens = 1024;
   bool prefix_head_snapshots = true;
+  int prefix_pin_max_pct = 50;
   // The bulk collective's sender pacing (prefill all-reduces): negative
   // derives the per-QP rate from the port at bus start.
   double bulk_pace_gbps = -1.0;
@@ -1792,6 +1847,19 @@ int main(int argc, char** argv) {
   int lookup_nmin = 6, lookup_nstrong = 8, lookup_agree = 2;
   int lookup_tail = 0;  // engine.lookup_tail: extra verify rows past the MTP block (0: the block alone)
   double prefix_cache_gib = 1.5;  // M7: the snapshot arena; 0 = off
+  // The NVMe cold tier (issue #26): the top-level nvme_cache block of the
+  // cluster config; on/off, the capacity and the minimum ride the settings
+  // record, the path is each rank's own.
+  bool nvme_cache = false;
+  std::string nvme_cache_path = "~/dgpp/nvme-cache";
+  double nvme_cache_gib = 0.0;
+  int64_t nvme_cache_min_tokens = 0;
+  int64_t nvme_cache_chunk_mib = 64;
+  int64_t nvme_cache_max_ops = 4;
+  double nvme_cache_reserve_gib = 1.0;
+  bool nvme_cache_persist = true;
+  bool nvme_cache_allow_buffered = false;
+  int64_t nvme_cache_op_timeout_s = 120;
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<float> frequency_penalty, presence_penalty;
   std::optional<int> top_k;
@@ -1929,6 +1997,16 @@ int main(int argc, char** argv) {
     frequency_penalty = e.frequency_penalty;
     presence_penalty = e.presence_penalty;
     prefix_cache_gib = e.prefix_cache_gib;
+    nvme_cache = c.nvme_cache.enabled;
+    nvme_cache_path = c.nvme_cache.path;
+    nvme_cache_gib = c.nvme_cache.capacity_gib;
+    nvme_cache_min_tokens = c.nvme_cache.min_tokens;
+    nvme_cache_chunk_mib = c.nvme_cache.chunk_mib;
+    nvme_cache_max_ops = c.nvme_cache.max_ops;
+    nvme_cache_reserve_gib = c.nvme_cache.reserve_gib;
+    nvme_cache_persist = c.nvme_cache.persist;
+    nvme_cache_allow_buffered = c.nvme_cache.allow_buffered;
+    nvme_cache_op_timeout_s = c.nvme_cache.op_timeout_s;
     admission_mode = e.admission;
     admission_window = e.admission_window;
     model_alias = e.model_alias;
@@ -1940,6 +2018,7 @@ int main(int argc, char** argv) {
     prefill_early_admission_override = e.prefill_early_admission;
     prefix_min_tokens = e.prefix_min_tokens;
     prefix_head_snapshots = e.prefix_head_snapshots;
+    prefix_pin_max_pct = e.prefix_pin_max_pct;
     bulk_pace_gbps = e.bulk_pace_gbps;
     bulk_inflight = e.bulk_inflight;
     rendezvous_timeout_ms = e.rendezvous_timeout_ms;
@@ -2300,7 +2379,7 @@ int main(int argc, char** argv) {
         "batchmin={} cand={} "
         "pcgib={} adm={} win={} pfbudget={} pfidle={} gapms={} ttftms={} pfhr={} pfgrow={} pfrec={} pfstart={} pfifloor={} pfearly={} pmin={} phead={} pace={} inflight={} "
         "reasoning_in_content={} "
-        "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={}",
+        "rs={} dflash={} dfw={} lk={} lkn={} lks={} lka={} lkt={} nvme={}",
         model_id.empty() ? ckpt : model_id, world, fabric_port, journal_port, max_concurrency,
         kv_capacity, kv_dtype, prefill_attention, decode_attention, ngram_table, dense_weights, mtp_expert_format, bf16_weights, fp8_head,
         draft_head,
@@ -2318,7 +2397,7 @@ int main(int argc, char** argv) {
         prefill_latency.headroom_pct, prefill_latency.growth_factor, prefill_latency.recovery_pct,
         prefill_latency.initial_tokens, prefill_latency.idle_floor_tokens,
         prefill_early_admission_override.has_value() ? (*prefill_early_admission_override ? 1 : 0) : -1,
-        prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
+        prefix_min_tokens, prefix_head_snapshots ? 1 : 0, prefix_pin_max_pct,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
         rope_scaling ? std::format("yarn:{}:{}:{}:{}:{}:{}", rope_scaling->factor,
                                    rope_scaling->original_max_position_embeddings,
@@ -2326,7 +2405,11 @@ int main(int argc, char** argv) {
                                    rope_scaling->attn_factor, rope_scaling->mrope_cache_factor)
                      : "off",
         dflash_model.empty() ? "off" : dflash_model, dflash_weights, lookup_draft ? 1 : 0,
-        lookup_nmin, lookup_nstrong, lookup_agree, lookup_tail);
+        lookup_nmin, lookup_nstrong, lookup_agree, lookup_tail,
+        nvme_cache ? std::format("{}:{}:{}:{}:{}:{}:{}", nvme_cache_gib, nvme_cache_min_tokens, nvme_cache_chunk_mib,
+                                 nvme_cache_max_ops, nvme_cache_reserve_gib, nvme_cache_persist ? 1 : 0,
+                                 nvme_cache_op_timeout_s)
+                   : std::string("off"));
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
     try {
@@ -2436,11 +2519,20 @@ int main(int argc, char** argv) {
         ws.prefill_early_admission = prefill_early_admission_override;
         ws.prefix_min_tokens = prefix_min_tokens;
         ws.prefix_head_snapshots = prefix_head_snapshots;
+        ws.prefix_pin_max_pct = prefix_pin_max_pct;
         ws.bulk_pace_gbps = bulk_pace_gbps;
         ws.bulk_inflight = bulk_inflight;
         ws.rendezvous_timeout_ms = rendezvous_timeout_ms;
         ws.stats_interval_s = stats_interval_s;
         ws.reasoning_in_content = reasoning_in_content;
+        ws.nvme_cache = nvme_cache;
+        ws.nvme_cache_capacity_gib = nvme_cache ? nvme_cache_gib : 0.0;
+        ws.nvme_cache_min_tokens = nvme_cache ? nvme_cache_min_tokens : 0;
+        ws.nvme_cache_chunk_mib = nvme_cache_chunk_mib;
+        ws.nvme_cache_max_ops = nvme_cache_max_ops;
+        ws.nvme_cache_reserve_gib = nvme_cache_reserve_gib;
+        ws.nvme_cache_persist = nvme_cache_persist;
+        ws.nvme_cache_op_timeout_s = nvme_cache_op_timeout_s;
         journal->broadcast(dgpp::serve::encode_journal_settings(ws));
         DGPP_LOG_INFO("journal: settings pushed to {} peer(s): {}", world - 1,
                       canonical());
@@ -2546,11 +2638,22 @@ int main(int argc, char** argv) {
         prefill_early_admission_override = ws.prefill_early_admission;
         prefix_min_tokens = ws.prefix_min_tokens;
         prefix_head_snapshots = ws.prefix_head_snapshots;
+        prefix_pin_max_pct = ws.prefix_pin_max_pct;
         bulk_pace_gbps = ws.bulk_pace_gbps;
         bulk_inflight = ws.bulk_inflight;
         rendezvous_timeout_ms = ws.rendezvous_timeout_ms;
         stats_interval_s = ws.stats_interval_s;
         reasoning_in_content = ws.reasoning_in_content;
+        nvme_cache = ws.nvme_cache;
+        if (nvme_cache) {
+          nvme_cache_gib = ws.nvme_cache_capacity_gib;
+          nvme_cache_min_tokens = ws.nvme_cache_min_tokens;
+          nvme_cache_chunk_mib = ws.nvme_cache_chunk_mib;
+          nvme_cache_max_ops = ws.nvme_cache_max_ops;
+          nvme_cache_reserve_gib = ws.nvme_cache_reserve_gib;
+          nvme_cache_persist = ws.nvme_cache_persist;
+          nvme_cache_op_timeout_s = ws.nvme_cache_op_timeout_s;
+        }
         const std::string now = canonical();
         if (own != now)
           DGPP_LOG_WARN(
@@ -2861,6 +2964,28 @@ int main(int argc, char** argv) {
   }
   if (prefix_cache_gib < 0.0) {
     DGPP_LOG_ERROR("--prefix-cache-gib must be >= 0, got {}", prefix_cache_gib);
+    return 2;
+  }
+  if (nvme_cache && !(nvme_cache_gib > 0.0)) {
+    DGPP_LOG_ERROR("nvme_cache.capacity_gib must be positive when the NVMe cache is enabled (got {})",
+                   nvme_cache_gib);
+    return 2;
+  }
+  if (nvme_cache && !(prefix_cache_gib > 0.0)) {
+    DGPP_LOG_ERROR("nvme_cache.enabled needs the prefix cache (engine.prefix_cache_gib > 0): the tier holds "
+                   "what the arena evicts");
+    return 2;
+  }
+  if (nvme_cache && nvme_cache_min_tokens < 0) {
+    DGPP_LOG_ERROR("nvme_cache.min_tokens must be >= 0, got {}", nvme_cache_min_tokens);
+    return 2;
+  }
+  if (nvme_cache && (nvme_cache_op_timeout_s < 0 || nvme_cache_op_timeout_s > 86400)) {
+    DGPP_LOG_ERROR("nvme_cache.op_timeout_s must be in [0, 86400], got {}", nvme_cache_op_timeout_s);
+    return 2;
+  }
+  if (prefix_pin_max_pct < 0 || prefix_pin_max_pct > 100) {
+    DGPP_LOG_ERROR("engine.prefix_pin_max_pct must be in [0, 100], got {}", prefix_pin_max_pct);
     return 2;
   }
   if (!(stats_interval_s >= 0.0)) {
@@ -3251,9 +3376,96 @@ int main(int argc, char** argv) {
         rank, prefix_cache_gib, arena_slots,
         static_cast<double>(snapshot_bytes) / (1024.0 * 1024.0),
         static_cast<double>(prefix_arena_bytes) / (1024.0 * 1024.0 * 1024.0), pool_tokens);
+    // The NVMe cold tier's pre-flight (issue #26): the slab's directory,
+    // the free space beside it and the minimum capacity, from the family's
+    // block record and snapshot sizes, before anything is allocated; its
+    // staging buffers join the engine's bytes in the memory plan.
+    const size_t kNvmeChunkBytes = static_cast<size_t>(nvme_cache_chunk_mib) << 20;
+    const size_t nvme_staging_bytes = nvme_cache ? dgpp::nvme_tier_staging_bytes(kNvmeChunkBytes) : 0;
+    dgpp::serve::NvmeCachePlan nvme_plan;
+    // The binding a slab that outlives the process is kept under: the
+    // binary (a release may lay a block's planes out differently at the
+    // same byte count, or compute its KV differently), the checkpoint, the
+    // effective settings (their digest) and the slab's geometry — a start
+    // under another one never sees these entries.
+    const std::string nvme_binding =
+        nvme_cache && nvme_cache_persist
+            ? dgpp::serve::config_digest(
+                  std::string(DGPP_VERSION) + "|" + config_digest + "|" + ckpt + "|" +
+                  std::to_string(family->cache_block_bytes(world, mtp && graph_world)) + "|" +
+                  std::to_string(snapshot_bytes) + "|" + std::format("{:.17g}", nvme_cache_gib) + "|" +
+                  std::to_string(block_tokens) + "|" + std::to_string(world))
+            : std::string();
+    if (nvme_cache) {
+      nvme_plan = dgpp::serve::plan_nvme_cache(nvme_cache_path, nvme_cache_gib, rank,
+                                               family->cache_block_bytes(world, mtp && graph_world),
+                                               snapshot_bytes, block_tokens, context_limit,
+                                               /*create_directory=*/!memory_plan_only,
+                                               static_cast<size_t>(nvme_cache_reserve_gib * 1024.0 * 1024.0 * 1024.0),
+                                               nvme_binding, kNvmeChunkBytes);
+      DGPP_LOG_INFO("rank {}: {}", rank, nvme_plan.describe());
+      if (!nvme_plan.error.empty()) {
+        DGPP_LOG_ERROR("rank {}: the NVMe cache does not fit — {}", rank, nvme_plan.error);
+        return 1;
+      }
+      if (arena_slots <= 0) {
+        DGPP_LOG_ERROR("rank {}: the NVMe cache needs prefix cache slots (the arena holds none at this budget)",
+                       rank);
+        return 1;
+      }
+    }
     const size_t engine_bytes =
         static_cast<size_t>(max_concurrency) * static_cast<size_t>(family->vocab_size()) * 8 +
-        static_cast<size_t>(pool_tokens) * 16 + (size_t{64} << 20);
+        static_cast<size_t>(pool_tokens) * 16 + (size_t{64} << 20) + nvme_staging_bytes;
+    // The tier's opening (issue #26), once the engine exists and before any
+    // capture: the slab file at the planned capacity, the worker, the
+    // staging buffers.
+    const auto enable_nvme_cache = [&](dgpp::sched::SchedulerEngine* eng) {
+      if (!nvme_cache) return;
+      dgpp::sched::SchedulerEngine::DiskEnable en;
+      en.slab_path = nvme_plan.slab;
+      en.capacity_bytes = nvme_plan.capacity_bytes;
+      en.chunk_bytes = kNvmeChunkBytes;
+      en.min_tokens = nvme_cache_min_tokens;  // 0: every entry memory keeps (engine.prefix_min_tokens floors them)
+      en.max_ops = static_cast<int>(nvme_cache_max_ops);
+      en.rank = rank;
+      en.persist = nvme_cache_persist;
+      en.binding = nvme_binding;
+      en.allow_buffered = nvme_cache_allow_buffered;
+      en.op_timeout_s = static_cast<int>(nvme_cache_op_timeout_s);
+      eng->disk_enable(en);
+      const dgpp::sched::SchedulerEngine::DiskInfo info = eng->disk_info();
+      // The pre-flight sized the slab from the family's static estimate of a
+      // block's planes; the tier sized it from the pool as built. They must
+      // agree, or the minimum the check enforced and the page count the
+      // world's decisions assume are not this slab's — a defect in the
+      // family's estimate, refused here rather than discovered on a restore.
+      if (info.page_bytes != nvme_plan.page_bytes || info.pages != nvme_plan.pages)
+        throw std::runtime_error(std::format(
+            "NVMe cache: the family's static block estimate ({} bytes/page, {} pages) disagrees with the pool "
+            "as built ({} bytes/page, {} pages) — the estimate omits a plane",
+            nvme_plan.page_bytes, nvme_plan.pages, info.page_bytes, info.pages));
+      // The blob is the family's static snapshot estimate against the arena
+      // as built; a slot that came out a page larger (DeepSeek-V4.1's
+      // 3.476 MiB estimate against 3.5 MiB built, 2026-10-27) moves the
+      // minimum by that page, which is worth a line, not a refusal.
+      if (info.blob_pages != nvme_plan.blob_pages)
+        DGPP_LOG_WARN("rank {}: NVMe cache: the snapshot blob spans {} pages as built against {} in the plan (the "
+                      "family's static snapshot estimate is off by {} bytes); the minimum capacity was checked "
+                      "with the plan's figure",
+                      rank, info.blob_pages, nvme_plan.blob_pages,
+                      static_cast<int64_t>(info.blob_pages - nvme_plan.blob_pages) *
+                          static_cast<int64_t>(info.page_bytes));
+      DGPP_LOG_INFO("rank {}: NVMe cache on — {} pages of {} bytes ({:.2f} GiB), entries of at least {} tokens, "
+                    "{} MiB slices, {} ops in flight at most",
+                    rank, info.pages, info.page_bytes,
+                    static_cast<double>(info.pages) * static_cast<double>(info.page_bytes) /
+                        (1024.0 * 1024.0 * 1024.0),
+                    info.min_tokens, nvme_cache_chunk_mib, info.max_ops);
+      // A world of one decides its own adoption; a fabric decides at the
+      // warm handshake, every rank's candidate compared.
+      if (world == 1 && nvme_cache_persist) eng->disk_adopt(eng->disk_candidate_digest() != "0");
+    };
     if (memory_plan_only) {
       // The check alone, for the shape this rank would run (world > 1: the
       // resident, vocab-sharded fabric model; world 1: the streaming one).
@@ -3336,6 +3548,7 @@ int main(int argc, char** argv) {
     knobs.admission.prefill_latency = prefill_latency;
     knobs.admission.prefix_min_tokens = prefix_min_tokens;
     knobs.admission.prefix_head_snapshots = prefix_head_snapshots;
+    knobs.admission.prefix_pin_max_pct = prefix_pin_max_pct;
     knobs.default_max_tokens = default_max_tokens;
     knobs.file_inputs = file_inputs;
     knobs.sampling_defaults = sampling_defaults;
@@ -3456,23 +3669,47 @@ int main(int argc, char** argv) {
           engine.reset();
           family->destroy_model();
         };
-        const auto start_warm = [&] {
+        const auto start_warm = [&](dgpp::sched::SchedulerEngine* eng) {
           // Any rank can be last out of cold checkpoint loading. Wait on TCP
           // before launching collectives, whose deadlines bound execution,
           // not disk I/O on a peer. Apply the same hold to graph and eager serving.
+          // The readiness lines carry each rank's NVMe cache candidate (the
+          // previous run's index digest): rank 0 adopts only when every
+          // rank holds the same one, and says so on the warm record.
+          const bool persisted = nvme_cache && nvme_cache_persist;
           if (rank == 0) {
             if (journal) {
+              std::vector<std::pair<int, std::string>> notes;
               if (!journal->wait_peers_ready(rendezvous_timeout_ms,
-                                             [rank] { return peer_should_stop(rank); })) return false;
+                                             [rank] { return peer_should_stop(rank); }, &notes)) return false;
+              bool adopt = false;
+              if (persisted) {
+                const std::string own = eng->disk_candidate_digest();
+                adopt = own != "0";
+                for (const auto& [peer, note] : notes)
+                  if (note != own) {
+                    if (adopt)
+                      DGPP_LOG_INFO("rank 0: NVMe cache: rank {}'s previous index ({}) is not rank 0's ({})", peer,
+                                    note.empty() ? "none" : note, own);
+                    adopt = false;
+                  }
+                DGPP_LOG_INFO("rank 0: NVMe cache: {}",
+                              adopt ? "every rank holds the same previous index; the world adopts it"
+                                    : "no previous index every rank holds; the slabs start fresh");
+                eng->disk_adopt(adopt);
+              }
               journal->broadcast(dgpp::serve::encode_journal_warm(
-                  knobs.admission, prefix_slots, config_digest));
+                  knobs.admission, prefix_slots, config_digest, adopt));
             }
             return true;
           }
-          reader->send_ready();
-          return dgpp::serve::wait_journal_warm(
+          reader->send_ready(persisted ? eng->disk_candidate_digest() : std::string());
+          bool adopt = false;
+          const bool ok = dgpp::serve::wait_journal_warm(
               &*reader, [rank] { return peer_should_stop(rank); },
-              &peer_policy, &peer_prefix_slots, &rank0_config);
+              &peer_policy, &peer_prefix_slots, &rank0_config, &adopt);
+          if (ok && persisted) eng->disk_adopt(adopt);
+          return ok;
         };
         if (decode_graph) {
           std::unique_ptr<ServeGraphEngine> graph_engine =
@@ -3540,6 +3777,8 @@ int main(int argc, char** argv) {
                                        : "draw each draft from the selector's softmax under the ratio verify",
                           mtp_draft, mtp_draft_temperature);
           }
+          enable_nvme_cache(graph_engine->engine());
+          dgpp::sched::SchedulerEngine* const warm_engine = graph_engine->engine();
           if (mtp_schedule) {
             // The value of decode time: the configured throughput, or the
             // reservation rate of the configured curve (a plain step's).
@@ -3557,7 +3796,7 @@ int main(int argc, char** argv) {
           // point, so no capture pauses a live stream later. The warm-up
           // is a run of collectives, so the journal releases it only after
           // every rank has finished constructing its model and engine.
-          if (!start_warm()) {
+          if (!start_warm(warm_engine)) {
             graph_engine.reset();
             family->destroy_model();
             cudaFreeHost(pick_scratch);
@@ -3586,9 +3825,10 @@ int main(int argc, char** argv) {
           knobs.admission = dgpp::serve::resolve_prefill_policy(
               knobs.admission, *engine, prefill_early_admission_override);
           peer_policy = knobs.admission;
+          enable_nvme_cache(engine.get());
           // The eager fabric path exchanges the warm record too: it
           // carries the admission policy (no capture to start here).
-          if (!start_warm()) {
+          if (!start_warm(engine.get())) {
             engine_release();
             cudaFreeHost(pick_scratch);
             bus->stop();
@@ -3720,6 +3960,7 @@ int main(int argc, char** argv) {
         &grammar_vocab, prefix_slots);
     knobs.admission = dgpp::serve::resolve_prefill_policy(
         knobs.admission, *engine, prefill_early_admission_override);
+    enable_nvme_cache(engine.get());
     const int rc = serve_openai(engine.get(), family->vocab_size(), generation_eos, ckpt,
                                 model_display, knobs, no_eos, boot_s(), /*journal=*/nullptr,
                                 /*oplog=*/nullptr, family->name(), family->model_opens_thinking());

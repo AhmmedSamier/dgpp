@@ -482,6 +482,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'" + ek + "' must be >= 0 (0 turns the cache off)");
         } else if (p.key == "prefix_min_tokens")
           e.prefix_min_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
+        else if (p.key == "prefix_pin_max_pct")
+          e.prefix_pin_max_pct = static_cast<int>(integer(x, ek, what, 0, 100));
         else if (p.key == "prefix_head_snapshots") e.prefix_head_snapshots = boolean(x, ek, what);
         else if (p.key == "admission") {
           e.admission = text(x, ek, what);
@@ -508,6 +510,31 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         } else if (p.key == "reasoning_in_content") e.reasoning_in_content = boolean(x, ek, what);
         else fail(what, "unknown key '" + ek + "'");
       }
+    } else if (k == "nvme_cache") {
+      if (!v.is_object()) fail(what, "'nvme_cache' must be an object");
+      ClusterConfig::NvmeCache& n = c.nvme_cache;
+      for (const Member& p : v.members()) {
+        const std::string nk = "nvme_cache." + p.key;
+        if (p.key == "enabled") n.enabled = boolean(p.value, nk, what);
+        else if (p.key == "path") {
+          n.path = text(p.value, nk, what);
+          if (n.path.empty()) fail(what, "'" + nk + "' must not be empty");
+        } else if (p.key == "capacity_gib") {
+          n.capacity_gib = number(p.value, nk, what);
+          if (n.capacity_gib < 0.0) fail(what, "'" + nk + "' must be >= 0");
+        } else if (p.key == "min_tokens") n.min_tokens = integer(p.value, nk, what, 0, 1ll << 40);
+        else if (p.key == "chunk_mib") n.chunk_mib = integer(p.value, nk, what, 4, 4096);
+        else if (p.key == "max_ops") n.max_ops = integer(p.value, nk, what, 1, 256);
+        else if (p.key == "reserve_gib") {
+          n.reserve_gib = number(p.value, nk, what);
+          if (n.reserve_gib < 0.0) fail(what, "'" + nk + "' must be >= 0");
+        } else if (p.key == "persist") n.persist = boolean(p.value, nk, what);
+        else if (p.key == "allow_buffered") n.allow_buffered = boolean(p.value, nk, what);
+        else if (p.key == "op_timeout_s") n.op_timeout_s = integer(p.value, nk, what, 0, 86400);
+        else fail(what, "unknown key '" + nk + "'");
+      }
+      if (n.enabled && n.capacity_gib <= 0.0)
+        fail(what, "'nvme_cache.capacity_gib' must be positive when the cache is enabled");
     } else if (k == "paths") {
       if (!v.is_object()) fail(what, "'paths' must be an object");
       for (const Member& p : v.members()) {

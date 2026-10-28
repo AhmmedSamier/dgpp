@@ -145,6 +145,29 @@ void QwenKvPool::reset_all(cudaStream_t stream) {
   table_.reset_all(stream);
 }
 
+std::vector<CachePlane> QwenKvPool::planes() const {
+  // The same regions copy_block_contents walks: each layer's K and V rows
+  // (bf16, or e4m3 codes with their fp32 scales), its index keys, then the
+  // drafter's planes over the shared table.
+  std::vector<CachePlane> out;
+  if (!initialized_) return out;
+  const size_t kv_blk = static_cast<size_t>(shape_.block_tokens) * kv_row_bytes();
+  const size_t scale_blk = static_cast<size_t>(shape_.block_tokens) * shape_.kv_heads * sizeof(float);
+  const size_t idx_blk = static_cast<size_t>(pools_per_block()) * shape_.idx_dim * 2;
+  for (int l = 0; l < shape_.layers; ++l) {
+    const QwenQsaCache c = view(l);
+    out.push_back({reinterpret_cast<uint8_t*>(c.k_cache), kv_blk});
+    out.push_back({reinterpret_cast<uint8_t*>(c.v_cache), kv_blk});
+    if (fp8()) {
+      out.push_back({reinterpret_cast<uint8_t*>(c.k_scale), scale_blk});
+      out.push_back({reinterpret_cast<uint8_t*>(c.v_scale), scale_blk});
+    }
+    out.push_back({reinterpret_cast<uint8_t*>(c.index_cache), idx_blk});
+  }
+  draft_.append_planes(out);
+  return out;
+}
+
 void QwenKvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream) {
   table_.check_block(src);
   table_.check_block(dst);

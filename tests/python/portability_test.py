@@ -47,6 +47,33 @@ class PortabilityTest(unittest.TestCase):
             self.assertEqual(site_env.default_host(), "127.0.0.1")
             self.assertEqual(site_env.http_port(), 8080)
 
+    def test_nvme_cache_block_passes_through_and_is_checked(self):
+        # The cold tier's top-level block (issue #26) rides the resolved config
+        # as written; its keys and types are checked by name.
+        self.config.write_text(json.dumps({"model": "org/model", "world_size": 1,
+                                         "nvme_cache": {"enabled": True, "path": "/nvme/dgpp",
+                                                        "capacity_gib": 64, "min_tokens": 2048,
+                                                        "chunk_mib": 32, "max_ops": 2, "reserve_gib": 2.5,
+                                                        "persist": False, "allow_buffered": True,
+                                                        "op_timeout_s": 30}}))
+        resolved = site_env.resolve_config(self.config, self.values)
+        self.assertEqual(resolved["nvme_cache"], {"enabled": True, "path": "/nvme/dgpp",
+                                                  "capacity_gib": 64, "min_tokens": 2048,
+                                                  "chunk_mib": 32, "max_ops": 2, "reserve_gib": 2.5,
+                                                  "persist": False, "allow_buffered": True,
+                                                  "op_timeout_s": 30})
+        self.config.write_text(json.dumps({"model": "org/model", "world_size": 1}))
+        self.assertNotIn("nvme_cache", site_env.resolve_config(self.config, self.values))
+        for nvme in ({"enabled": True}, {"enabled": 1}, {"capacity_gib": -1}, {"capacity_gib": True},
+                     {"path": ""}, {"min_tokens": 1.5}, {"size": 3}, [], {"chunk_mib": 2}, {"chunk_mib": 8192},
+                     {"chunk_mib": 1.5}, {"max_ops": 0}, {"max_ops": 257}, {"reserve_gib": -1},
+                     {"reserve_gib": True}, {"persist": 1}, {"allow_buffered": 1}, {"op_timeout_s": -1},
+                     {"op_timeout_s": 1.5}, {"op_timeout_s": 90000}):
+            with self.subTest(nvme=nvme):
+                self.config.write_text(json.dumps({"model": "org/model", "world_size": 1, "nvme_cache": nvme}))
+                with self.assertRaises(ValueError):
+                    site_env.resolve_config(self.config, self.values)
+
     def test_http_types_and_ports_rejected(self):
         for http in ({"bind_host": 0}, {"bind_host": "localhost"}, {"port": True}, {"port": 0}, {"host": "a"}):
             with self.subTest(http=http):

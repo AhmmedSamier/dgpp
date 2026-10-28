@@ -4,8 +4,8 @@
 `engine.kv_capacity` sizes the separate KV token pool. Increasing the snapshot
 budget helps only when snapshot slots are the limiting resource. Cached
 documents and live requests still need room in the KV pool.
-Evicted entries are not spilled to disk; NVMe-backed retention is tracked
-separately in [enhancement #26](https://github.com/HawkBearPig/dgpp/issues/26).
+Entries evicted from memory are lost unless the [NVMe cold tier](#the-nvme-cold-tier)
+below is enabled ([enhancement #26](https://github.com/HawkBearPig/dgpp/issues/26)).
 
 ## Changed questions after a long document
 
@@ -184,3 +184,119 @@ Resolve the site configuration before running a recipe's plan:
 python3 scripts/dgpp-cluster resolve --config deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json > /tmp/qwen-resolved.json
 build-release/dgpp-serve --config /tmp/qwen-resolved.json --rank 0 --memory-plan
 ```
+
+## The NVMe cold tier
+
+`nvme_cache` (a top-level deployment key; see the
+[configuration reference](configuration.md#nvme-cache))
+keeps entries the arena evicts on local NVMe and restores them for a later
+matching request. Each rank owns one preallocated slab file,
+`<path>/rank<N>.slab`, of `capacity_gib` GiB, holding its own shard of the
+state. An entry on disk is complete: the snapshot blob (recurrent, ring and
+draft state) and every KV block its metadata pins, so a restored entry needs
+nothing recomputed. Restores read into fresh pool blocks and an arena slot,
+so a restored prefix must still fit the memory pool; the tier expands the
+retained history, not the active context.
+
+**What a token costs.** The slab is pages of one KV block's bytes (rounded
+to 4 KiB); a snapshot blob spans a run of pages. Startup logs the page size,
+the page count and the blob's pages. Per rank, at the checked-in recipes:
+
+| Recipe | KV bytes per token | 260K-token entry | Snapshot blob |
+|---|---:|---:|---:|
+| Qwen NVFP4 YaRN, two nodes | 13.8 KiB | 3.4 GiB | 55 MiB |
+| GLM-5.3-Flash, four nodes | 12.4 KiB | 3.1 GiB | 35 MiB |
+
+On a Spark's NVMe (direct I/O, measured 2026-09-25: 4.5 GB/s writes,
+6.9 GB/s reads) a 260K-token Qwen entry spills in about a second and
+restores in under one, against 216 s to recompute it. Measured on four
+Sparks (GLM-5.3-Flash, a 25,150-token document, 2026-09-25): the cold
+prefill took 18.8 s, the changed question over the in-memory document
+2.45 s, and after three other documents had pushed it out of a four-slot
+arena the same question came back from disk in 407 ms to first token
+(restore 121 ms for 341 MiB), with the transcript identical to the
+in-memory hit.
+
+**Which entries.** Prefill snapshots (the deepest cut and the earlier
+document cut) and the close-time entries a completed answer leaves spill
+right after they are taken, once they are at least `min_tokens` long
+(default 0: every entry memory keeps, which `engine.prefix_min_tokens`
+already floors). A spill or restore advances two slices of `chunk_mib`
+(64 MiB) per scheduler tick — the device side of every slice is enqueued on
+the model stream between decode steps, never on a second stream beside
+the fabric's collectives — and a file worker moves the slices to and
+from the slab. Between requests that is the NVMe's rate; during decode
+about 3 GB/s (a 25K-token GLM entry, 340 MiB, spills in 0.4 s); during a
+long prefill, whose ticks are one chunk long, a spill paces at its ticks
+(the same entry took 16 s beside a 25K-token prefill). Measured 2026-09-25
+on four Sparks, the decode step held 34 ms with spills in flight. Blocks that two entries
+share in memory — a document and the questions attached to it — are stored
+once, by physical identity. A memory entry stays attachable while its copy
+is written; eviction from memory then keeps the disk copy. Retention on
+disk is least-recently-used within the capacity, and the slab never grows
+past it: a spill that cannot find room after evicting every unused entry
+is skipped, not squeezed in.
+
+**Restores.** Lookup uses the same cuts and lookahead rules as memory. When
+the deepest usable state is on disk, the scheduler restores it (one restore
+at a time; a second request wanting the same entry waits on the same one),
+then attaches and prefills the suffix. Every page carries a CRC-32C; a
+short read, a device error or a checksum mismatch fails the restore, and
+the request prefills without it.
+
+**Ranks.** Spills and restores are scheduler decisions, identical on every
+rank; their outcomes are journaled: a peer reports each finished op to
+rank 0 over the journal's return path, and rank 0 journals the world's
+verdict once every rank has reported — ok only when all succeeded. A
+failure on one rank is therefore the same cold miss everywhere, and the
+prefix digest the journal checks every tick covers the tier's decisions.
+
+**Pins.** A request's `prompt_cache_key` pins the entries it creates or
+attaches to, in memory and on disk: retention evicts unpinned entries first
+and a pinned one only when nothing unpinned is left, so an agent session's
+documents survive a burst of other work. The key does not change matching.
+Pins protect while the pinned entries hold at most
+`engine.prefix_pin_max_pct` (50 %) of the arena's slots and of the slab's
+pages; past that share a pin protects nothing and plain least-recently-used
+order applies, so one client's keys cannot push everyone else out.
+
+**Restarts.** With `persist` (the default) the slab outlives the process:
+the token ids are written to the slab behind each blob, the page checksums
+and the index are kept beside it (`rank<N>.crc`, `rank<N>.index`: the index
+bytes are the world's, the digests behind them each rank's own, so ranks
+sharing a directory never overwrite each other's), under a directory named
+by the binding —
+the binary's version, the checkpoint, the deployment's effective settings
+and the slab geometry (a release upgrade starts fresh: a later build may lay
+a block's planes out differently at the same byte count). The index also
+records, per entry, that rank's digest of the entry's page checksums when
+its spill committed. A start under the same binding checks every entry of
+the previous index against the checksum table as it stands and reads its
+token ids back; an entry whose pages a later run reused before a crash (its
+checksums pass, but over other bytes) or whose ids are unreadable is pruned
+from the candidate. The ranks then compare their candidates' digests at the
+warm handshake and adopt only when every rank holds the same one, else every
+slab starts fresh — so a pruned candidate on one node never leaves the world
+with an index that differs by rank. Adopted entries are older than anything
+the new run makes, keep their pins, and restore exactly as before
+(`nvme_cache.adopted` in `/v1/metrics` counts them). A start under another
+binding, or with `persist` false, begins cold. One world holds a slab: a
+second process under the same binding is refused at startup.
+
+**Sizing and checks.** `capacity_gib` must hold at least one entry at the
+request context limit plus its blob (startup prints the minimum) and must
+fit the filesystem's free space beside `reserve_gib` (1 GiB); both are checked
+on every rank before anything is allocated, and by `--memory-plan`. The tier's
+staging buffers (4 × `chunk_mib` + 8 MiB: 264 MiB per rank at the default) are
+part of the memory plan. At most `max_ops` spills and restores are in flight;
+a started entry is busy, never evicted, until the world commits it. A request
+whose restore cannot start while ops are in flight (every arena slot busy
+spilling) waits for a commit to free a slot rather than prefilling cold; the
+wait is bounded by the ops themselves. An op that makes no progress for
+`op_timeout_s` (120 s) fails: a request waiting on that restore prefills
+cold, and the staging buffer the stuck read or write holds returns when the
+call does. A path whose filesystem refuses direct I/O
+is refused unless `allow_buffered` says otherwise. Watch
+`nvme_cache` in `/v1/metrics`: `pages_used` against `pages_total`,
+`spilled`, `restored`, `restore_failed`, `spill_skipped` (no room), and
+`evictions` (disk retention at work).

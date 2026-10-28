@@ -185,6 +185,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dense_mma_bf16w.cu
   src/kernels/dense_fp4_decode.cu
   src/kernels/l2_prefetch.cu
+  src/kernels/segment_copy.cu
   src/kernels/glm_mhc.cu
   src/kernels/glm_moe.cu
   src/kernels/moe_w4a4.cu
@@ -262,6 +263,7 @@ target_link_libraries(dgpp_text PUBLIC dgpp_loaders dgpp_pcre2)
 dgpp_set_common(dgpp_text)
 
 add_library(dgpp_sched STATIC
+  src/sched/disk_cache.cpp
   src/sched/prefix_cache.cpp
   src/sched/scheduler.cpp)
 target_link_libraries(dgpp_sched PUBLIC dgpp_text dgpp_core)
@@ -929,6 +931,7 @@ endif()
 
 enable_testing()
 add_executable(unit_tests
+  tests/unit/disk_cache_test.cpp
   tests/unit/image_inputs_test.cpp
   tests/unit/file_inputs_test.cpp
   tests/unit/log_test.cpp
@@ -1122,6 +1125,7 @@ add_library(dgpp_serve STATIC
   src/serve/qwen_vision_frontend.cpp
   src/serve/file_inputs.cpp
   src/serve/cluster_config.cpp
+  src/serve/nvme_cache_check.cpp
   src/serve/http_server.cpp
   src/serve/generation_service.cpp
   src/serve/fabric_serve.cpp
@@ -2442,6 +2446,12 @@ set(GLM_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/glm_forward_fixture)
 add_test(NAME glm_forward_fixture
   COMMAND glm_forward_test --write-fixture ${GLM_FORWARD_FIXTURE})
 set_tests_properties(glm_forward_fixture PROPERTIES SKIP_RETURN_CODE 2)
+add_executable(nvme_tier_families_test tests/cuda/nvme_tier_families_test.cpp)
+target_include_directories(nvme_tier_families_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(nvme_tier_families_test PRIVATE dgpp_models_mimo_layers dgpp_models_flint_layers dgpp_models_qwen_layers dgpp_models_qwen_loader dgpp_models_qwen dgpp_models_glm_loader dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(nvme_tier_families_test)
+add_test(NAME nvme_tier_families_test COMMAND nvme_tier_families_test)
+set_tests_properties(nvme_tier_families_test PROPERTIES RUN_SERIAL TRUE)
 add_executable(prefix_snapshot_test tests/cuda/prefix_snapshot_test.cpp)
 target_include_directories(prefix_snapshot_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(prefix_snapshot_test PRIVATE dgpp_models_qwen_layers dgpp_models_glm_loader CUDA::cudart)
