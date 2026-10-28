@@ -4,7 +4,7 @@ Run setup on the first Spark in your cluster (rank 0).
 A supported deployment uses one GB10 per node
 on Linux/aarch64; choose a model and node count from the
 [supported configurations](../README.md#supported-models-and-configurations).
-For the abbreviated command sequence, see the [quickstart](../README.md#quickstart).
+For the abbreviated command sequence, see the README's [getting started](../README.md#getting-started).
 
 For compilation on an x86 Linux workstation, see [cross-compiling for Spark](cross-compiling.md).
 

@@ -4,6 +4,15 @@ The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
 ## Unreleased
+- **The README and the repository scaffolding** (2026-10-28): the README
+  restructured around what the engine is (Why DGPP, a headline table sourced
+  from `docs/benchmarks.md`, the architecture diagram, capability columns in
+  the model table, a first-deployment guide, the API section, credits);
+  GitHub Actions for the Python host suites, the documentation gate
+  (`scripts/docs_check.py`: relative links, heading anchors, the README's
+  punctuation rule) and the GB10 cross-build; issue forms, a pull request
+  template and `SECURITY.md`; Discussions and private vulnerability
+  reporting switched on for the repository.
 - **NVMe cold tier for the prefix cache** (2026-10-28, issue #26, PR #53): a
   top-level `nvme_cache` deployment block keeps the prefix entries memory
   evicts in a preallocated slab per rank on local NVMe and restores an entry
