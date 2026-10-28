@@ -57,14 +57,11 @@ defaults unless the command line names them) and `--no-dflash` runs plain,
 so one model, quant and world has one file however many worlds it serves.
 The long-context templates also carry a top-level `nvme_cache` block, off by
 default: set `enabled` to true and size `capacity_gib` to the node's free
-NVMe to keep evicted prefix entries on disk (the
-[configuration reference](../docs/configuration.md#nvme-cache) lists the
-keys; startup checks the space). The slab outlives the process by default
-(`persist`), so a restart under the same binary, checkpoint and settings
-adopts its entries; `chunk_mib`, `max_ops`, `op_timeout_s` and
-`reserve_gib` tune the pacing, the ops in flight, the stall bound and the
-free-space reserve, and a request's `prompt_cache_key` pins its entries
-within `engine.prefix_pin_max_pct` of the cache. The shapes
+NVMe to keep evicted prefix entries on disk. The slab outlives the process
+by default, so a restart under the same binary, checkpoint and settings
+adopts its entries. [The cold tier](../docs/nvme-cache.md) describes the
+behaviour and the [configuration reference](../docs/configuration.md#nvme-cache)
+lists the keys. The shapes
 a template does not name are knobs appended at boot:
 `scripts/dgpp-cluster up --config FILE --knobs "FLAGS"`.
 
