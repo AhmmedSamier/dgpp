@@ -3,6 +3,7 @@
 [![CI](https://github.com/HawkBearPig/dgpp/actions/workflows/ci.yml/badge.svg)](https://github.com/HawkBearPig/dgpp/actions/workflows/ci.yml)
 [![GB10 build](https://github.com/HawkBearPig/dgpp/actions/workflows/gb10-build.yml/badge.svg)](https://github.com/HawkBearPig/dgpp/actions/workflows/gb10-build.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/HawkBearPig/dgpp)](https://github.com/HawkBearPig/dgpp/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-DGX%20Spark%20GB10-76B900.svg)](#getting-started)
 [![Checkpoints](https://img.shields.io/badge/%F0%9F%A4%97%20checkpoints-HawkBearPig-yellow.svg)](https://huggingface.co/HawkBearPig)
 
@@ -294,12 +295,15 @@ workload.
 
 A release is a versioned tarball installed once per node. It carries the
 server, the CUDA runtime it was built against, the launcher scripts, the
-templates and a checksum manifest.
+templates and a checksum manifest. Published builds are on
+[GitHub Releases](https://github.com/HawkBearPig/dgpp/releases), each with
+its SHA-256 in the notes.
 
 ```bash
 CONFIG=/path/to/deployment.json
-scripts/release.sh
-scripts/dgpp-cluster install dist/dgpp-VERSION.tar.zst --config "$CONFIG"
+gh release download --pattern 'dgpp-*.tar.zst'   # the latest published build
+scripts/release.sh                                 # or build one from this tree
+scripts/dgpp-cluster install dgpp-VERSION.tar.zst --config "$CONFIG"
 scripts/dgpp-cluster up --release VERSION --config "$CONFIG"
 scripts/dgpp-cluster releases --config "$CONFIG"
 ```

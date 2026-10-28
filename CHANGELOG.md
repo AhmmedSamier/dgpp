@@ -3,7 +3,7 @@
 The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
-## Unreleased
+## v0.1.0 — 2026-10-28, the first published release (0.1.0+g11fe1807d63d)
 - **The README and the repository scaffolding** (2026-10-28): the README
   restructured around what the engine is (Why DGPP, a headline table sourced
   from `docs/benchmarks.md`, the architecture diagram, capability columns in
