@@ -18,6 +18,15 @@ Boot the world first (a deployment JSON with the tier on and a small
 Exit 0 when every repeat matched, no tier op failed and every restart's op
 streams agreed; the report names each mismatch.
 
+`--clients K` runs K requests at a time (the restarts and crashes happen
+between rounds, with nothing in flight); `--cancel-pct P` closes P percent
+of the requests' connections a random moment after they were sent (during
+the restore or the prefill, mostly); `--crash-every N` kills one rank with
+SIGKILL (`--crash-rank R`, or a random one) every N requests instead of a
+clean restart, then brings the world down and up — the slab's adoption must
+then agree on every rank or start fresh everywhere, and every answer
+restored afterwards must still equal its first.
+
 The deployment template pins the prefill chunk size (`engine.first_token_target_ms`
 and `engine.decode_gap_target_ms` at 0, so every tick offers the idle budget):
 a cold walk's arithmetic depends on its chunk shapes (the first prompt after a
@@ -26,12 +35,15 @@ tier reproduces the walk that made the entry — the check must compare walks
 of one shape. The driver warns when the served world leaves the targets on.
 """
 import argparse
+import http.client
 import json
 import os
 import random
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import serve_nvme_cache_check as chk  # noqa: E402
@@ -40,17 +52,42 @@ from serve_client import served_model  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def restart(config, bin_path, log_lines):
+def restart(config, bin_path, log_lines, crash_rank=None):
+    if crash_rank is not None:
+        # A crash: one rank dies mid-flight; the others exit on the lost peer
+        # (the launcher's down reaps whatever is left).
+        kill = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "dgpp-cluster"), "signal", "--config", config,
+                               "--rank", str(crash_rank), "--signal", "KILL"], capture_output=True, text=True, timeout=120)
+        log_lines.append(f"crash: SIGKILL to rank {crash_rank}, rc {kill.returncode}")
+        time.sleep(5)
     down = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "dgpp-cluster"), "down", "--config", config],
                           capture_output=True, text=True, timeout=600)
     identical = "identical across" in down.stdout or "identical across" in down.stderr
     single = "on 1 node" in down.stdout or "op streams" not in down.stdout + down.stderr
+    if crash_rank is not None:
+        identical = True  # a killed rank's op stream is cut short; the digest handshake judges the slab
     log_lines.append(f"down: rc {down.returncode}, op streams {'identical' if identical else ('n/a' if single else 'DIFFER')}")
     up = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "dgpp-cluster"), "up", "--config", config]
                         + (["--bin", bin_path] if bin_path else []), capture_output=True, text=True, timeout=1500)
     ready = "READY" in up.stdout
     log_lines.append(f"up: rc {up.returncode}, {'ready' if ready else 'NOT READY'}")
     return (identical or single) and ready
+
+
+def cancel(host, port, model, prompt, max_tokens, extra, after_ms):
+    """Sends the request and drops the connection after `after_ms` without
+    reading the answer: the service sees a client gone during the restore or
+    the prefill (mostly) and must cancel cleanly."""
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
+            "temperature": 0, "stream": True, "chat_template_kwargs": {"clear_thinking": False}}
+    body.update(extra or {})
+    conn = http.client.HTTPConnection(host, port, timeout=3600)
+    try:
+        conn.request("POST", "/v1/chat/completions", body=json.dumps(body),
+                     headers={"Content-Type": "application/json"})
+        time.sleep(after_ms / 1000.0)
+    finally:
+        conn.close()
 
 
 def main():
@@ -65,6 +102,10 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-tokens", type=int, default=32)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--clients", type=int, default=1, help="requests in flight at a time")
+    ap.add_argument("--cancel-pct", type=float, default=0.0, help="percent of requests cancelled mid-flight")
+    ap.add_argument("--crash-every", type=int, default=0, help="kill a rank every N requests (instead of a clean restart)")
+    ap.add_argument("--crash-rank", default="random", help="the rank to kill, or random")
     args = ap.parse_args()
     rng = random.Random(args.seed)
     model = served_model(args.host, args.port)
@@ -78,42 +119,86 @@ def main():
     expected = {}  # (doc, question) -> the first transcript
     findings, log_lines, steps = [], [], []
     restarts = 0
-    for n in range(args.requests):
-        if args.restart_every and n > 0 and n % args.restart_every == 0:
-            before = chk.metrics(args.host, args.port)["nvme_cache"]
-            ok = restart(args.config, args.bin, log_lines)
-            after = chk.metrics(args.host, args.port)["nvme_cache"]
-            restarts += 1
-            print(f"restart {restarts}: {log_lines[-2]}; {log_lines[-1]}; entries {before.get('entries')} -> "
-                  f"{after.get('entries')}, adopted {after.get('adopted')}", flush=True)
-            if not ok:
-                findings.append({"restart": restarts, "what": "down/up did not complete cleanly"})
-        d, q = rng.randrange(args.docs), rng.randrange(len(questions))
-        body_extra = {}
-        if rng.random() < 0.5:
-            body_extra["prompt_cache_key"] = f"fuzz-doc-{d}"
-        if rng.random() < 0.1:
-            body_extra["prefix_cache"] = False
+    lock = threading.Lock()
+    crashes = 0
+
+    def one(n, d, q, body_extra, cancel_after_ms):
         prompt = docs[d] + questions[q]
         t0 = time.perf_counter()
+        if cancel_after_ms is not None:
+            cancel(args.host, args.port, model, prompt, args.max_tokens, body_extra, cancel_after_ms)
+            step = {"n": n, "doc": d, "question": q, "cancelled_after_ms": cancel_after_ms, "extra": body_extra,
+                    "wall_ms": (time.perf_counter() - t0) * 1000}
+            with lock:
+                steps.append(step)
+            print(f"{n:3d} doc {d} q {q} cancelled after {cancel_after_ms} ms {body_extra}", flush=True)
+            return
         r = chk.ask(args.host, args.port, model, prompt, args.max_tokens, extra=body_extra)
         cached = r["usage"].get("prompt_tokens_details", {}).get("cached_tokens")
         key = (d, q)
         step = {"n": n, "doc": d, "question": q, "ttft_ms": r["ttft_ms"], "cached": cached,
                 "prompt_tokens": r["usage"].get("prompt_tokens"), "extra": body_extra,
                 "wall_ms": (time.perf_counter() - t0) * 1000}
-        if key in expected:
-            step["repeat"] = True
-            if r["text"] != expected[key]:
-                step["mismatch"] = True
-                findings.append({"n": n, "doc": d, "question": q, "what": "transcript differs from the first answer",
-                                 "first": expected[key][:200], "now": r["text"][:200]})
-        else:
-            expected[key] = r["text"]
-        steps.append(step)
+        with lock:
+            if key in expected:
+                step["repeat"] = True
+                if r["text"] != expected[key]:
+                    step["mismatch"] = True
+                    findings.append({"n": n, "doc": d, "question": q, "what": "transcript differs from the first answer",
+                                     "first": expected[key][:200], "now": r["text"][:200]})
+            else:
+                expected[key] = r["text"]
+            steps.append(step)
         print(f"{n:3d} doc {d} q {q} ttft {r['ttft_ms']:7.0f} ms cached {str(cached):>6} "
               f"{'repeat' if step.get('repeat') else 'first '} {'MISMATCH' if step.get('mismatch') else ''} {body_extra}",
               flush=True)
+
+    pool = ThreadPoolExecutor(max_workers=max(1, args.clients))
+    pending = []
+    for n in range(args.requests):
+        boundary = n > 0 and ((args.restart_every and n % args.restart_every == 0) or
+                              (args.crash_every and n % args.crash_every == 0))
+        if boundary:
+            for f in pending:
+                f.result()
+            pending = []
+            crash = args.crash_every and n % args.crash_every == 0
+            before = chk.metrics(args.host, args.port)["nvme_cache"]
+            crash_rank = None
+            if crash:
+                world = before.get("world") or int(json.load(open(args.config)).get("world_size", 1))
+                crash_rank = rng.randrange(world) if args.crash_rank == "random" else int(args.crash_rank)
+                crashes += 1
+            ok = restart(args.config, args.bin, log_lines, crash_rank=crash_rank)
+            after = chk.metrics(args.host, args.port)["nvme_cache"]
+            restarts += 1
+            print(f"{'crash' if crash else 'restart'} {restarts}: {'; '.join(log_lines[-3 if crash else -2:])}; entries "
+                  f"{before.get('entries')} -> {after.get('entries')}, adopted {after.get('adopted')}", flush=True)
+            if not ok:
+                findings.append({"restart": restarts, "what": "down/up did not complete cleanly"})
+            # After a crash the world either adopted (every rank agreed) or
+            # started fresh (no entry at all): never a partial index.
+            if crash and after.get("entries", 0) != after.get("adopted", 0):
+                findings.append({"restart": restarts, "what": "entries after the crash are not all adopted ones",
+                                 "nvme_cache": after})
+        d, q = rng.randrange(args.docs), rng.randrange(len(questions))
+        body_extra = {}
+        if rng.random() < 0.5:
+            body_extra["prompt_cache_key"] = f"fuzz-doc-{d}"
+        if rng.random() < 0.1:
+            body_extra["prefix_cache"] = False
+        cancel_after_ms = rng.randrange(20, 1500) if rng.random() * 100 < args.cancel_pct else None
+        if args.clients > 1:
+            pending.append(pool.submit(one, n, d, q, body_extra, cancel_after_ms))
+            if len(pending) >= args.clients:
+                pending[0].result()
+                pending = [f for f in pending if not f.done()] + [f for f in pending if f.done() and f.exception()]
+        else:
+            one(n, d, q, body_extra, cancel_after_ms)
+    for f in pending:
+        f.result()
+    pool.shutdown()
+    steps.sort(key=lambda s: s["n"])
     m = chk.metrics(args.host, args.port)
     nv = m["nvme_cache"]
     tier_ok = nv.get("spill_failed", 0) == 0 and nv.get("restore_failed", 0) == 0 and nv.get("failures", 0) == 0 \
@@ -121,7 +206,15 @@ def main():
     if not tier_ok:
         findings.append({"what": "tier failures or capacity breach", "nvme_cache": nv})
     repeats = sum(1 for s in steps if s.get("repeat"))
-    print(f"\n{args.requests} requests, {repeats} repeats checked, {restarts} restarts, {len(findings)} finding(s)")
+    cancelled = sum(1 for s in steps if "cancelled_after_ms" in s)
+    # The service must have settled: nothing active, nothing queued, no
+    # request stuck on a restore that never came.
+    sc = m["scheduler"]
+    if sc.get("active", 0) != 0 or sc.get("queued", 0) != 0 or m["service"].get("engine_failed"):
+        findings.append({"what": "the service did not settle", "scheduler": {k: sc.get(k) for k in ("active", "queued")},
+                         "engine_failed": m["service"].get("engine_failed")})
+    print(f"\n{args.requests} requests, {repeats} repeats checked, {cancelled} cancelled, {restarts} restarts "
+          f"({crashes} crashes), {len(findings)} finding(s)")
     print("nvme_cache:", {k: nv.get(k) for k in ("entries", "spills", "spilled", "restores", "restored", "spill_failed",
                                                  "restore_failed", "evictions", "pinned", "adopted", "pages_used",
                                                  "pages_total")})
