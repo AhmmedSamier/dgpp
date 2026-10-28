@@ -187,8 +187,9 @@ build on an x86 workstation instead, use the Docker
 
 - **One Spark.** [Qwen3.8-27B NVFP4](deploy/cluster_qwen3.8-27b_nvfp4_w1.example.json)
   is the general-purpose choice: tools, images, the DFlash2 drafter and a
-  1M-token KV pool. [Flint](deploy/cluster_flint_fp8-nvfp4_w1.example.json)
-  is the fastest single-node decode.
+  1M-token KV pool. [Qwen3.8-Flash-Next NVFP4](deploy/cluster_qwen-3.8-flash-next_nvfp4_w1.example.json)
+  is the mixture-of-experts alternative, with the
+  [single-Spark guide](docs/qwen38_single_spark.md) behind it.
 - **Two Sparks.** [GLM-5.3-Flash](deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json)
   or [Qwen3.8-27B NVFP4](deploy/cluster_qwen3.8-27b_nvfp4_w2.example.json)
   with a 2M-token pool.
