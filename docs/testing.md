@@ -230,9 +230,16 @@ spills; retention; two requests on one restore; a cancel while restoring;
 identical op streams and digests), `fabric_serve_test` (the journal's return
 path, the commit collector, and ok 10: the flow across three ranks over real
 sockets), `qwen_decode_test`'s tier block (spill and restore bitwise on
-the fixture, attach parity, a corrupted page detected) and
-`dflash2_integration_test`'s `prefix_tier` cases (a drafter world's entry
-spilled and restored with its draft K/V context intact on both Qwen families).
+the fixture, attach parity, a corrupted page detected; the slab across a
+restart and across a crash: content-bound adoption, the lock, damaged files,
+the op timeout, injected I/O failures, buffered I/O refused),
+`nvme_tier_families_test` (spill, restore, attach and step bitwise on the
+MiMo, Flint and Qwen3.5 tiny checkpoints) and `dflash2_integration_test`'s
+`prefix_tier` cases (a drafter world's entry spilled and restored with its
+draft K/V context intact on both Qwen families). On a booted world,
+`scripts/serve_nvme_cache_fuzz.py` drives random workloads with pins,
+opt-outs, concurrent clients, mid-flight cancels, clean restarts and rank
+crashes, checking every repeated answer against its first.
 
 Release and testing builds use separate CMake presets and directories:
 
