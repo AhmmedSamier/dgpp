@@ -554,7 +554,10 @@ version; a rollback is `up` naming the previous one, which is still
 installed. `dgpp-cluster releases` shows what each node has;
 `dgpp-serve --version` prints a binary's version, and rank 0 puts its
 version on the journal's settings record so a peer of another version
-exits before its first tick rather than form a mixed world.
+exits before its first tick rather than form a mixed world. A new version
+also retires the NVMe cache's slab: it starts a fresh one under its own
+binding, and the previous directory can be removed once the old version is
+no longer wanted.
 
 ## What a node needs
 
@@ -583,11 +586,9 @@ For prefix caching, size the snapshot arena and KV pool separately. Startup
 and `--memory-plan` report snapshot slots, bytes per slot and actual arena
 allocation. The [prefix-cache guide](prefix-cache.md) lists the current recipe
 capacities and explains when a larger `prefix_cache_gib` helps. With
-`nvme_cache.enabled`, entries the arena evicts are kept in a preallocated
-slab on each node's NVMe and restored for later matching requests; startup
-checks the slab's directory, free space and minimum size on every rank
-(`--memory-plan` too) and refuses to boot when they do not fit — see
-[the cold tier](prefix-cache.md#the-nvme-cold-tier).
+`nvme_cache.enabled`, the entries the arena evicts are kept on each node's
+NVMe instead of being lost, as [the cold tier](nvme-cache.md) describes and
+[its subsection below](#the-nvme-cold-tier) operates.
 
 Reserve enough node memory for weights, model state and runtime buffers.
 The GLM-5.3-FP8 main stack alone uses about 82 GiB per rank at TP=4;
@@ -1180,6 +1181,27 @@ throughout decode on its own and the measured step distribution is the same
 locked or unlocked. NTP between nodes only matters for reading logs side by
 side, and `scripts/fabric_run.sh --node-probe` records each node's clock
 offset per run so even that works without it.
+
+### The NVMe cold tier
+
+With `nvme_cache.enabled`, the prefix entries memory evicts are kept in a
+preallocated slab on each node's local NVMe and restored for later matching
+requests. Startup refuses to boot when the slab's directory, free space or
+minimum size does not fit, on every rank and under `--memory-plan`.
+[The cold tier](nvme-cache.md) describes what is kept and how it moves.
+
+Watch `nvme_cache` in `/v1/metrics`. `pages_used` against `pages_total`
+says how full the slab is, `evictions` that retention is at work,
+`spill_skipped` that an entry found no room, and `restore_failed` that a
+read came back wrong on some rank, which the world treats as a cold miss. A
+stalled operation is logged after 30 s without progress and fails after
+`op_timeout_s`.
+
+The slab persists across restarts under a directory named by the binary,
+the checkpoint, the effective settings and the slab geometry. A release
+upgrade or a settings change starts a fresh slab under a new directory, and
+startup names the directories of other bindings with their size. Those
+belong to no running world and can be removed to free the disk.
 
 ### The resident image cache
 

@@ -189,7 +189,12 @@ for capacity, overload behavior and CPU/memory considerations.
 - **Adaptive DSpark verification**: DeepSeek uses confidence-scheduled draft
   depth, including a batch-aware rule and an adaptive value of decode time.
 - **Exact prefix caching**: matching token prefixes can reuse a stored
-  session snapshot while preserving the cold-prefill result.
+  session snapshot while preserving the cold-prefill result. An optional
+  [NVMe cold tier](docs/nvme-cache.md) keeps the entries memory evicts on
+  each node's local NVMe and across restarts: a 25K-token document comes
+  back from disk in about 120 ms of restore against 15 s of cold prefill,
+  bitwise the in-memory hit, and `prompt_cache_key` pins an agent's
+  documents against eviction.
 - **OpenAI-compatible text generation**: Chat Completions and legacy
   Completions, streaming, constrained tool calls, `response_format` with
   supported JSON schemas, `reasoning_content`, logprobs, `stop`, `n`,
@@ -451,6 +456,7 @@ config.
 | page | what |
 |---|---|
 | [Configuration](docs/configuration.md) | site and deployment settings, defaults, limits and the effects of each option |
+| [NVMe cold tier](docs/nvme-cache.md) | keeping evicted prefix entries on local NVMe: what is stored, how entries move, persistence across restarts, pins, bounds and metrics |
 | `docs/operations.md` | booting, stopping and watching the serving world; memory and the image cache on a node; failure semantics |
 | `docs/benchmarks.md` | every measured serving number: per model, world, concurrency and prompt class, with the method to reproduce each |
 | `docs/signoff_v1.md` | the v1 performance and hardening sign-off, with every measurement |

@@ -43,10 +43,11 @@ not the arithmetic.
 
 Both completion endpoints accept `prompt_cache_key` (OpenAI's field, DGPP's
 semantics): a string of 1 to 256 bytes that pins the prefix-cache entries the
-request creates or attaches to — in memory and in the NVMe cache, unpinned
+request creates or attaches to, in memory and in the NVMe cache: unpinned
 entries are evicted first, and a pinned one only when nothing unpinned is
-left. The key is a priority, never a lookup key: matching stays by exact token
-prefix. Null is absent; other types return HTTP 400 naming the field.
+left within `engine.prefix_pin_max_pct` of the cache. The key is a priority,
+never a lookup key, and matching stays by exact token prefix. Null is absent,
+and other types return HTTP 400 naming the field.
 `prefix_cache.pinned` and `nvme_cache.pinned` in `/v1/metrics` count the
 pinned entries.
 

@@ -4,67 +4,22 @@ The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
 ## Unreleased
-- **NVMe cold tier for the prefix cache** (2026-10-27, issue #26, PR #53): the
-  top-level `nvme_cache` deployment key (`enabled`, `path`, `capacity_gib`,
-  `min_tokens`, `chunk_mib`, `max_ops`, `reserve_gib`, `persist`) keeps entries the snapshot arena evicts — the snapshot blob
-  and every KV block it pins — in one preallocated slab file per rank on
-  local NVMe, and restores an entry before a later matching request
-  prefills its suffix. Blocks shared by a document and its attached
-  variants are stored once; retention is least-recently-used within the
-  configured capacity; every page carries a CRC-32C; the device side of
-  every slice runs on the model stream from the engine thread (two 64 MiB
-  slices per tick), the file side on a worker. Spills and restores
-  are scheduler decisions on every rank and their outcomes ride the
-  journal (a new return path from the peers, the tick record's `dk`
-  commits), so a failure on any rank is the same cold miss everywhere and
-  the prefix digest covers the tier. Startup checks the directory, the
-  free space (beside a 1 GiB reserve) and the minimum capacity (one entry
-  at the context limit plus its blob) on every rank, `--memory-plan`
-  included; `/v1/metrics` gains an `nvme_cache` block and the stats line an
-  `nvme cache` field; a request's `prompt_cache_key` pins the entries it
-  creates or attaches to against eviction, in memory and on disk. The slab
-  outlives the process: its index and checksums live beside it under a
-  binding of the checkpoint, settings and geometry, and a restart under the
-  same binding adopts the entries when every rank holds the same index. New gates: `scheduler_test`'s nvmeCache cases,
-  `unit_tests`' disk_cache cases, `fabric_serve_test`'s ok 10 (spill,
-  evict, restore and attach across three ranks over real sockets) and
-  `qwen_decode_test`'s tier block (bitwise spill/restore, attach parity,
-  corruption detected); validated on four Sparks with GLM-5.3-Flash (a
-  25K-token document restored in 407 ms to first token against 18.8 s
-  cold, identical transcripts, op streams identical across ranks, decode
-  at 34 ms/step through the spills) and
-  on one Spark with Qwen3.8-Flash-Next. Fuzzed: random request streams on
-  two scheduler replicas, mutated index bytes, journal codecs, damaged slab
-  pages on the GPU, and a random workload with restarts on the fabric
-  (`scripts/serve_nvme_cache_fuzz.py`). The fabric fuzz's transcript check
-  showed that a cold walk's answer follows its chunk shapes (the first
-  prompt after a boot walks the admission controller's 256-token ramp and
-  can answer differently from the same prompt at 2048-token chunks, with or
-  without the cache), so the fuzz template pins the chunk size; reviewing
-  the cut rule under that check fixed a request-level gate: a request that
-  opts out (`prefix_cache: false`) prefilled without the structural cuts a
-  cached prompt walks, and now walks them. A review of the tier's edge
-  cases (2026-10-28) then hardened six: adoption is bound to the entries'
-  content (the index records each entry's page-checksum digest, and an
-  entry whose pages a later run reused before a crash, or whose ids are
-  unreadable, is pruned at startup — a pruned candidate differs by rank
-  and the world starts fresh, never with an index that differs by rank);
-  the binding includes the binary's version; one world per slab (the slab
-  is locked); a filesystem that refuses direct I/O is refused unless
-  `nvme_cache.allow_buffered`; an op without progress for
-  `nvme_cache.op_timeout_s` (120) fails and its waiting requests admit
-  cold (which also bounds a restore's wait for a busy arena slot); and
-  `prompt_cache_key` pins protect at most
-  `engine.prefix_pin_max_pct` (50) of the arena and the slab; a cold
-  review of that round fixed the pump's completion test after an abandoned
-  op, the job's publication under the lock, a bound on a corrupted index
-  record before anything is allocated from it, the index file per rank
-  (`rank<N>.index`) and the lock held across a recreation. The tier is
-  exercised on MiMo, Flint and Qwen3.5 (`nvme_tier_families_test`), and
-  the fabric fuzz gained concurrent clients, mid-flight cancels and rank
-  crashes. Documented in the
-  [configuration reference](docs/configuration.md#nvme-cache) and the
-  [prefix-cache guide](docs/prefix-cache.md#the-nvme-cold-tier).
+- **NVMe cold tier for the prefix cache** (2026-10-28, issue #26, PR #53): a
+  top-level `nvme_cache` deployment block keeps the prefix entries memory
+  evicts in a preallocated slab per rank on local NVMe and restores an entry
+  before a later matching request prefills its suffix. Entries persist
+  across restarts under a binding of the binary, checkpoint, settings and
+  slab geometry, with adoption bound to each entry's page checksums and
+  agreed by every rank. `prompt_cache_key` pins the entries a request
+  creates or attaches to, within `engine.prefix_pin_max_pct` of the cache.
+  Spills and restores are scheduler decisions journaled across the world,
+  so a failure on any rank is the same cold miss everywhere. Keys:
+  `enabled`, `path`, `capacity_gib`, `min_tokens`, `chunk_mib`, `max_ops`,
+  `reserve_gib`, `persist`, `allow_buffered`, `op_timeout_s`. On four
+  Sparks with GLM-5.3-Flash a 25K-token document comes back from disk in
+  about 120 ms of restore against 15 s of cold prefill, bitwise the
+  in-memory hit. See [the cold tier](docs/nvme-cache.md) and the
+  [configuration reference](docs/configuration.md#nvme-cache).
 - **DFlash2 integration fixes** (2026-10-25): the shared drafter follows
   the active eager/capture reducer, copies complete draft KV blocks during
   prefix reuse, and arms sampled proposal distributions on Flash-Next.

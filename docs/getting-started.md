@@ -218,6 +218,12 @@ depth, slot count or cache budget) are boot knobs; see
 [deployment templates](../deploy/README.md) for the list and the knobs that
 reproduce every retired variant.
 
+The long-context templates carry an `nvme_cache` block, off. Turning it on
+keeps the prefix entries memory evicts on each node's local NVMe, so a
+document pushed out of the cache comes back from disk instead of being
+recomputed. Read [the cold tier](nvme-cache.md) before sizing
+`capacity_gib`.
+
 ## 3. Set your node addresses and SSH user
 
 1. Create the site file if it does not already exist:

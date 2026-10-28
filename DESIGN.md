@@ -1881,28 +1881,30 @@ mismatch. Decisions also appear in the operation stream.
 
 **The NVMe cold tier.** With `nvme_cache` enabled, entries the arena
 evicts survive on a preallocated slab per rank (`engine/nvme_tier.hpp`,
-`sched/disk_cache.hpp`): a spill copies an entry's blob and the cache
-blocks its metadata pins — gathered plane by plane into 4 KiB-aligned
-records, written with direct I/O so the page cache never grows into the
-memory the plan owns — and a restore reads them into fresh pool blocks and
-an arena slot before the request attaches. Every byte of the tier's device
-work is enqueued by the engine thread on the model stream at a tick's top,
-two staging slices at a time, exactly as the arena's own copies interleave
-with the decode replays; a file worker moves slices between pinned staging
-and the slab and never calls into CUDA. A second stream beside the
-fabric's device-side spin loops stalled the graph replays for their whole
-gate timeout (2026-09-25), which is why nothing here runs concurrently
-with the model stream. Blocks are shared on disk by
+`sched/disk_cache.hpp`). A spill copies an entry's blob and the cache
+blocks its metadata pins into 4 KiB-aligned records written with direct
+I/O, and a restore reads them into fresh pool blocks and an arena slot
+before the request attaches. Every byte of the tier's device work is
+enqueued by the engine thread on the model stream at a tick's top, two
+staging slices at a time, exactly as the arena's own copies interleave
+with the decode replays. A file worker moves slices between pinned staging
+and the slab and never calls into CUDA. Blocks are shared on disk by
 physical identity (the pool's block id and its contents generation), so a
-document and its attached variants are stored once. Retention is LRU
+document and its attached variants are stored once, and retention is LRU
 within the capacity. The index is scheduler state, identical on every
-rank: spills and restores start as decisions, and their outcomes are
-journaled inputs — each rank reports a finished op to rank 0 over the
-journal's return path (the one thing a peer writes after its hello), and
-rank 0 journals the world's verdict once every rank has reported, ok only
-when all succeeded. Every page carries a CRC-32C; a failed read or write on
-any rank is the same cold miss everywhere. The slab is recreated at every
-start.
+rank: spills and restores start as decisions, each rank reports a finished
+op to rank 0 over the journal's return path, and rank 0 journals the
+world's verdict once every rank has reported, ok only when all succeeded.
+Every page carries a CRC-32C, and a failed read or write on any rank is
+the same cold miss everywhere. The slab persists under a binding of the
+binary, the checkpoint, the effective settings and the geometry. The index
+file holds the world's bytes and, beside them, this rank's digest of every
+entry's page checksums taken at its commit. At open a rank validates each
+entry against its checksum table and reads its token ids back, pruning
+what fails, and the world adopts the candidate only when every rank
+validated the same bytes. The slab is locked by its world, an op without
+progress fails after `op_timeout_s`, and a stuck file worker refuses new
+restores at once.
 
 **Diagnostics.** Metrics report hits, misses, saved tokens, snapshots,
 evictions, pinned blocks and copy times, and the cold tier's pages,
