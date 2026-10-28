@@ -560,12 +560,13 @@ void test_journal_codec() {
     dgpp::sched::AdmissionPolicy entry_policy;
     entry_policy.prefix_min_tokens = 1024;
     entry_policy.prefix_head_snapshots = true;
+    entry_policy.prefix_pin_max_pct = 25;
     const auto entry_warm =
         dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_warm(entry_policy));
     require(entry_warm.admission == entry_policy && fixed_warm.admission.prefix_min_tokens == 0 &&
                 !fixed_warm.admission.prefix_head_snapshots,
             "the prefix entry floor and the head cut round-trip; old records carry neither");
-    for (const std::string bad : {R"("pmin":-1)", R"("phead":2)"}) {
+    for (const std::string bad : {R"("pmin":-1)", R"("phead":2)", R"("ppin":101)"}) {
       bool rejected = false;
       try {
         (void)dgpp::serve::decode_journal_line(R"({"op":"warm","adm":0,"win":256,)" + bad + "}");
@@ -1894,8 +1895,34 @@ DGPP_TEST(journal_disk_commits_ride_the_tick_record) {
   on.nvme_cache_max_ops = 2;
   on.nvme_cache_reserve_gib = 2.5;
   on.nvme_cache_persist = false;
+  on.nvme_cache_op_timeout_s = 30;
+  on.prefix_pin_max_pct = 25;
   require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(on)).world_settings == on,
           "the tier's settings round trip");
+  {
+    // A record from before the op bound and the pin cap (2026-10-28)
+    // decodes to what such a rank 0 ran: no bound, the default cap.
+    std::string legacy = dgpp::serve::encode_journal_settings(on);
+    const auto strip = [&](const std::string& key) {
+      const size_t at = legacy.find(key);
+      require(at != std::string::npos, "the key is encoded: " + key);
+      legacy.erase(at - 1, key.size() + 1 + legacy.substr(at + key.size()).find_first_not_of("0123456789"));
+    };
+    strip("\"nvmeto\":");
+    strip("\"ppin\":");
+    const dgpp::serve::WorldSettings old = dgpp::serve::decode_journal_line(legacy).world_settings;
+    require(old.nvme_cache_op_timeout_s == 0 && old.prefix_pin_max_pct == 50 && old.nvme_cache_max_ops == 2,
+            "a legacy record decodes without the bound and with the default cap");
+    for (const std::string bad : {"\"nvmeto\":-1", "\"ppin\":101"}) {
+      bool rejected = false;
+      try {
+        (void)dgpp::serve::decode_journal_line(legacy.substr(0, legacy.size() - 1) + "," + bad + "}");
+      } catch (const std::runtime_error&) {
+        rejected = true;
+      }
+      require(rejected, "a bad value is rejected: " + bad);
+    }
+  }
   require(dgpp::serve::encode_journal_settings(off).find("nvme") == std::string::npos, "off: absent");
   require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(off)).world_settings == off,
           "off decodes off");

@@ -255,17 +255,30 @@ prefix digest the journal checks every tick covers the tier's decisions.
 attaches to, in memory and on disk: retention evicts unpinned entries first
 and a pinned one only when nothing unpinned is left, so an agent session's
 documents survive a burst of other work. The key does not change matching.
+Pins protect while the pinned entries hold at most
+`engine.prefix_pin_max_pct` (50 %) of the arena's slots and of the slab's
+pages; past that share a pin protects nothing and plain least-recently-used
+order applies, so one client's keys cannot push everyone else out.
 
 **Restarts.** With `persist` (the default) the slab outlives the process:
 the token ids are written to the slab behind each blob, the page checksums
 and the index are kept beside it, under a directory named by the binding —
-the checkpoint, the deployment's effective settings and the slab geometry.
-A start under the same binding offers the previous index as a candidate;
-the ranks compare their candidates' digests at the warm handshake and adopt
-only when every rank holds the same one, else every slab starts fresh.
-Adopted entries are older than anything the new run makes, keep their pins,
-and restore exactly as before (`nvme_cache.adopted` in `/v1/metrics` counts
-them). A start under another binding, or with `persist` false, begins cold.
+the binary's version, the checkpoint, the deployment's effective settings
+and the slab geometry (a release upgrade starts fresh: a later build may lay
+a block's planes out differently at the same byte count). The index also
+records, per entry, that rank's digest of the entry's page checksums when
+its spill committed. A start under the same binding checks every entry of
+the previous index against the checksum table as it stands and reads its
+token ids back; an entry whose pages a later run reused before a crash (its
+checksums pass, but over other bytes) or whose ids are unreadable is pruned
+from the candidate. The ranks then compare their candidates' digests at the
+warm handshake and adopt only when every rank holds the same one, else every
+slab starts fresh — so a pruned candidate on one node never leaves the world
+with an index that differs by rank. Adopted entries are older than anything
+the new run makes, keep their pins, and restore exactly as before
+(`nvme_cache.adopted` in `/v1/metrics` counts them). A start under another
+binding, or with `persist` false, begins cold. One world holds a slab: a
+second process under the same binding is refused at startup.
 
 **Sizing and checks.** `capacity_gib` must hold at least one entry at the
 request context limit plus its blob (startup prints the minimum) and must
@@ -273,7 +286,13 @@ fit the filesystem's free space beside `reserve_gib` (1 GiB); both are checked
 on every rank before anything is allocated, and by `--memory-plan`. The tier's
 staging buffers (4 × `chunk_mib` + 8 MiB: 264 MiB per rank at the default) are
 part of the memory plan. At most `max_ops` spills and restores are in flight;
-a started entry is busy, never evicted, until the world commits it. Watch
+a started entry is busy, never evicted, until the world commits it. A request
+whose restore cannot start while ops are in flight (every arena slot busy
+spilling) waits up to 64 ticks, then admits from memory or cold. An op that
+makes no progress for `op_timeout_s` (120 s) fails: a request waiting on
+that restore prefills cold, and the staging buffer the stuck read or write
+holds returns when the call does. A path whose filesystem refuses direct I/O
+is refused unless `allow_buffered` says otherwise. Watch
 `nvme_cache` in `/v1/metrics`: `pages_used` against `pages_total`,
 `spilled`, `restored`, `restore_failed`, `spill_skipped` (no room), and
 `evictions` (disk retention at work).

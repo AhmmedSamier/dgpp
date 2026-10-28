@@ -277,6 +277,7 @@ void check_prefix_tier(Factory make, const char* tag) {
   en.capacity_bytes = size_t{64} << 20;
   en.chunk_bytes = size_t{1} << 20;
   en.rank = 0;
+  en.allow_buffered = true;  // a tmpfs temp directory refuses direct I/O
   auto tier = std::make_unique<dgpp::NvmeTier<Model>>(model.get(), &arena, en);
   const std::vector<dgpp::CachePlane> planes = model->cache_planes();
   require(tier->block_bytes() == dgpp::cache_block_bytes(planes), "tier: the record is the planes' bytes");

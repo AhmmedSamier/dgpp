@@ -43,6 +43,11 @@ class DiskCache {
     int64_t blob_pages = 1;   // pages one snapshot blob spans
     int64_t block_tokens = 0; // the pool's block (0: no pool, blobs alone)
     int64_t min_tokens = 0;   // entries below this position are not spilled
+    // prompt_cache_key pins protect their entries from eviction while the
+    // pinned entries' pages stay within this share of the slab; past it a
+    // pinned entry is as evictable as any other (one tenant cannot pin
+    // the whole tier against everyone else). 100: pins always protect.
+    int pin_max_pct = 50;
   };
   enum class State : int { kSpilling = 0, kResident = 1, kRestoring = 2 };
   struct Entry {
@@ -62,6 +67,11 @@ class DiskCache {
     uint64_t last_use = 0;
     bool live = false;
     std::string key;           // prompt_cache_key: evicted only after every unpinned entry
+    // This rank's digest of the pages' checksums when the spill committed
+    // (never serialized: the index bytes are the world's, the slab's bytes
+    // each rank's own). Adoption keeps an entry only while its pages still
+    // carry the content the digest recorded.
+    uint64_t content = 0;
   };
   struct Block {
     int64_t page = -1;
@@ -139,19 +149,46 @@ class DiskCache {
   // key and lookahead, in least-recently-used order — the token ids stay
   // in the slab. The tier keeps these beside the slab.
   std::vector<uint8_t> serialize() const;
+  // The entries serialize() carries, in its order, by their content digest
+  // (rank-local; 0 for an entry committed without one).
+  std::vector<uint64_t> content_digests() const;
+  // An entry's pages in digest order: the blob's run (the blob, then the
+  // ids behind it), the full blocks' records, the partial block's record.
+  std::vector<int64_t> entry_pages(int entry) const;
+  void set_content(int entry, uint64_t digest);
+  // The serialized index taken apart and put back together: one record per
+  // committed entry in the serialized order. The tier prunes the candidate
+  // it offers (entries whose pages no longer hold the content their digest
+  // recorded, or whose ids are unreadable) without knowing the format, and
+  // record_pages() lists a record's pages in entry_pages() order.
+  struct Header {
+    uint64_t pages = 0, page_bytes = 0, blob_pages = 0, block_tokens = 0;
+  };
+  struct Record {
+    int64_t position = 0, next_token = -1, mtp_position = 0, blob_page = -1;
+    uint32_t ids_pages = 0;
+    std::string key;
+    std::vector<int64_t> block_pages;
+    int64_t partial_page = -1;
+  };
+  static bool parse(const std::vector<uint8_t>& bytes, Header* header, std::vector<Record>* records);
+  static std::vector<uint8_t> write(const Header& header, const std::vector<Record>& records);
+  static std::vector<int64_t> record_pages(const Record& record, int64_t blob_pages);
   // Adopts such bytes into an empty index whose geometry matches theirs:
   // each entry's ids are read from its run through `read_pages` (false:
   // that entry is dropped), its block records are rebuilt by page with
   // synthetic identities, and every adopted entry is older than anything
-  // new. `error` names a header that does not fit this slab (nothing
-  // adopted then).
+  // new. `digests` (optional) carries the entries' content digests in the
+  // serialized order. `error` names a header that does not fit this slab
+  // (nothing adopted then).
   struct Adopted {
     int entries = 0;
     int dropped = 0;
     std::string error;
   };
   Adopted restore(const std::vector<uint8_t>& bytes,
-                  const std::function<bool(int64_t page, int64_t count, void* dst)>& read_pages);
+                  const std::function<bool(int64_t page, int64_t count, void* dst)>& read_pages,
+                  const std::vector<uint64_t>* digests = nullptr);
 
   // The deepest entry that is on disk (resident, or restoring — a second
   // request then waits on the same op) at one of the prompt's cuts with
@@ -209,6 +246,8 @@ class DiskCache {
   void give_run(int64_t start, int64_t n);
   int find_block(uint64_t identity) const;
   int lru_victim() const;
+  std::vector<int> serialized_order() const;  // resident entries without images, LRU first
+  bool pins_protect() const;                  // the pinned pages are within the cap
   int new_block(int64_t page, uint64_t identity);
   void release_block(int block);
   void kill_entry(int entry);

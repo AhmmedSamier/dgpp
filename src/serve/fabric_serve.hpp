@@ -220,6 +220,7 @@ struct WorldSettings {
   std::optional<bool> prefill_early_admission = false;
   int prefix_min_tokens = 0;          // the prefix cache's entry floor (2026-09-28); absent legacy field = 0
   bool prefix_head_snapshots = false;  // the head cut (2026-09-28); absent legacy field = off
+  int prefix_pin_max_pct = 50;        // the pin cap (2026-10-28); absent legacy field = 50
   double bulk_pace_gbps = 0.0;
   int bulk_inflight = 0;
   int rendezvous_timeout_ms = 0;
@@ -235,6 +236,7 @@ struct WorldSettings {
   int64_t nvme_cache_max_ops = 4;      // ops started but not committed (a decision input)
   double nvme_cache_reserve_gib = 1.0;  // the pre-flight's free-space reserve
   bool nvme_cache_persist = true;      // the slab outlives the process
+  int64_t nvme_cache_op_timeout_s = 120;  // an op without progress this long fails
   bool operator==(const WorldSettings&) const = default;
 };
 std::string encode_journal_settings(const WorldSettings& s);

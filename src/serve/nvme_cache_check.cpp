@@ -31,7 +31,8 @@ std::string NvmeCachePlan::describe() const {
 
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
                               size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
-                              bool create_directory, size_t reserve_bytes, const std::string& binding) {
+                              bool create_directory, size_t reserve_bytes, const std::string& binding,
+                              size_t chunk_bytes) {
   NvmeCachePlan plan;
   plan.directory = expand_home(path) + (binding.empty() ? "" : "/" + binding);
   plan.slab = plan.directory + "/rank" + std::to_string(rank) + ".slab";
@@ -44,6 +45,13 @@ NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int 
   plan.page_bytes = std::max<size_t>(kAlign, (block_bytes + kAlign - 1) / kAlign * kAlign);
   plan.blob_pages = std::max<int64_t>(1, static_cast<int64_t>((blob_bytes + plan.page_bytes - 1) / plan.page_bytes));
   plan.pages = static_cast<int64_t>(plan.capacity_bytes / plan.page_bytes);
+  if (chunk_bytes > 0 && (chunk_bytes % kAlign != 0 || chunk_bytes < plan.page_bytes)) {
+    plan.error = std::format(
+        "nvme_cache.chunk_mib ({} bytes) must be a 4 KiB multiple that holds one cache block's page ({} bytes "
+        "for this deployment); raise it",
+        chunk_bytes, plan.page_bytes);
+    return plan;
+  }
   const int64_t blocks_at_limit =
       block_tokens > 0 ? (context_limit + block_tokens - 1) / block_tokens : 0;
   // The entry's token ids ride the slab too (8 bytes a token, behind the blob).

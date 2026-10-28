@@ -1818,6 +1818,7 @@ int main(int argc, char** argv) {
   // and a cold prompt keeps the cut at its first structural boundary.
   int prefix_min_tokens = 1024;
   bool prefix_head_snapshots = true;
+  int prefix_pin_max_pct = 50;
   // The bulk collective's sender pacing (prefill all-reduces): negative
   // derives the per-QP rate from the port at bus start.
   double bulk_pace_gbps = -1.0;
@@ -1857,6 +1858,8 @@ int main(int argc, char** argv) {
   int64_t nvme_cache_max_ops = 4;
   double nvme_cache_reserve_gib = 1.0;
   bool nvme_cache_persist = true;
+  bool nvme_cache_allow_buffered = false;
+  int64_t nvme_cache_op_timeout_s = 120;
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
   std::optional<float> frequency_penalty, presence_penalty;
   std::optional<int> top_k;
@@ -2002,6 +2005,8 @@ int main(int argc, char** argv) {
     nvme_cache_max_ops = c.nvme_cache.max_ops;
     nvme_cache_reserve_gib = c.nvme_cache.reserve_gib;
     nvme_cache_persist = c.nvme_cache.persist;
+    nvme_cache_allow_buffered = c.nvme_cache.allow_buffered;
+    nvme_cache_op_timeout_s = c.nvme_cache.op_timeout_s;
     admission_mode = e.admission;
     admission_window = e.admission_window;
     model_alias = e.model_alias;
@@ -2013,6 +2018,7 @@ int main(int argc, char** argv) {
     prefill_early_admission_override = e.prefill_early_admission;
     prefix_min_tokens = e.prefix_min_tokens;
     prefix_head_snapshots = e.prefix_head_snapshots;
+    prefix_pin_max_pct = e.prefix_pin_max_pct;
     bulk_pace_gbps = e.bulk_pace_gbps;
     bulk_inflight = e.bulk_inflight;
     rendezvous_timeout_ms = e.rendezvous_timeout_ms;
@@ -2391,7 +2397,7 @@ int main(int argc, char** argv) {
         prefill_latency.headroom_pct, prefill_latency.growth_factor, prefill_latency.recovery_pct,
         prefill_latency.initial_tokens, prefill_latency.idle_floor_tokens,
         prefill_early_admission_override.has_value() ? (*prefill_early_admission_override ? 1 : 0) : -1,
-        prefix_min_tokens, prefix_head_snapshots ? 1 : 0,
+        prefix_min_tokens, prefix_head_snapshots ? 1 : 0, prefix_pin_max_pct,
         bulk_pace_gbps, bulk_inflight, reasoning_in_content ? 1 : 0,
         rope_scaling ? std::format("yarn:{}:{}:{}:{}:{}:{}", rope_scaling->factor,
                                    rope_scaling->original_max_position_embeddings,
@@ -2400,8 +2406,9 @@ int main(int argc, char** argv) {
                      : "off",
         dflash_model.empty() ? "off" : dflash_model, dflash_weights, lookup_draft ? 1 : 0,
         lookup_nmin, lookup_nstrong, lookup_agree, lookup_tail,
-        nvme_cache ? std::format("{}:{}:{}:{}:{}:{}", nvme_cache_gib, nvme_cache_min_tokens, nvme_cache_chunk_mib,
-                                 nvme_cache_max_ops, nvme_cache_reserve_gib, nvme_cache_persist ? 1 : 0)
+        nvme_cache ? std::format("{}:{}:{}:{}:{}:{}:{}", nvme_cache_gib, nvme_cache_min_tokens, nvme_cache_chunk_mib,
+                                 nvme_cache_max_ops, nvme_cache_reserve_gib, nvme_cache_persist ? 1 : 0,
+                                 nvme_cache_op_timeout_s)
                    : std::string("off"));
   };
   if ((world > 1 || rank > 0) && !memory_plan_only) {
@@ -2512,6 +2519,7 @@ int main(int argc, char** argv) {
         ws.prefill_early_admission = prefill_early_admission_override;
         ws.prefix_min_tokens = prefix_min_tokens;
         ws.prefix_head_snapshots = prefix_head_snapshots;
+        ws.prefix_pin_max_pct = prefix_pin_max_pct;
         ws.bulk_pace_gbps = bulk_pace_gbps;
         ws.bulk_inflight = bulk_inflight;
         ws.rendezvous_timeout_ms = rendezvous_timeout_ms;
@@ -2524,6 +2532,7 @@ int main(int argc, char** argv) {
         ws.nvme_cache_max_ops = nvme_cache_max_ops;
         ws.nvme_cache_reserve_gib = nvme_cache_reserve_gib;
         ws.nvme_cache_persist = nvme_cache_persist;
+        ws.nvme_cache_op_timeout_s = nvme_cache_op_timeout_s;
         journal->broadcast(dgpp::serve::encode_journal_settings(ws));
         DGPP_LOG_INFO("journal: settings pushed to {} peer(s): {}", world - 1,
                       canonical());
@@ -2629,6 +2638,7 @@ int main(int argc, char** argv) {
         prefill_early_admission_override = ws.prefill_early_admission;
         prefix_min_tokens = ws.prefix_min_tokens;
         prefix_head_snapshots = ws.prefix_head_snapshots;
+        prefix_pin_max_pct = ws.prefix_pin_max_pct;
         bulk_pace_gbps = ws.bulk_pace_gbps;
         bulk_inflight = ws.bulk_inflight;
         rendezvous_timeout_ms = ws.rendezvous_timeout_ms;
@@ -2642,6 +2652,7 @@ int main(int argc, char** argv) {
           nvme_cache_max_ops = ws.nvme_cache_max_ops;
           nvme_cache_reserve_gib = ws.nvme_cache_reserve_gib;
           nvme_cache_persist = ws.nvme_cache_persist;
+          nvme_cache_op_timeout_s = ws.nvme_cache_op_timeout_s;
         }
         const std::string now = canonical();
         if (own != now)
@@ -2967,6 +2978,14 @@ int main(int argc, char** argv) {
   }
   if (nvme_cache && nvme_cache_min_tokens < 0) {
     DGPP_LOG_ERROR("nvme_cache.min_tokens must be >= 0, got {}", nvme_cache_min_tokens);
+    return 2;
+  }
+  if (nvme_cache && (nvme_cache_op_timeout_s < 0 || nvme_cache_op_timeout_s > 86400)) {
+    DGPP_LOG_ERROR("nvme_cache.op_timeout_s must be in [0, 86400], got {}", nvme_cache_op_timeout_s);
+    return 2;
+  }
+  if (prefix_pin_max_pct < 0 || prefix_pin_max_pct > 100) {
+    DGPP_LOG_ERROR("engine.prefix_pin_max_pct must be in [0, 100], got {}", prefix_pin_max_pct);
     return 2;
   }
   if (!(stats_interval_s >= 0.0)) {
@@ -3365,12 +3384,14 @@ int main(int argc, char** argv) {
     const size_t nvme_staging_bytes = nvme_cache ? dgpp::nvme_tier_staging_bytes(kNvmeChunkBytes) : 0;
     dgpp::serve::NvmeCachePlan nvme_plan;
     // The binding a slab that outlives the process is kept under: the
-    // checkpoint, the effective settings (their digest) and the slab's
-    // geometry — a start under another one never sees these entries.
+    // binary (a release may lay a block's planes out differently at the
+    // same byte count, or compute its KV differently), the checkpoint, the
+    // effective settings (their digest) and the slab's geometry — a start
+    // under another one never sees these entries.
     const std::string nvme_binding =
         nvme_cache && nvme_cache_persist
             ? dgpp::serve::config_digest(
-                  config_digest + "|" + ckpt + "|" +
+                  std::string(DGPP_VERSION) + "|" + config_digest + "|" + ckpt + "|" +
                   std::to_string(family->cache_block_bytes(world, mtp && graph_world)) + "|" +
                   std::to_string(snapshot_bytes) + "|" + std::format("{:.17g}", nvme_cache_gib) + "|" +
                   std::to_string(block_tokens) + "|" + std::to_string(world))
@@ -3381,7 +3402,7 @@ int main(int argc, char** argv) {
                                                snapshot_bytes, block_tokens, context_limit,
                                                /*create_directory=*/!memory_plan_only,
                                                static_cast<size_t>(nvme_cache_reserve_gib * 1024.0 * 1024.0 * 1024.0),
-                                               nvme_binding);
+                                               nvme_binding, kNvmeChunkBytes);
       DGPP_LOG_INFO("rank {}: {}", rank, nvme_plan.describe());
       if (!nvme_plan.error.empty()) {
         DGPP_LOG_ERROR("rank {}: the NVMe cache does not fit — {}", rank, nvme_plan.error);
@@ -3410,6 +3431,8 @@ int main(int argc, char** argv) {
       en.rank = rank;
       en.persist = nvme_cache_persist;
       en.binding = nvme_binding;
+      en.allow_buffered = nvme_cache_allow_buffered;
+      en.op_timeout_s = static_cast<int>(nvme_cache_op_timeout_s);
       eng->disk_enable(en);
       const dgpp::sched::SchedulerEngine::DiskInfo info = eng->disk_info();
       // The pre-flight sized the slab from the family's static estimate of a
@@ -3525,6 +3548,7 @@ int main(int argc, char** argv) {
     knobs.admission.prefill_latency = prefill_latency;
     knobs.admission.prefix_min_tokens = prefix_min_tokens;
     knobs.admission.prefix_head_snapshots = prefix_head_snapshots;
+    knobs.admission.prefix_pin_max_pct = prefix_pin_max_pct;
     knobs.default_max_tokens = default_max_tokens;
     knobs.file_inputs = file_inputs;
     knobs.sampling_defaults = sampling_defaults;

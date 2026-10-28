@@ -842,6 +842,21 @@ DGPP_TEST(cluster_config_parses_nvme_cache) {
   require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"persist\":1}}").find("nvme_cache.persist") !=
               std::string::npos,
           "a non-boolean persist is refused by name");
+  require(!tuned.nvme_cache.allow_buffered && tuned.nvme_cache.op_timeout_s == 120,
+          "buffered I/O refused and a two-minute op bound by default");
+  const dgpp::serve::ClusterConfig bounded = dgpp::serve::parse_cluster_config(
+      "{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"allow_buffered\":true,\"op_timeout_s\":30}}", "t");
+  require(bounded.nvme_cache.allow_buffered && bounded.nvme_cache.op_timeout_s == 30,
+          "allow_buffered and op_timeout_s parse");
+  for (const char* bad : {"\"allow_buffered\":1", "\"op_timeout_s\":-1", "\"op_timeout_s\":90000", "\"op_timeout_s\":1.5"})
+    require(refusal(std::string("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{") + bad + "}}")
+                    .find("nvme_cache.") != std::string::npos,
+            std::string("refused by name: ") + bad);
+  require(dgpp::serve::parse_cluster_config(engine_json("{\"prefix_pin_max_pct\":25}"), "t").engine.prefix_pin_max_pct == 25 &&
+              off.engine.prefix_pin_max_pct == 50,
+          "the pin cap parses and defaults to half");
+  require(refusal(engine_json("{\"prefix_pin_max_pct\":101}")).find("prefix_pin_max_pct") != std::string::npos,
+          "a cap past 100 is refused by name");
   for (const char* bad : {"\"chunk_mib\":2", "\"chunk_mib\":8192", "\"chunk_mib\":1.5", "\"max_ops\":0",
                           "\"max_ops\":257", "\"reserve_gib\":-1", "\"reserve_gib\":true"})
     require(refusal(std::string("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{") + bad + "}}")

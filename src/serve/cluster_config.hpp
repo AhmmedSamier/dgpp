@@ -355,6 +355,10 @@ struct ClusterConfig {
     double prefix_cache_gib = 1.5;
     int prefix_min_tokens = 1024;       // no prefix snapshot below this position (0: every cut)
     bool prefix_head_snapshots = true;  // a cold prompt also keeps its first structural cut (the system prompt's end)
+    // prompt_cache_key pins protect their entries while the pinned entries
+    // hold at most this share of the arena's slots and the NVMe slab's
+    // pages; past it a pin protects nothing (100: always).
+    int prefix_pin_max_pct = 50;
     std::string admission = "full";
     int admission_window = 256;
     int prefill_budget_tokens = -1;  // automatic: 256 tokens, adjusted to engine geometry
@@ -397,6 +401,12 @@ struct ClusterConfig {
     // settings and slab geometry adopts its entries (when every rank holds
     // the same index). False recreates the slab at every start.
     bool persist = true;
+    // A filesystem that refuses direct I/O (tmpfs) is refused unless this
+    // allows buffered I/O: the page cache would grow into the model's memory.
+    bool allow_buffered = false;
+    // An op without progress for this long fails, so a request waiting on
+    // its restore admits cold instead of never (0: never).
+    int64_t op_timeout_s = 120;
   } nvme_cache;
   struct Paths {
     std::string log_dir = "~/dgpp/log";

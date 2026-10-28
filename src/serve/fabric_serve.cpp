@@ -423,6 +423,7 @@ std::string encode_journal_warm(const dgpp::sched::AdmissionPolicy& policy,
   if (policy.prefill_early_admission) out += ",\"pfearly\":1";
   if (policy.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(policy.prefix_min_tokens);
   if (policy.prefix_head_snapshots) out += ",\"phead\":1";
+  if (policy.prefix_pin_max_pct != 50) out += ",\"ppin\":" + std::to_string(policy.prefix_pin_max_pct);
   if (!config_digest.empty()) {
     out += ",\"cfg\":";
     append_json_string(&out, config_digest);
@@ -457,6 +458,7 @@ std::string encode_journal_settings(const WorldSettings& s) {
   else if (*s.prefill_early_admission) out += ",\"pfearly\":1";
   if (s.prefix_min_tokens > 0) out += ",\"pmin\":" + std::to_string(s.prefix_min_tokens);
   if (s.prefix_head_snapshots) out += ",\"phead\":1";
+  if (s.prefix_pin_max_pct != 50) out += ",\"ppin\":" + std::to_string(s.prefix_pin_max_pct);
   out += std::format(",\"win\":{},\"pace\":{:.17g},\"inflight\":{},\"rdv\":{},\"stats\":{:.17g},\"ric\":{},\"kvdt\":",
       s.admission_window, s.bulk_pace_gbps, s.bulk_inflight, s.rendezvous_timeout_ms,
       s.stats_interval_s, s.reasoning_in_content ? 1 : 0);
@@ -464,9 +466,10 @@ std::string encode_journal_settings(const WorldSettings& s) {
   // The NVMe cold tier (issue #26): written only when on, so a record
   // without it is byte for byte the earlier format.
   if (s.nvme_cache)
-    out += std::format(",\"nvme\":1,\"nvmegib\":{:.17g},\"nvmemin\":{},\"nvmechunk\":{},\"nvmeops\":{},\"nvmereserve\":{:.17g},\"nvmepersist\":{}",
+    out += std::format(",\"nvme\":1,\"nvmegib\":{:.17g},\"nvmemin\":{},\"nvmechunk\":{},\"nvmeops\":{},\"nvmereserve\":{:.17g},\"nvmepersist\":{},\"nvmeto\":{}",
                        s.nvme_cache_capacity_gib, s.nvme_cache_min_tokens, s.nvme_cache_chunk_mib,
-                       s.nvme_cache_max_ops, s.nvme_cache_reserve_gib, s.nvme_cache_persist ? 1 : 0);
+                       s.nvme_cache_max_ops, s.nvme_cache_reserve_gib, s.nvme_cache_persist ? 1 : 0,
+                       s.nvme_cache_op_timeout_s);
   out += ",\"ngt\":";
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
@@ -734,6 +737,11 @@ JournalRecord decode_journal_line(std::string_view line) {
       s.prefix_min_tokens = static_cast<int>(pmin->as_int());
     }
     if (v.find("phead")) s.prefix_head_snapshots = flag("phead");
+    if (const auto* ppin = v.find("ppin")) {
+      if (!ppin->is_number() || ppin->as_int() < 0 || ppin->as_int() > 100)
+        throw std::runtime_error("journal: settings record with a bad prefix pin cap");
+      s.prefix_pin_max_pct = static_cast<int>(ppin->as_int());
+    }
     s.bulk_pace_gbps = num("pace").as_double();
     s.bulk_inflight = static_cast<int>(num("inflight").as_int());
     s.rendezvous_timeout_ms = static_cast<int>(num("rdv").as_int());
@@ -759,6 +767,14 @@ JournalRecord decode_journal_line(std::string_view line) {
             s.nvme_cache_max_ops > 256 || !(s.nvme_cache_reserve_gib >= 0.0))
           throw std::runtime_error("journal: settings record with a bad NVMe cache chunk, op bound or reserve");
         s.nvme_cache_persist = v.find("nvmepersist") ? flag("nvmepersist") : true;
+        // The op bound (absent in records before 2026-10-28: never).
+        if (v.find("nvmeto")) {
+          s.nvme_cache_op_timeout_s = num("nvmeto").as_int();
+          if (s.nvme_cache_op_timeout_s < 0 || s.nvme_cache_op_timeout_s > 86400)
+            throw std::runtime_error("journal: settings record with a bad NVMe cache op timeout");
+        } else {
+          s.nvme_cache_op_timeout_s = 0;
+        }
       }
     }
     // Records before 2026-09-10 carry no table residency: resident.
@@ -975,6 +991,11 @@ JournalRecord decode_journal_line(std::string_view line) {
         if (!phead->is_number() || (phead->as_int() != 0 && phead->as_int() != 1))
           throw std::runtime_error("journal: warm record with a bad head-cut flag");
         rec.admission.prefix_head_snapshots = phead->as_int() == 1;
+      }
+      if (const auto* ppin = v.find("ppin")) {
+        if (!ppin->is_number() || ppin->as_int() < 0 || ppin->as_int() > 100)
+          throw std::runtime_error("journal: warm record with a bad prefix pin cap");
+        rec.admission.prefix_pin_max_pct = static_cast<int>(ppin->as_int());
       }
     }
     if (const dgpp::minijson::Value* pc = v.find("pc")) {

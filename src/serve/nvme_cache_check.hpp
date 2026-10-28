@@ -41,9 +41,11 @@ constexpr size_t kNvmeCacheReserveBytes = size_t{1} << 30;
 // With a `binding` (nvme_cache.persist) the slab lives under
 // <path>/<binding>/, so another checkpoint's or configuration's slab is
 // never mistaken for this deployment's.
+// `chunk_bytes` (nvme_cache.chunk_mib) must hold one page: a family whose
+// block outgrows the slice is refused here, not after the model loaded.
 NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
                               size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
                               bool create_directory = true, size_t reserve_bytes = kNvmeCacheReserveBytes,
-                              const std::string& binding = "");
+                              const std::string& binding = "", size_t chunk_bytes = 0);
 
 }  // namespace dgpp::serve

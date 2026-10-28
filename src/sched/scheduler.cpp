@@ -78,6 +78,7 @@ Scheduler::Scheduler(SchedulerEngine* engine,
   PrefixCache::Config pc;
   pc.slots = slots;
   pc.align = std::max<int64_t>(1, prefix_info_.align);
+  pc.pin_max_pct = policy_.prefix_pin_max_pct;
   pc.chunk_tokens = std::max<int64_t>(1, prefix_info_.chunk_tokens);
   cache_ = PrefixCache(pc);
   if (policy_.window_tokens < 1)
@@ -137,6 +138,7 @@ Scheduler::Scheduler(SchedulerEngine* engine,
     dc.blob_pages = disk_info_.blob_pages;
     dc.block_tokens = std::max<int64_t>(0, prefix_info_.block_tokens);
     dc.min_tokens = std::max<int64_t>(0, disk_info_.min_tokens);
+    dc.pin_max_pct = policy_.prefix_pin_max_pct;
     disk_ = DiskCache(dc);
     // A previous run's index the world adopted: its entries, with their
     // ids read back from the slab, become resident before the first tick
@@ -144,9 +146,10 @@ Scheduler::Scheduler(SchedulerEngine* engine,
     if (disk_info_.persist) {
       const std::vector<uint8_t> adopted = engine_->disk_adopted_index();
       if (!adopted.empty()) {
-        const DiskCache::Adopted a = disk_.restore(adopted, [this](int64_t page, int64_t count, void* dst) {
-          return engine_->disk_read_pages(page, count, dst);
-        });
+        const std::vector<uint64_t> digests = engine_->disk_adopted_digests();
+        const DiskCache::Adopted a = disk_.restore(
+            adopted, [this](int64_t page, int64_t count, void* dst) { return engine_->disk_read_pages(page, count, dst); },
+            &digests);
         if (!a.error.empty())
           DGPP_LOG_WARN("sched: NVMe cache: the previous run's index was not adopted: {}", a.error);
         else
@@ -2197,7 +2200,14 @@ void Scheduler::start_restores() {
     // tick. A shortage with nothing in flight (every slot attached to a
     // live request) is not going to lift soon: the request admits cold.
     if (restore_in_flight() || !start_restore(plan.disk_entry, r)) {
-      if (!disk_ops_.empty()) r.restore_blocked = true;
+      if (!disk_ops_.empty() && r.restore_wait_ticks < kRestoreWaitTicks) {
+        r.restore_blocked = true;
+        ++r.restore_wait_ticks;
+        if (r.restore_wait_ticks == kRestoreWaitTicks)
+          DGPP_LOG_INFO("sched: request '{}' waited {} ticks for its NVMe cache restore to start; it admits "
+                        "from memory or cold at the next chance",
+                        r.spec.id, kRestoreWaitTicks);
+      }
     }
   }
 }
@@ -2253,7 +2263,8 @@ bool Scheduler::start_spill(int entry, const std::string& id) {
 }
 
 void Scheduler::persist_disk_index() {
-  if (disk_.enabled() && disk_info_.persist) engine_->disk_persist_index(disk_.serialize());
+  if (disk_.enabled() && disk_info_.persist)
+    engine_->disk_persist_index(disk_.serialize(), disk_.content_digests());
 }
 
 bool Scheduler::start_restore(int disk_entry, Request& r) {
@@ -2336,6 +2347,10 @@ void Scheduler::apply_disk_commits(const std::vector<DiskCommit>& commits) {
       cache_.set_busy(o.memory_entry, false);
       if (c.ok) {
         disk_.commit_spill(o.disk_entry);
+        // The entry's content on this rank's slab, bound into the index so
+        // an adoption after a crash keeps it only while its pages still
+        // hold these bytes.
+        disk_.set_content(o.disk_entry, engine_->disk_pages_digest(disk_.entry_pages(o.disk_entry)));
         cache_.set_disk(o.memory_entry, o.disk_entry);
         cache_.note(8, o.op, 1);
         emit_prefix(o.id, "spilled", o.position, o.slot);

@@ -482,6 +482,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
             fail(what, "'" + ek + "' must be >= 0 (0 turns the cache off)");
         } else if (p.key == "prefix_min_tokens")
           e.prefix_min_tokens = static_cast<int>(integer(x, ek, what, 0, 1 << 30));
+        else if (p.key == "prefix_pin_max_pct")
+          e.prefix_pin_max_pct = static_cast<int>(integer(x, ek, what, 0, 100));
         else if (p.key == "prefix_head_snapshots") e.prefix_head_snapshots = boolean(x, ek, what);
         else if (p.key == "admission") {
           e.admission = text(x, ek, what);
@@ -527,6 +529,8 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           n.reserve_gib = number(p.value, nk, what);
           if (n.reserve_gib < 0.0) fail(what, "'" + nk + "' must be >= 0");
         } else if (p.key == "persist") n.persist = boolean(p.value, nk, what);
+        else if (p.key == "allow_buffered") n.allow_buffered = boolean(p.value, nk, what);
+        else if (p.key == "op_timeout_s") n.op_timeout_s = integer(p.value, nk, what, 0, 86400);
         else fail(what, "unknown key '" + nk + "'");
       }
       if (n.enabled && n.capacity_gib <= 0.0)

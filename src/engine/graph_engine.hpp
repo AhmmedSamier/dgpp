@@ -1633,8 +1633,14 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   bool disk_read_pages(int64_t page, int64_t count, void* dst) override {
     return tier_ && tier_->read_pages(page, count, dst);
   }
-  void disk_persist_index(const std::vector<uint8_t>& bytes) override {
-    if (tier_) tier_->persist_index(bytes);
+  void disk_persist_index(const std::vector<uint8_t>& bytes, const std::vector<uint64_t>& digests) override {
+    if (tier_) tier_->persist_index(bytes, digests);
+  }
+  uint64_t disk_pages_digest(const std::vector<int64_t>& pages) const override {
+    return tier_ ? tier_->pages_digest(pages) : 0;
+  }
+  std::vector<uint64_t> disk_adopted_digests() const override {
+    return tier_ ? tier_->adopted_digests() : std::vector<uint64_t>{};
   }
   std::string disk_candidate_digest() const override { return tier_ ? tier_->candidate_digest() : "0"; }
   void disk_adopt(bool keep) override {

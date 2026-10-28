@@ -35,6 +35,10 @@ class PrefixCache {
     int64_t align = 1;          // kpool: every entry position is a multiple
     int64_t chunk_tokens = 2048;  // the cold prefill's chunk length
     size_t image_bytes = kMaxRequestImageBytes;  // shared immutable pixel identities
+    // prompt_cache_key pins protect their entries while the pinned entries
+    // hold at most this share of the slots; past it a pin protects nothing
+    // (one tenant cannot pin the whole arena). 100: pins always protect.
+    int pin_max_pct = 50;
   };
   struct Entry {
     std::vector<int64_t> ids;   // the first `position` ids of the sequence

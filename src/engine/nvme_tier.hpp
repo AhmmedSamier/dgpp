@@ -43,8 +43,16 @@
 // deployment's binding (checkpoint, settings, slab geometry). A start
 // that finds the three files for its binding offers the index as a
 // candidate; the world adopts it only when every rank's candidate is the
-// same bytes (the warm handshake), else the slab is recreated.
+// same bytes (the warm handshake), else the slab is recreated. The index
+// file also carries, per entry, this rank's digest of the entry's page
+// CRCs when its spill committed: at open every entry is checked against
+// the CRC table as it stands and its ids run is read, and an entry whose
+// pages were reused by a later run that crashed before its index landed,
+// or whose ids are unreadable, is pruned from the candidate — a pruned
+// candidate differs from the other ranks' and the world starts fresh,
+// never with an entry whose checksums pass over someone else's bytes.
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -59,6 +67,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -120,6 +129,10 @@ class NvmeTier {
                                   " bytes holds fewer than one blob (" + std::to_string(blob_pages_) +
                                   " pages of " + std::to_string(page_bytes_) + " bytes) and one block");
     per_chunk_ = static_cast<int64_t>(cfg_.chunk_bytes / page_bytes_);
+    // The adoption's read buffer, before open_slab() reads the candidate's
+    // ids runs with it (direct I/O needs the alignment).
+    if (::posix_memalign(&aligned_page_, kAlign, page_bytes_) != 0 || aligned_page_ == nullptr)
+      throw std::runtime_error("NvmeTier: cannot allocate an aligned page");
     open_slab();
     // Every CUDA object now, before the world's collectives (the fabric's
     // rule: nothing creates or frees one between them).
@@ -133,8 +146,6 @@ class NvmeTier {
                                  cudaHostAllocDefault));
       DGPP_CUDA_OK(cudaEventCreateWithFlags(&buf.done, cudaEventDisableTiming));
     }
-    if (::posix_memalign(&aligned_page_, kAlign, page_bytes_) != 0 || aligned_page_ == nullptr)
-      throw std::runtime_error("NvmeTier: cannot allocate an aligned page");
     worker_ = std::thread([this] { worker(); });
     DGPP_LOG_INFO(
         "rank {}: NVMe cache open — {} ({:.2f} GiB): {} pages of {} bytes ({} bytes of cache block in {} planes), "
@@ -205,6 +216,8 @@ class NvmeTier {
   void adopt(bool keep) {
     if (keep || candidate_.empty()) return;
     candidate_.clear();
+    adopted_digests_.clear();
+    adopted_ids_.clear();
     recreate_slab();
     DGPP_LOG_INFO("rank {}: NVMe cache: the world did not agree on the previous index; the slab starts fresh",
                   cfg_.rank);
@@ -214,6 +227,13 @@ class NvmeTier {
   // thread with the worker idle. False on any failure.
   bool read_pages(int64_t page, int64_t count, void* dst) {
     if (page < 0 || count <= 0 || page + count > pages_) return false;
+    // The ids the open already read and checked (an adopted entry's run).
+    if (const auto it = adopted_ids_.find(page); it != adopted_ids_.end()) {
+      const size_t bytes = static_cast<size_t>(count) * page_bytes_;
+      std::memset(dst, 0, bytes);
+      std::memcpy(dst, it->second.data(), std::min(bytes, it->second.size()));
+      return true;
+    }
     for (int64_t i = 0; i < count; ++i) {
       std::string why;
       if (!read_page(page + i, aligned_page_, &why)) {
@@ -225,14 +245,33 @@ class NvmeTier {
     }
     return true;
   }
-  // The committed index, for the worker to write beside the slab (the
-  // newest bytes win; a write in progress is followed by another).
-  void persist_index(std::vector<uint8_t> bytes) {
+  // The committed index with its entries' content digests, for the worker
+  // to write beside the slab (the newest bytes win; a write in progress is
+  // followed by another).
+  void persist_index(std::vector<uint8_t> bytes, std::vector<uint64_t> digests) {
     if (!cfg_.persist) return;
     std::lock_guard<std::mutex> lock(mutex_);
     pending_index_ = std::move(bytes);
+    pending_digests_ = std::move(digests);
     has_pending_index_ = true;
     cv_.notify_one();
+  }
+  // The adopted index's content digests, in its order.
+  const std::vector<uint64_t>& adopted_digests() const { return adopted_digests_; }
+  // This rank's digest of the pages' CRCs as the table stands: the index
+  // binds an entry to the bytes its spill wrote with it. Distinct pages
+  // are distinct elements of the table, so the worker's writes of other
+  // pages race nothing here.
+  uint64_t pages_digest(const std::vector<int64_t>& pages) const {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (const int64_t p : pages) {
+      const uint32_t crc = p >= 0 && p < pages_ ? crc_[static_cast<size_t>(p)] : 0;
+      for (int i = 0; i < 4; ++i) {
+        h ^= (crc >> (8 * i)) & 0xffu;
+        h *= 0x100000001b3ull;
+      }
+    }
+    return h;
   }
 
   sched::SchedulerEngine::DiskInfo info() const {
@@ -244,6 +283,7 @@ class NvmeTier {
     i.min_tokens = cfg_.min_tokens;
     i.max_ops = cfg_.max_ops;
     i.persist = cfg_.persist;
+    i.op_timeout_s = cfg_.op_timeout_s;
     return i;
   }
 
@@ -343,6 +383,9 @@ class NvmeTier {
   // the running job are enqueued on the model stream; a finished job
   // reports.
   void pump() {
+    // The scheduler adopted the index before the first tick; the ids kept
+    // for it are not needed again.
+    if (!adopted_ids_.empty()) adopted_ids_.clear();
     if (!active_ && !jobs_.empty()) start_job();
     if (!active_) return;
     Job& job = *active_;
@@ -361,6 +404,18 @@ class NvmeTier {
                     cfg_.rank, job.restore ? "restore" : "spill", job.op, stall_s, job.next_slice, job.slices,
                     std::chrono::duration<double>(now - job.started).count());
       job.next_stall_note_s = stall_s + 60.0;
+    }
+    // The bound: an op without progress for op_timeout_s fails, and the
+    // buffers a stuck read or write holds are abandoned to the worker —
+    // it frees them when the call returns (they belong to no job by then)
+    // — so the requests waiting on the op admit cold instead of never.
+    if (cfg_.op_timeout_s > 0 && stall_s >= cfg_.op_timeout_s && !job.failed) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      job.failed = true;
+      job.abandoned = true;
+      if (job.why.empty())
+        job.why = "no progress for " + std::to_string(static_cast<int64_t>(stall_s)) + " s (nvme_cache.op_timeout_s " +
+                  std::to_string(cfg_.op_timeout_s) + ")";
     }
     bool progressed = false;
     // Slices whose device work landed (kDevice is the pump's own state to
@@ -386,7 +441,8 @@ class NvmeTier {
         cv_.notify_one();
       }
     }
-    // Slices the worker finished (a restore's reads, a spill's writes).
+    // Slices the worker finished (a restore's reads, a spill's writes). A
+    // read an abandoned op's worker finished late belongs to no job.
     std::vector<Buffer*> ready;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -396,7 +452,7 @@ class NvmeTier {
     }
     for (Buffer* buf : ready) {
       progressed = true;
-      if (job.restore && !job.failed) {
+      if (job.restore && !job.failed && buf->job_seq == job.seq) {
         issue_restore_slice(job, *buf);
       } else {
         release_buffer(*buf);
@@ -414,6 +470,7 @@ class NvmeTier {
         if (job.restore) {
           std::lock_guard<std::mutex> lock(mutex_);
           buf.slice = job.next_slice++;
+          buf.job_seq = job.seq;
           buf.state = Buffer::kWorker;
           cv_.notify_one();
         } else {
@@ -426,11 +483,14 @@ class NvmeTier {
       job.next_stall_note_s = 30.0;
     }
     // Done: every slice issued and every buffer back, or failed with the
-    // buffers quiet (no device work in flight, no worker on them).
+    // buffers quiet (no device work in flight, no worker on them) — an
+    // abandoned op's buffers with the worker count as quiet: the job is
+    // over for them, the worker frees them when its call returns.
     bool quiet = true;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      for (const Buffer& buf : buffers_) quiet = quiet && buf.state == Buffer::kFree;
+      for (const Buffer& buf : buffers_)
+        quiet = quiet && (buf.state == Buffer::kFree || (job.abandoned && buf.state == Buffer::kWorker));
     }
     if (!quiet) return;
     if (!job.failed && job.next_slice < job.slices) return;
@@ -465,6 +525,8 @@ class NvmeTier {
     int64_t slices = 0;        // block slices + blob slices (+ ids slices on a spill)
     int64_t next_slice = 0;
     bool failed = false;
+    bool abandoned = false;  // failed by the timeout: its buffers with the worker are the worker's to free
+    uint64_t seq = 0;        // the job's number: a buffer carries the one it serves
     std::string why;
     std::chrono::steady_clock::time_point started;
     std::chrono::steady_clock::time_point progressed;  // the last slice issued or returned
@@ -477,6 +539,7 @@ class NvmeTier {
     enum State { kFree, kDevice, kWorker, kReady };
     State state = kFree;
     int64_t slice = -1;
+    uint64_t job_seq = 0;  // the job the slice belongs to (the worker returns a stale one unused)
     void* device = nullptr;
     void* pinned = nullptr;
     CopySegment* d_segs = nullptr;
@@ -529,7 +592,9 @@ class NvmeTier {
     check_pages(job.blob_page, pages, -1);
   }
 
-  static constexpr char kIndexFileMagic[8] = {'D', 'G', 'P', 'P', 'N', 'V', 'M', 'I'};
+  // The index file: magic, the binding, the scheduler's bytes (the
+  // world's) and the entries' content digests (this rank's).
+  static constexpr char kIndexFileMagic[8] = {'D', 'G', 'P', 'P', 'N', 'V', 'M', '2'};
 
   void open_slab() {
     namespace fs = std::filesystem;
@@ -577,16 +642,8 @@ class NvmeTier {
       const uintmax_t crc_size = fs::is_regular_file(crc_path_, ec) ? fs::file_size(crc_path_, ec) : 0;
       if (slab_size == static_cast<uintmax_t>(pages_) * page_bytes_ &&
           crc_size == static_cast<uintmax_t>(pages_) * sizeof(uint32_t) && fs::is_regular_file(index_path_, ec)) {
-        std::vector<uint8_t> file = read_file(index_path_);
-        if (file.size() >= 12 && std::memcmp(file.data(), kIndexFileMagic, 8) == 0) {
-          uint32_t n = 0;
-          for (int i = 0; i < 4; ++i) n |= static_cast<uint32_t>(file[8 + static_cast<size_t>(i)]) << (8 * i);
-          if (12 + n <= file.size() &&
-              std::string(reinterpret_cast<const char*>(file.data()) + 12, n) == cfg_.binding) {
-            candidate_.assign(file.begin() + 12 + n, file.end());
-            adopt = true;
-          }
-        }
+        const std::vector<uint8_t> file = read_file(index_path_);
+        adopt = parse_index_file(file, &candidate_, &adopted_digests_);
       }
     }
     open_fd(adopt);
@@ -608,11 +665,11 @@ class NvmeTier {
         DGPP_LOG_WARN("rank {}: NVMe cache: the CRC table beside {} is unreadable; the slab starts fresh",
                       cfg_.rank, cfg_.slab_path);
         candidate_.clear();
+        adopted_digests_.clear();
         recreate_slab();
-        return;
+      } else {
+        (void)validate_candidate();  // a candidate that does not describe the slab recreates it
       }
-      DGPP_LOG_INFO("rank {}: NVMe cache: a previous run's index for this binding ({} bytes) is the candidate",
-                    cfg_.rank, candidate_.size());
     } else {
       fresh_files();
     }
@@ -621,6 +678,102 @@ class NvmeTier {
       if (crc_fd_ < 0)
         throw std::runtime_error("NvmeTier: cannot open " + crc_path_ + ": " + std::strerror(errno));
     }
+  }
+
+  // The index file taken apart: the binding must be this deployment's, the
+  // digests one per entry of the scheduler's bytes.
+  bool parse_index_file(const std::vector<uint8_t>& file, std::vector<uint8_t>* shared,
+                        std::vector<uint64_t>* digests) const {
+    size_t at = 0;
+    const auto u32 = [&](uint32_t* v) {
+      if (at + 4 > file.size()) return false;
+      *v = 0;
+      for (int i = 0; i < 4; ++i) *v |= static_cast<uint32_t>(file[at + static_cast<size_t>(i)]) << (8 * i);
+      at += 4;
+      return true;
+    };
+    const auto u64 = [&](uint64_t* v) {
+      if (at + 8 > file.size()) return false;
+      *v = 0;
+      for (int i = 0; i < 8; ++i) *v |= static_cast<uint64_t>(file[at + static_cast<size_t>(i)]) << (8 * i);
+      at += 8;
+      return true;
+    };
+    if (file.size() < 8 || std::memcmp(file.data(), kIndexFileMagic, 8) != 0) return false;
+    at = 8;
+    uint32_t n = 0;
+    if (!u32(&n) || at + n > file.size()) return false;
+    if (std::string(reinterpret_cast<const char*>(file.data()) + at, n) != cfg_.binding) return false;
+    at += n;
+    uint64_t shared_len = 0;
+    if (!u64(&shared_len) || shared_len > file.size() - at) return false;
+    shared->assign(file.begin() + static_cast<std::ptrdiff_t>(at), file.begin() + static_cast<std::ptrdiff_t>(at + shared_len));
+    at += static_cast<size_t>(shared_len);
+    uint32_t count = 0;
+    if (!u32(&count) || static_cast<size_t>(count) * 8 != file.size() - at) return false;
+    digests->clear();
+    for (uint32_t i = 0; i < count; ++i) {
+      uint64_t d = 0;
+      if (!u64(&d)) return false;
+      digests->push_back(d);
+    }
+    return true;
+  }
+
+  // The candidate against the slab as it stands: an entry stays only when
+  // its pages' CRCs still fold to the digest its commit recorded and its
+  // ids run reads back (checked, and kept for the scheduler's adoption);
+  // the rest are pruned. False when nothing parses: the slab starts fresh.
+  bool validate_candidate() {
+    sched::DiskCache::Header header;
+    std::vector<sched::DiskCache::Record> records;
+    if (!sched::DiskCache::parse(candidate_, &header, &records) || records.size() != adopted_digests_.size() ||
+        header.pages != static_cast<uint64_t>(pages_) || header.page_bytes != page_bytes_ ||
+        header.blob_pages != static_cast<uint64_t>(blob_pages_)) {
+      DGPP_LOG_WARN("rank {}: NVMe cache: the index beside {} does not describe this slab; the slab starts fresh",
+                    cfg_.rank, cfg_.slab_path);
+      candidate_.clear();
+      adopted_digests_.clear();
+      recreate_slab();
+      return false;
+    }
+    std::vector<sched::DiskCache::Record> kept;
+    std::vector<uint64_t> kept_digests;
+    int stale = 0, unreadable = 0;
+    for (size_t i = 0; i < records.size(); ++i) {
+      const sched::DiskCache::Record& rec = records[i];
+      const std::vector<int64_t> pages = sched::DiskCache::record_pages(rec, blob_pages_);
+      bool ok = rec.position > 0 && rec.blob_page >= 0;
+      for (const int64_t p : pages) ok = ok && p >= 0 && p < pages_;
+      if (ok && pages_digest(pages) != adopted_digests_[i]) {
+        ok = false;
+        ++stale;
+      }
+      std::vector<uint8_t> ids;
+      if (ok) {
+        const size_t want = static_cast<size_t>(rec.position) * sizeof(int64_t);
+        for (uint32_t q = 0; q < rec.ids_pages && ok && ids.size() < want; ++q) {
+          std::string why;
+          ok = read_page(rec.blob_page + blob_pages_ + q, aligned_page_, &why);
+          if (ok) {
+            const auto* bytes = static_cast<const uint8_t*>(aligned_page_);
+            ids.insert(ids.end(), bytes, bytes + std::min(page_bytes_, want - ids.size()));
+          }
+        }
+        if (ok && ids.size() < want) ok = false;
+        if (!ok) ++unreadable;
+      }
+      if (!ok) continue;
+      adopted_ids_[rec.blob_page + blob_pages_] = std::move(ids);
+      kept.push_back(rec);
+      kept_digests.push_back(adopted_digests_[i]);
+    }
+    if (stale + unreadable > 0) candidate_ = sched::DiskCache::write(header, kept);
+    adopted_digests_ = std::move(kept_digests);
+    DGPP_LOG_INFO("rank {}: NVMe cache: a previous run's index for this binding is the candidate — {} entries kept, "
+                  "{} pruned (their pages hold other bytes now), {} unreadable",
+                  cfg_.rank, kept.size(), stale, unreadable);
+    return true;
   }
 
   static std::vector<uint8_t> read_file(const std::string& path) {
@@ -651,6 +804,24 @@ class NvmeTier {
     if (fd_ < 0 && errno == EINVAL) fd_ = ::open(cfg_.slab_path.c_str(), flags, 0600);
     if (fd_ < 0)
       throw std::runtime_error("NvmeTier: cannot create " + cfg_.slab_path + ": " + std::strerror(errno));
+    // One world per slab: a second process on the same binding (a duplicate
+    // deployment) would truncate and write under the first.
+    if (::flock(fd_, LOCK_EX | LOCK_NB) != 0) {
+      const int err = errno;
+      ::close(fd_);
+      fd_ = -1;
+      throw std::runtime_error("NvmeTier: " + cfg_.slab_path + " is held by another process (" + std::strerror(err) +
+                               "): one world per slab — stop the other deployment or give this one another "
+                               "nvme_cache.path");
+    }
+    if (!direct_ && !cfg_.allow_buffered) {
+      ::close(fd_);
+      fd_ = -1;
+      throw std::runtime_error("NvmeTier: " + cfg_.slab_path +
+                               " refuses direct I/O (the filesystem buffers it, and the page cache would grow into "
+                               "the memory the model plans on): put nvme_cache.path on a local filesystem, or set "
+                               "nvme_cache.allow_buffered");
+    }
     if (keep_contents) return;
     const off_t bytes = static_cast<off_t>(static_cast<size_t>(pages_) * page_bytes_);
     if (::posix_fallocate(fd_, 0, bytes) != 0) {
@@ -689,6 +860,19 @@ class NvmeTier {
     active_ = std::move(jobs_.front());
     jobs_.pop_front();
     Job& job = *active_;
+    job.seq = ++job_seq_;
+    {
+      // Every buffer with the worker on an abandoned op: nothing can move
+      // until one returns, and that may be never — the op fails now.
+      std::lock_guard<std::mutex> lock(mutex_);
+      bool any_free = false;
+      for (const Buffer& buf : buffers_) any_free = any_free || buf.state == Buffer::kFree;
+      if (!any_free) {
+        job.failed = true;
+        job.abandoned = true;
+        job.why = "the staging buffers are held by the stuck I/O of earlier ops";
+      }
+    }
     job.block_slices = (static_cast<int64_t>(job.blocks.size()) + per_chunk_ - 1) / per_chunk_;
     job.blob_slices = (blob_pages_ + per_chunk_ - 1) / per_chunk_;
     const int64_t ids_slices = job.restore ? 0 : (job.ids_pages + per_chunk_ - 1) / per_chunk_;
@@ -746,6 +930,7 @@ class NvmeTier {
       std::memcpy(buf.pinned, src + offset, bytes);
       std::lock_guard<std::mutex> lock(mutex_);
       buf.slice = s;
+      buf.job_seq = job.seq;
       buf.state = Buffer::kWorker;
       cv_.notify_one();
       return;
@@ -776,6 +961,7 @@ class NvmeTier {
     DGPP_CUDA_OK(cudaEventRecord(buf.done, stream));
     std::lock_guard<std::mutex> lock(mutex_);
     buf.slice = s;
+    buf.job_seq = job.seq;
     buf.state = Buffer::kDevice;
   }
 
@@ -816,7 +1002,10 @@ class NvmeTier {
     for (;;) {
       Buffer* buf = nullptr;
       bool restore = false;
+      uint64_t seq = 0;
+      std::vector<int64_t> pages;  // the slice's pages, taken under the lock: the job may end before the I/O does
       std::vector<uint8_t> index;
+      std::vector<uint64_t> digests;
       bool write_index = false;
       {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -828,42 +1017,59 @@ class NvmeTier {
         });
         for (Buffer& b : buffers_)
           if (b.state == Buffer::kWorker && buf == nullptr) buf = &b;
-        restore = active_ && active_->restore;
         if (has_pending_index_ && (buf == nullptr || stop_)) {
           index.swap(pending_index_);
+          digests.swap(pending_digests_);
           has_pending_index_ = false;
           write_index = true;
         }
         if (stop_ && buf == nullptr) {
           lock.unlock();
-          if (write_index) write_index_file(index);  // the last committed index lands before exit
+          if (write_index) write_index_file(index, digests);  // the last committed index lands before exit
           return;
+        }
+        if (buf != nullptr) {
+          // A buffer whose job is over (abandoned by the timeout before the
+          // worker reached it) goes back unused.
+          if (!active_ || active_->seq != buf->job_seq) {
+            buf->state = Buffer::kFree;
+            buf->slice = -1;
+            continue;
+          }
+          const Job& job = *active_;
+          restore = job.restore;
+          seq = job.seq;
+          const Slice sl = slice_of(job, buf->slice);
+          for (int64_t j = 0; j < sl.count; ++j)
+            pages.push_back(sl.kind == Slice::kBlock ? job.blocks[static_cast<size_t>(sl.first + j)].second
+                            : sl.kind == Slice::kBlob ? job.blob_page + sl.first + j
+                                                      : job.ids_page + sl.first + j);
         }
       }
       if (write_index) {
-        write_index_file(index);
+        write_index_file(index, digests);
         continue;
       }
-      // The active job is the engine thread's; the worker reads only its
-      // slice geometry, which does not change while a buffer is its.
-      const Job& job = *active_;
-      const Slice sl = slice_of(job, buf->slice);
       std::string why;
       bool ok = true;
       std::vector<int64_t> written;
-      for (int64_t j = 0; j < sl.count && ok; ++j) {
-        const int64_t page = sl.kind == Slice::kBlock ? job.blocks[static_cast<size_t>(sl.first + j)].second
-                             : sl.kind == Slice::kBlob ? job.blob_page + sl.first + j
-                                                       : job.ids_page + sl.first + j;
-        uint8_t* record = static_cast<uint8_t*>(buf->pinned) + static_cast<size_t>(j) * page_bytes_;
-        ok = restore ? read_page(page, record, &why) : write_page(page, record, &why);
-        if (ok && !restore) written.push_back(page);
+      for (size_t j = 0; j < pages.size() && ok; ++j) {
+        uint8_t* record = static_cast<uint8_t*>(buf->pinned) + j * page_bytes_;
+        ok = restore ? read_page(pages[j], record, &why) : write_page(pages[j], record, &why);
+        if (ok && !restore) written.push_back(pages[j]);
       }
       // The pages' CRCs reach the file before the slice counts as
       // written, so a commit never names a page whose check is not on
       // disk (a crash between leaves the entry unreadable, never wrong).
       if (ok && !restore && crc_fd_ >= 0) ok = write_crc_entries(written, &why);
       std::lock_guard<std::mutex> lock(mutex_);
+      // The job may have ended (abandoned) while the I/O ran: its buffer
+      // is free again and its outcome nobody's.
+      if (!active_ || active_->seq != seq) {
+        buf->state = Buffer::kFree;
+        buf->slice = -1;
+        continue;
+      }
       if (!ok && active_->why.empty()) active_->why = why;
       // A finished read is the pump's to scatter; a finished write frees
       // the buffer; a failure frees it either way.
@@ -891,7 +1097,7 @@ class NvmeTier {
   // The index file: magic, the binding, the scheduler's bytes — written
   // whole to a sibling and renamed over the old one, so a reader sees one
   // or the other, never a torn file.
-  void write_index_file(const std::vector<uint8_t>& bytes) {
+  void write_index_file(const std::vector<uint8_t>& bytes, const std::vector<uint64_t>& digests) {
     const std::string tmp = index_path_ + ".tmp";
     const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
@@ -900,10 +1106,18 @@ class NvmeTier {
     }
     std::vector<uint8_t> out;
     out.insert(out.end(), kIndexFileMagic, kIndexFileMagic + 8);
-    const uint32_t n = static_cast<uint32_t>(cfg_.binding.size());
-    for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(n >> (8 * i)));
+    const auto put32 = [&](uint32_t v) {
+      for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
+    };
+    const auto put64 = [&](uint64_t v) {
+      for (int i = 0; i < 8; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
+    };
+    put32(static_cast<uint32_t>(cfg_.binding.size()));
     out.insert(out.end(), cfg_.binding.begin(), cfg_.binding.end());
+    put64(static_cast<uint64_t>(bytes.size()));
     out.insert(out.end(), bytes.begin(), bytes.end());
+    put32(static_cast<uint32_t>(digests.size()));
+    for (const uint64_t d : digests) put64(d);
     size_t done = 0;
     bool ok = true;
     while (ok && done < out.size()) {
@@ -920,7 +1134,19 @@ class NvmeTier {
                     std::strerror(errno));
   }
 
+  // The test hook: a delay or a failure injected before the call.
+  bool hook(bool write, int64_t page, std::string* why) {
+    if (!cfg_.io_hook) return true;
+    const int r = cfg_.io_hook(write, page);
+    if (r < 0) {
+      *why = std::string("injected failure on the ") + (write ? "write" : "read") + " of page " + std::to_string(page);
+      return false;
+    }
+    if (r > 0) std::this_thread::sleep_for(std::chrono::milliseconds(r));
+    return true;
+  }
   bool write_page(int64_t page, const void* buf, std::string* why) {
+    if (!hook(true, page, why)) return false;
     const uint8_t* p = static_cast<const uint8_t*>(buf);
     size_t left = page_bytes_;
     off_t off = static_cast<off_t>(static_cast<size_t>(page) * page_bytes_);
@@ -945,6 +1171,7 @@ class NvmeTier {
     return true;
   }
   bool read_page(int64_t page, void* buf, std::string* why) {
+    if (!hook(false, page, why)) return false;
     uint8_t* p = static_cast<uint8_t*>(buf);
     size_t left = page_bytes_;
     off_t off = static_cast<off_t>(static_cast<size_t>(page) * page_bytes_);
@@ -987,9 +1214,13 @@ class NvmeTier {
   int crc_fd_ = -1;            // the CRC table beside the slab (persist)
   std::string crc_path_, index_path_;
   std::vector<uint8_t> candidate_;  // a previous run's index for this binding, until adopted or refused
+  std::vector<uint64_t> adopted_digests_;  // its entries' content digests, in its order
+  std::map<int64_t, std::vector<uint8_t>> adopted_ids_;  // its entries' ids by their run's first page, until the first tick
   void* aligned_page_ = nullptr;    // the adoption's read buffer (direct I/O needs the alignment)
   std::vector<uint8_t> pending_index_;  // the worker's next index write
+  std::vector<uint64_t> pending_digests_;
   bool has_pending_index_ = false;
+  uint64_t job_seq_ = 0;
   bool direct_ = false;
   std::array<Buffer, kBuffers> buffers_;
   std::vector<uint32_t> crc_;  // per page: the worker's alone

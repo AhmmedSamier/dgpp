@@ -315,3 +315,95 @@ DGPP_TEST(disk_cache_retention_evicts_lru_within_the_capacity) {
   // Pages never exceed the capacity across the run.
   require(d.pages_used() <= d.pages_total(), "within capacity");
 }
+
+DGPP_TEST(disk_cache_index_codec_round_trips_prunes_and_carries_content) {
+  // serialize() is write(parse()) byte for byte, a record's pages are its
+  // entry's pages in digest order, a truncated index does not parse, and
+  // adoption takes each entry's content digest in the serialized order —
+  // from a pruned candidate too (the tier drops entries whose pages no
+  // longer carry the content their digest recorded).
+  DiskCache d(config(/*pages=*/20));
+  std::vector<int> entries;
+  std::map<int64_t, std::vector<int64_t>> runs;  // the ids runs by page, as the slab would hold them
+  for (int i = 0; i < 3; ++i) {
+    const auto prompt = counted(12, 1000 * (i + 1));
+    const auto plan = d.begin_spill(prompt.data(), 8, -1, {}, 0, identities(2, 100 * (i + 1)), 0, i + 1, i + 1, i,
+                                    i == 1 ? "agent-7" : "");
+    require(plan.ok && plan.evicted.empty(), "entry " + std::to_string(i) + " fits");
+    d.commit_spill(plan.entry);
+    d.set_content(plan.entry, 0x1000 + static_cast<uint64_t>(i));
+    runs[plan.ids_page].assign(prompt.begin(), prompt.begin() + 8);
+    entries.push_back(plan.entry);
+  }
+  const std::vector<uint8_t> bytes = d.serialize();
+  DiskCache::Header h;
+  std::vector<DiskCache::Record> records;
+  require(DiskCache::parse(bytes, &h, &records) && records.size() == 3 && h.pages == 20 && h.page_bytes == 4096 &&
+              h.blob_pages == 2 && h.block_tokens == 4,
+          "the index parses into its records");
+  require(DiskCache::write(h, records) == bytes, "write(parse()) is the identity");
+  require(records[1].key == "agent-7" && records[0].key.empty(), "keys ride the records");
+  const std::vector<uint64_t> digests = d.content_digests();
+  require(digests == std::vector<uint64_t>{0x1000, 0x1001, 0x1002}, "the digests follow the serialized order");
+  for (size_t n = 0; n < records.size(); ++n)
+    require(DiskCache::record_pages(records[n], 2) == d.entry_pages(entries[static_cast<size_t>(n)]),
+            "a record's pages are its entry's pages, in digest order");
+  require(d.entry_pages(entries[0]).size() == 5, "two blob pages, the ids page, two block pages");
+  std::vector<uint8_t> cut(bytes.begin(), bytes.end() - 5);
+  require(!DiskCache::parse(cut, &h, &records), "a truncated index does not parse");
+  const auto read = [&](int64_t page, int64_t count, void* dst) {
+    const auto it = runs.find(page);
+    if (it == runs.end()) return false;
+    std::memset(dst, 0, static_cast<size_t>(count) * 4096);
+    std::memcpy(dst, it->second.data(), it->second.size() * sizeof(int64_t));
+    return true;
+  };
+  DiskCache fresh(config(20));
+  const auto a = fresh.restore(bytes, read, &digests);
+  require(a.entries == 3 && a.dropped == 0 && a.error.empty(), "every entry adopted");
+  for (int i = 0; i < 3; ++i)
+    require(fresh.entry(i).content == 0x1000 + static_cast<uint64_t>(i), "the content digest rides adoption");
+  require(fresh.consistent(), "the adopted index is consistent");
+  // The pruned candidate: the middle entry gone, the digests pruned alike.
+  require(DiskCache::parse(bytes, &h, &records), "parses again");
+  const std::vector<DiskCache::Record> kept{records[0], records[2]};
+  const std::vector<uint64_t> kept_digests{digests[0], digests[2]};
+  DiskCache pruned(config(20));
+  const auto b = pruned.restore(DiskCache::write(h, kept), read, &kept_digests);
+  require(b.entries == 2 && b.dropped == 0 && pruned.live_entries() == 2, "the pruned candidate adopts the kept entries");
+  require(pruned.entry(0).content == 0x1000 && pruned.entry(1).content == 0x1002, "with their own digests");
+  require(pruned.consistent() && pruned.pages_used() == 10, "consistent, the dropped entry's pages free");
+  // Without digests every adopted entry's content is 0 (no tier to bind it).
+  DiskCache plain(config(20));
+  require(plain.restore(bytes, read).entries == 3 && plain.entry(2).content == 0, "no digests: content 0");
+}
+
+DGPP_TEST(disk_cache_pin_cap_stops_protecting_past_the_share) {
+  // 20 pages, 5 per entry. Three pinned entries hold 75 % of the slab —
+  // past a 50 % cap a pin protects nothing and plain LRU takes the oldest
+  // entry, pinned or not; at 100 the unpinned entry goes first.
+  for (const int cap : {50, 100}) {
+    DiskCache::Config c = config(/*pages=*/20);
+    c.pin_max_pct = cap;
+    DiskCache d(c);
+    std::vector<int> entries;
+    for (int i = 0; i < 4; ++i) {
+      const auto prompt = counted(12, 1000 * (i + 1));
+      const auto plan = d.begin_spill(prompt.data(), 8, -1, {}, 0, identities(2, 100 * (i + 1)), 0, i + 1, i + 1, i,
+                                      i < 3 ? "pin" : "");
+      require(plan.ok && plan.evicted.empty(), "entry " + std::to_string(i) + " fits");
+      d.commit_spill(plan.entry);
+      entries.push_back(plan.entry);
+    }
+    require(d.pinned_entries() == 3 && d.pages_used() == 20, "three pinned entries, the slab full");
+    const auto prompt = counted(12, 9000);
+    const auto plan = d.begin_spill(prompt.data(), 8, -1, {}, 0, identities(2, 900), 0, 9, 9, 4);
+    require(plan.ok && plan.evicted.size() == 1, "one eviction made room");
+    if (cap == 50)
+      require(plan.evicted[0].entry == entries[0], "past the cap the oldest entry goes, pinned or not");
+    else
+      require(plan.evicted[0].entry == entries[3], "at 100 the unpinned entry goes first");
+    d.commit_spill(plan.entry);
+    require(d.consistent(), "consistent");
+  }
+}

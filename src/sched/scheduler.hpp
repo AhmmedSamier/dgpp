@@ -24,6 +24,7 @@
 // See DESIGN §11 and docs/operations.md for the journal and resource policy.
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -414,6 +415,7 @@ class SchedulerEngine {
     int64_t min_tokens = 0;   // entries below this position are not spilled
     int max_ops = 4;          // spills and restores started but not committed
     bool persist = false;     // the slab outlives the process (its index is kept beside it)
+    int op_timeout_s = 0;     // an op without progress this long fails (0: never)
   };
   virtual DiskInfo disk_info() const { return {}; }
   // Opens the tier: the slab file (created, sized to the capacity), the
@@ -434,6 +436,18 @@ class SchedulerEngine {
     // geometry), and a start under the same binding offers them back.
     bool persist = false;
     std::string binding;
+    // A filesystem that refuses direct I/O (tmpfs) gets buffered I/O only
+    // when allowed: the page cache would grow into the memory the model
+    // plans on. The tests allow it.
+    bool allow_buffered = false;
+    // An op that makes no progress this long fails — its buffers held by a
+    // stuck read or write come back when the worker does — so the requests
+    // waiting on a restore admit cold instead of never (0: never).
+    int op_timeout_s = 0;
+    // A test hook on every page read (write=false) or write: 0 proceeds,
+    // a positive value sleeps that many milliseconds first, a negative one
+    // fails the I/O.
+    std::function<int(bool write, int64_t page)> io_hook;
   };
   virtual void disk_enable(const DiskEnable& enable) {
     (void)enable;
@@ -519,7 +533,20 @@ class SchedulerEngine {
   }
   // The committed index after every change, for the tier to keep beside
   // the slab.
-  virtual void disk_persist_index(const std::vector<uint8_t>& bytes) { (void)bytes; }
+  // ... with the entries' content digests in the index's order (this
+  // rank's: the digest of its pages' checksums at commit).
+  virtual void disk_persist_index(const std::vector<uint8_t>& bytes, const std::vector<uint64_t>& digests) {
+    (void)bytes;
+    (void)digests;
+  }
+  // This rank's digest of the pages' checksums as they stand (the index
+  // binds an entry to its content with it; 0: no tier).
+  virtual uint64_t disk_pages_digest(const std::vector<int64_t>& pages) const {
+    (void)pages;
+    return 0;
+  }
+  // The adopted index's content digests, in its order.
+  virtual std::vector<uint64_t> disk_adopted_digests() const { return {}; }
   // The warm handshake: this rank's candidate index digest ("0": none),
   // and the world's verdict — keep the candidate for adoption or start
   // the slab fresh.
@@ -623,6 +650,10 @@ struct AdmissionPolicy {
   // prompt, or the turn after a client compacted its history, attaches.
   int prefix_min_tokens = 0;
   bool prefix_head_snapshots = false;
+  // prompt_cache_key pins protect their entries while the pinned entries
+  // hold at most this share of the arena's slots and of the NVMe slab's
+  // pages; past it a pin protects nothing. 100: always.
+  int prefix_pin_max_pct = 50;
   // Resolved admission policy. Serving resolves automatic admission from the
   // engine's execution capabilities; old journal records retain false.
   // Engines without a shared walk can pay for additional decode passes.
@@ -634,7 +665,8 @@ struct AdmissionPolicy {
            prefill_latency == o.prefill_latency &&
            prefill_budget_automatic == o.prefill_budget_automatic &&
            prefill_early_admission == o.prefill_early_admission &&
-           prefix_min_tokens == o.prefix_min_tokens && prefix_head_snapshots == o.prefix_head_snapshots;
+           prefix_min_tokens == o.prefix_min_tokens && prefix_head_snapshots == o.prefix_head_snapshots &&
+           prefix_pin_max_pct == o.prefix_pin_max_pct;
   }
   bool operator!=(const AdmissionPolicy& o) const { return !(*this == o); }
   static const char* name(Mode m) {
@@ -644,6 +676,10 @@ struct AdmissionPolicy {
 
 class Scheduler {
  public:
+  // A queued request whose restore an op in flight blocks waits this many
+  // ticks at most, then admits cold: ops commit in seconds, but a stream
+  // of spills can hold every arena slot busy for as long as it lasts.
+  static constexpr int kRestoreWaitTicks = 64;
   struct Result {
     enum class Status : int { kQueued, kActive, kDone, kCancelled };
     // kStop: the service's stop string matched — a natural end
@@ -904,6 +940,7 @@ class Scheduler {
     int64_t hop_armed = -1;    // the aligned position armed for the next step
     bool cache_off = false;    // the pool cannot hold the cache's blocks for it
     uint64_t restore_op = 0;   // the cold tier restore this queued request waits on (0: none)
+    int restore_wait_ticks = 0;  // ticks spent restore_blocked (the bound admits it cold)
     // Its restore could not start this tick because an op in flight holds
     // what it needs (a slot busy spilling, another entry's restore): it
     // waits a tick rather than prefilling cold; re-decided at every tick's top.

@@ -54,18 +54,21 @@ class PortabilityTest(unittest.TestCase):
                                          "nvme_cache": {"enabled": True, "path": "/nvme/dgpp",
                                                         "capacity_gib": 64, "min_tokens": 2048,
                                                         "chunk_mib": 32, "max_ops": 2, "reserve_gib": 2.5,
-                                                        "persist": False}}))
+                                                        "persist": False, "allow_buffered": True,
+                                                        "op_timeout_s": 30}}))
         resolved = site_env.resolve_config(self.config, self.values)
         self.assertEqual(resolved["nvme_cache"], {"enabled": True, "path": "/nvme/dgpp",
                                                   "capacity_gib": 64, "min_tokens": 2048,
                                                   "chunk_mib": 32, "max_ops": 2, "reserve_gib": 2.5,
-                                                  "persist": False})
+                                                  "persist": False, "allow_buffered": True,
+                                                  "op_timeout_s": 30})
         self.config.write_text(json.dumps({"model": "org/model", "world_size": 1}))
         self.assertNotIn("nvme_cache", site_env.resolve_config(self.config, self.values))
         for nvme in ({"enabled": True}, {"enabled": 1}, {"capacity_gib": -1}, {"capacity_gib": True},
                      {"path": ""}, {"min_tokens": 1.5}, {"size": 3}, [], {"chunk_mib": 2}, {"chunk_mib": 8192},
                      {"chunk_mib": 1.5}, {"max_ops": 0}, {"max_ops": 257}, {"reserve_gib": -1},
-                     {"reserve_gib": True}, {"persist": 1}):
+                     {"reserve_gib": True}, {"persist": 1}, {"allow_buffered": 1}, {"op_timeout_s": -1},
+                     {"op_timeout_s": 1.5}, {"op_timeout_s": 90000}):
             with self.subTest(nvme=nvme):
                 self.config.write_text(json.dumps({"model": "org/model", "world_size": 1, "nvme_cache": nvme}))
                 with self.assertRaises(ValueError):

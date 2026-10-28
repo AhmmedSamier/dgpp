@@ -194,7 +194,12 @@ void PrefixCache::give_back_slot(int slot) {
 
 int PrefixCache::evict_lru(int* disk) {
   // The least recently used unpinned entry; a pinned one only when every
-  // candidate is pinned.
+  // candidate is pinned — or when the pinned entries hold more slots than
+  // the cap allows, where a pin protects nothing.
+  int pinned_slots = 0;
+  for (const Entry& e : entries_) pinned_slots += e.live && !e.key.empty() ? 1 : 0;
+  const bool protect = cfg_.pin_max_pct >= 100 ||
+                       (cfg_.pin_max_pct > 0 && pinned_slots * 100 <= cfg_.pin_max_pct * cfg_.slots);
   int victim = -1;
   for (size_t i = 0; i < entries_.size(); ++i) {
     const Entry& e = entries_[i];
@@ -204,7 +209,7 @@ int PrefixCache::evict_lru(int* disk) {
       continue;
     }
     const Entry& v = entries_[static_cast<size_t>(victim)];
-    const bool pinned = !e.key.empty(), victim_pinned = !v.key.empty();
+    const bool pinned = protect && !e.key.empty(), victim_pinned = protect && !v.key.empty();
     if ((victim_pinned && !pinned) || (pinned == victim_pinned && e.last_use < v.last_use))
       victim = static_cast<int>(i);
   }
