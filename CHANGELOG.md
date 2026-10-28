@@ -43,7 +43,22 @@ project procedures and design guidance live in `docs/`.
   without the cache), so the fuzz template pins the chunk size; reviewing
   the cut rule under that check fixed a request-level gate: a request that
   opts out (`prefix_cache: false`) prefilled without the structural cuts a
-  cached prompt walks, and now walks them. Documented in the
+  cached prompt walks, and now walks them. A review of the tier's edge
+  cases (2026-10-28) then hardened six: adoption is bound to the entries'
+  content (the index records each entry's page-checksum digest, and an
+  entry whose pages a later run reused before a crash, or whose ids are
+  unreadable, is pruned at startup — a pruned candidate differs by rank
+  and the world starts fresh, never with an index that differs by rank);
+  the binding includes the binary's version; one world per slab (the slab
+  is locked); a filesystem that refuses direct I/O is refused unless
+  `nvme_cache.allow_buffered`; an op without progress for
+  `nvme_cache.op_timeout_s` (120) fails and its waiting requests admit
+  cold (which also bounds a restore's wait for a busy arena slot); and
+  `prompt_cache_key` pins protect at most
+  `engine.prefix_pin_max_pct` (50) of the arena and the slab. The tier is
+  exercised on MiMo, Flint and Qwen3.5 (`nvme_tier_families_test`), and
+  the fabric fuzz gained concurrent clients, mid-flight cancels and rank
+  crashes. Documented in the
   [configuration reference](docs/configuration.md#nvme-cache) and the
   [prefix-cache guide](docs/prefix-cache.md#the-nvme-cold-tier).
 - **DFlash2 integration fixes** (2026-10-25): the shared drafter follows

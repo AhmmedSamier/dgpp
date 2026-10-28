@@ -3689,55 +3689,6 @@ DGPP_TEST(scheduler_nvmeCache_restoreWaitsOutABusySlot) {
   require(ids_joined(sched.results()[2].generated) == "6,7,8", "c's ids");
 }
 
-DGPP_TEST(scheduler_nvmeCache_aBlockedRestoreAdmitsColdAfterTheBound) {
-  // The same one-slot arena, but b's spill never commits within the bound
-  // (a stuck device): c waits kRestoreWaitTicks ticks for the slot, then
-  // admits cold instead of forever — with the spill still in flight.
-  FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
-  engine.set_prefix_arena(/*slots=*/1, /*align=*/4);
-  engine.set_disk(/*pages=*/64, /*blob_pages=*/1, /*min_tokens=*/0, /*latency=*/1);
-  engine.arm(0, {1, 2, 3}, 3);
-  engine.arm(0, {4, 5}, 2);
-  engine.arm(0, {6, 7, 8}, 3);
-  Scheduler sched(&engine, {kEos});
-  sched.submit(make_cached_request("a", counted_prompt(21), {5, 13}, 3));
-  settle(sched, engine);
-  require(sched.meters().disk_spilled == 1, "a's entry is on disk");
-  engine.set_disk(/*pages=*/64, /*blob_pages=*/1, /*min_tokens=*/0, /*latency=*/100000);  // b's spill hangs
-  sched.submit(make_cached_request("b", counted_prompt(21, 300), {5, 13}, 2));
-  for (int i = 0; i < 3; ++i) {
-    std::vector<Scheduler::DiskCommit> commits;
-    for (const auto& c : sched.poll_disk_completions()) commits.push_back({c.op, c.ok});
-    sched.apply_disk_commits(commits);
-    sched.tick();
-  }
-  require(sched.meters().disk_pending >= 1 && sched.meters().prefix_entries == 1, "b's spill is in flight");
-  sched.submit(make_cached_request("c", counted_prompt(21), {5, 13}, 3));
-  int ticks_until_admitted = -1;
-  for (int i = 0; i < Scheduler::kRestoreWaitTicks + 40 && ticks_until_admitted < 0; ++i) {
-    std::vector<Scheduler::DiskCommit> commits;
-    for (const auto& c : sched.poll_disk_completions()) commits.push_back({c.op, c.ok});
-    sched.apply_disk_commits(commits);
-    sched.tick();
-    if (sched.meters().prompts_prefilled >= 3) ticks_until_admitted = i + 1;
-  }
-  require(ticks_until_admitted > Scheduler::kRestoreWaitTicks / 2 &&
-              ticks_until_admitted <= Scheduler::kRestoreWaitTicks + 8,
-          "c waited the bound, then admitted: " + std::to_string(ticks_until_admitted) + " ticks");
-  // c decodes to its end; b's spill stays in flight (results are made at submit, so drain by the live count).
-  for (int i = 0; i < 200 && (sched.meters().active > 0 || sched.meters().queued > 0); ++i) {
-    std::vector<Scheduler::DiskCommit> commits;
-    for (const auto& c : sched.poll_disk_completions()) commits.push_back({c.op, c.ok});
-    sched.apply_disk_commits(commits);
-    sched.tick();
-  }
-  const Scheduler::Meters m = sched.meters();
-  require(m.disk_restores == 0 && m.disk_pending >= 1, "no restore ran; b's spill is still in flight");
-  require(sched.results().size() == 3 && ids_joined(sched.results()[2].generated) == "6,7,8",
-          "c's ids from its cold prefill: " + std::to_string(sched.results().size()) + " results, ops " +
-              engine.op_stream());
-}
-
 DGPP_TEST(scheduler_nvmeCache_aFailedRestoreIsAColdMissAndDropsTheEntry) {
   FakeEngine engine(/*slots=*/2, /*total_blocks=*/100, /*block_tokens=*/4);
   engine.set_prefix_arena(/*slots=*/1, /*align=*/4);

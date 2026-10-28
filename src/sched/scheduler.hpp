@@ -676,10 +676,6 @@ struct AdmissionPolicy {
 
 class Scheduler {
  public:
-  // A queued request whose restore an op in flight blocks waits this many
-  // ticks at most, then admits cold: ops commit in seconds, but a stream
-  // of spills can hold every arena slot busy for as long as it lasts.
-  static constexpr int kRestoreWaitTicks = 64;
   struct Result {
     enum class Status : int { kQueued, kActive, kDone, kCancelled };
     // kStop: the service's stop string matched — a natural end
@@ -940,7 +936,6 @@ class Scheduler {
     int64_t hop_armed = -1;    // the aligned position armed for the next step
     bool cache_off = false;    // the pool cannot hold the cache's blocks for it
     uint64_t restore_op = 0;   // the cold tier restore this queued request waits on (0: none)
-    int restore_wait_ticks = 0;  // ticks spent restore_blocked (the bound admits it cold)
     // Its restore could not start this tick because an op in flight holds
     // what it needs (a slot busy spilling, another entry's restore): it
     // waits a tick rather than prefilling cold; re-decided at every tick's top.

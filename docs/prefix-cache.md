@@ -288,10 +288,11 @@ staging buffers (4 × `chunk_mib` + 8 MiB: 264 MiB per rank at the default) are
 part of the memory plan. At most `max_ops` spills and restores are in flight;
 a started entry is busy, never evicted, until the world commits it. A request
 whose restore cannot start while ops are in flight (every arena slot busy
-spilling) waits up to 64 ticks, then admits from memory or cold. An op that
-makes no progress for `op_timeout_s` (120 s) fails: a request waiting on
-that restore prefills cold, and the staging buffer the stuck read or write
-holds returns when the call does. A path whose filesystem refuses direct I/O
+spilling) waits for a commit to free a slot rather than prefilling cold; the
+wait is bounded by the ops themselves. An op that makes no progress for
+`op_timeout_s` (120 s) fails: a request waiting on that restore prefills
+cold, and the staging buffer the stuck read or write holds returns when the
+call does. A path whose filesystem refuses direct I/O
 is refused unless `allow_buffered` says otherwise. Watch
 `nvme_cache` in `/v1/metrics`: `pages_used` against `pages_total`,
 `spilled`, `restored`, `restore_failed`, `spill_skipped` (no room), and

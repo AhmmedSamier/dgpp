@@ -27,6 +27,15 @@ clean restart, then brings the world down and up — the slab's adoption must
 then agree on every rank or start fresh everywhere, and every answer
 restored afterwards must still equal its first.
 
+With more than one client the transcript check is advisory (reported, not
+a finding) unless `--strict-transcripts`: readers in flight together share
+the prefill budget, so a prompt's chunks shrink to 512, 256 or 128 tokens
+and its cold walk's arithmetic differs from the solo walk's (the DSA
+sites are not split-invariant) — the same answer variance as the first
+prompt after a boot on the controller's ramp, and not the tier's doing.
+The verdict then rests on the tier's counters, the adoption agreement at
+every restart, the op-stream identity and the service having settled.
+
 The deployment template pins the prefill chunk size (`engine.first_token_target_ms`
 and `engine.decode_gap_target_ms` at 0, so every tick offers the idle budget):
 a cold walk's arithmetic depends on its chunk shapes (the first prompt after a
@@ -106,7 +115,11 @@ def main():
     ap.add_argument("--cancel-pct", type=float, default=0.0, help="percent of requests cancelled mid-flight")
     ap.add_argument("--crash-every", type=int, default=0, help="kill a rank every N requests (instead of a clean restart)")
     ap.add_argument("--crash-rank", default="random", help="the rank to kill, or random")
+    ap.add_argument("--strict-transcripts", action="store_true",
+                    help="count transcript mismatches as findings even with several clients")
     args = ap.parse_args()
+    strict = args.clients <= 1 or args.strict_transcripts
+    advisory = []
     rng = random.Random(args.seed)
     model = served_model(args.host, args.port)
     adm = chk.metrics(args.host, args.port)["service"]["admission"]
@@ -144,8 +157,9 @@ def main():
                 step["repeat"] = True
                 if r["text"] != expected[key]:
                     step["mismatch"] = True
-                    findings.append({"n": n, "doc": d, "question": q, "what": "transcript differs from the first answer",
-                                     "first": expected[key][:200], "now": r["text"][:200]})
+                    (findings if strict else advisory).append(
+                        {"n": n, "doc": d, "question": q, "what": "transcript differs from the first answer",
+                         "first": expected[key][:200], "now": r["text"][:200]})
             else:
                 expected[key] = r["text"]
             steps.append(step)
@@ -214,7 +228,8 @@ def main():
         findings.append({"what": "the service did not settle", "scheduler": {k: sc.get(k) for k in ("active", "queued")},
                          "engine_failed": m["service"].get("engine_failed")})
     print(f"\n{args.requests} requests, {repeats} repeats checked, {cancelled} cancelled, {restarts} restarts "
-          f"({crashes} crashes), {len(findings)} finding(s)")
+          f"({crashes} crashes), {len(findings)} finding(s)" +
+          (f", {len(advisory)} transcript mismatch(es) advisory under {args.clients} clients" if advisory else ""))
     print("nvme_cache:", {k: nv.get(k) for k in ("entries", "spills", "spilled", "restores", "restored", "spill_failed",
                                                  "restore_failed", "evictions", "pinned", "adopted", "pages_used",
                                                  "pages_total")})
@@ -224,8 +239,8 @@ def main():
     print("PASS" if not findings else "FAIL")
     if args.out:
         with open(args.out, "w") as fh:
-            json.dump({"args": vars(args), "steps": steps, "findings": findings, "restarts": log_lines,
-                       "metrics": m, "ok": not findings}, fh, indent=1)
+            json.dump({"args": vars(args), "steps": steps, "findings": findings, "advisory": advisory,
+                       "restarts": log_lines, "metrics": m, "ok": not findings}, fh, indent=1)
     return 0 if not findings else 1
 
 

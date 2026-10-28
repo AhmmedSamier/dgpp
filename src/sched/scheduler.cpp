@@ -2199,15 +2199,15 @@ void Scheduler::start_restores() {
     // cold prefill of the prompt costs far more — the request waits a
     // tick. A shortage with nothing in flight (every slot attached to a
     // live request) is not going to lift soon: the request admits cold.
+    // The wait is bounded by the ops themselves: every op ends in a commit
+    // (nvme_cache.op_timeout_s fails one that makes no progress), and a
+    // committed spill's entry is evictable for the restore's slot. A tick
+    // count is no clock here — an idle world with ops pending ticks back to
+    // back, so sixty-four ticks pass in well under a second while a spill
+    // paced by the device is still in flight (the 27B drafter check of
+    // 2026-10-28 went cold on such a bound).
     if (restore_in_flight() || !start_restore(plan.disk_entry, r)) {
-      if (!disk_ops_.empty() && r.restore_wait_ticks < kRestoreWaitTicks) {
-        r.restore_blocked = true;
-        ++r.restore_wait_ticks;
-        if (r.restore_wait_ticks == kRestoreWaitTicks)
-          DGPP_LOG_INFO("sched: request '{}' waited {} ticks for its NVMe cache restore to start; it admits "
-                        "from memory or cold at the next chance",
-                        r.spec.id, kRestoreWaitTicks);
-      }
+      if (!disk_ops_.empty()) r.restore_blocked = true;
     }
   }
 }
