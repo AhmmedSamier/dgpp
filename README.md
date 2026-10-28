@@ -54,23 +54,30 @@ prompt classes, and C is the number of concurrent client requests.
 
 | Model / weights | Nodes | C1 decode tok/s | C8 decode tok/s | Cold prefill s at 2K / 8K / 32K |
 |---|---|---|---|---|
-| Flint FP8/NVFP4 | 1 | 56-58 | 198-204 | 0.48 / 1.95 / 12.1 |
-| Flint FP8/NVFP4 | 2 | 104-105 | 343-353 | 0.41 / 1.57 / 8.66 |
-| Flint FP8/NVFP4 | 4 | 155-159 | 525-543 | 0.36 / 1.30 / 6.47 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 31-36 | | 2.06 / 8.38 / 35.3 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 58-64 | | 1.18 / 5.08 / 21.8 |
+| GLM-5.3-Flash FP8 | 4 | 47-52 | | 1.33 / 5.69 / 24.5 |
+| Qwen3.8-Flash-Next NVFP4 | 1 | 44-52 | | 1.36 / 4.52 / 18.1 |
+| Qwen3.8-Flash-Next NVFP4 | 2 | 62-75 | | 2.13 / 7.87 / 28.8 |
+| Qwen3.8-Flash-Next FP8 | 4 | 73-87 | | 1.58 / 5.61 / 23.0 |
+| Qwen3.8-Flash-Next FP4-Local | 1 | 35-76 | 66-133 | 1.62 / 5.75 / 23.0 |
 | Qwen3.8-27B NVFP4 | 1 | 25-60 | 119-244 | 1.20 / 3.94 / 16.6 |
 | Qwen3.8-27B NVFP4 | 2 | 45-105 | 175-369 | 1.20 / 4.23 / 17.3 |
 | Qwen3.8-27B NVFP4 | 4 | 64-166 | 245-431 | 1.06 / 3.90 / 15.6 |
 | Qwen3.8-27B FP8 | 4 | 58-137 | 219-406 | 1.25 / 4.39 / 17.6 |
-| Qwen3.8-Flash-Next FP4-Local | 1 | 35-76 | 66-133 | 1.62 / 5.75 / 23.0 |
 | DeepSeek-V4.1-Flash-1017 MXFP4/FP8 | 4 | 54-89 | 84-139 | 1.01 / 2.64 / 10.0 |
 | DeepSeek-V4.1-Flash-1017 EXL3 3.5 bpw | 4 | 70-134 | 165-248 | 1.19 / 3.45 / 13.3 |
 
-These rows were measured on the shipped templates at the current
-scheduler defaults. [Benchmarks](docs/benchmarks.md) is the source of
-truth: every deployment, the wall rates with prefill and queueing
-included, the quality set, the long-context matrix, the decode-mode
-comparisons, and each row's source revision, binary hash and
-configuration. One command reproduces a template's rows:
+Rows with every cell filled were measured on the shipped templates at the
+current scheduler defaults. Rows with an empty C8 cell were measured
+earlier, with fixed prefill budgets and before the decode rate at
+concurrency was kept, so their C1 and prefill figures stand and their
+service-level rates at C2 to C8 are in the wall table of the benchmarks.
+[Benchmarks](docs/benchmarks.md) is the source of truth: every deployment,
+the wall rates with prefill and queueing included, the quality set, the
+long-context matrix, the decode-mode comparisons, and each row's source
+revision, binary hash and configuration. One command reproduces a
+template's rows:
 
 ```bash
 scripts/serve_campaign.py run --config deploy/<template>.json
