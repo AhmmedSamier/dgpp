@@ -123,6 +123,8 @@ def main():
     rng = random.Random(args.seed)
     model = served_model(args.host, args.port)
     adm = chk.metrics(args.host, args.port)["service"]["admission"]
+    if "nvme_cache" not in chk.metrics(args.host, args.port):
+        print("NOTE: the world has no NVMe cache; running as a plain workload (service checks only)", flush=True)
     if adm.get("first_token_target_ms", 1) or adm.get("decode_gap_target_ms", 1):
         print("WARNING: the world's latency targets are on; cold repeats may differ by chunk shape "
               "(set engine.first_token_target_ms and engine.decode_gap_target_ms to 0 in the template)", flush=True)
@@ -177,14 +179,14 @@ def main():
                 f.result()
             pending = []
             crash = args.crash_every and n % args.crash_every == 0
-            before = chk.metrics(args.host, args.port)["nvme_cache"]
+            before = chk.metrics(args.host, args.port).get("nvme_cache", {})  # {} with the tier off
             crash_rank = None
             if crash:
                 world = before.get("world") or int(json.load(open(args.config)).get("world_size", 1))
                 crash_rank = rng.randrange(world) if args.crash_rank == "random" else int(args.crash_rank)
                 crashes += 1
             ok = restart(args.config, args.bin, log_lines, crash_rank=crash_rank)
-            after = chk.metrics(args.host, args.port)["nvme_cache"]
+            after = chk.metrics(args.host, args.port).get("nvme_cache", {})
             restarts += 1
             print(f"{'crash' if crash else 'restart'} {restarts}: {'; '.join(log_lines[-3 if crash else -2:])}; entries "
                   f"{before.get('entries')} -> {after.get('entries')}, adopted {after.get('adopted')}", flush=True)
@@ -214,7 +216,7 @@ def main():
     pool.shutdown()
     steps.sort(key=lambda s: s["n"])
     m = chk.metrics(args.host, args.port)
-    nv = m["nvme_cache"]
+    nv = m.get("nvme_cache", {})  # the driver also serves as a plain workload on a world without the tier
     tier_ok = nv.get("spill_failed", 0) == 0 and nv.get("restore_failed", 0) == 0 and nv.get("failures", 0) == 0 \
         and nv.get("pages_used", 0) <= nv.get("pages_total", 0)
     if not tier_ok:
