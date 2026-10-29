@@ -245,6 +245,11 @@ intact on both Qwen families). On a booted world,
 opt-outs, concurrent clients, mid-flight cancels, clean restarts and rank
 crashes, checking every repeated answer against its first.
 
+The Qwen fixture's duplicate-open cases check slab size and bytes before
+releasing ownership, then check stale-content clearing with persistence both
+enabled and disabled. Run this fixture with host leak detection as well:
+refused constructors must release their aligned adoption buffers.
+
 Release and testing builds use separate CMake presets and directories:
 
 | Preset | Directory | Purpose |
