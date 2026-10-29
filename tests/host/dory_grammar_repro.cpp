@@ -159,9 +159,9 @@ DGPP_TEST(dory_grammar_vocab_probe) {
   std::printf("markers: think_close '%s' tool_call_open '%s' tool_call_close '%s'\n",
               esc(mark.think_close.text).c_str(), esc(mark.tool_call_open.text).c_str(),
               esc(mark.tool_call_close.text).c_str());
-  std::printf("tool_format=%d xml_compact=%d reason_openable=%d\n",
+  std::printf("tool_format=%d xml_compact=%d think_close_id=%lld\n",
               static_cast<int>(mark.tool_format()), mark.xml_compact,
-              mark.think_close.id);
+              static_cast<long long>(mark.think_close.id));
   for (int64_t id : {10, 11, 12, 13, 14, 15}) {
     const std::string t = vocab.text(id);
     std::printf(" tok(%lld) hex:", static_cast<long long>(id));

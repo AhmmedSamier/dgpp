@@ -1071,6 +1071,12 @@ target_link_libraries(word_cache_test PRIVATE Threads::Threads)
 dgpp_set_common(word_cache_test)
 add_test(NAME word_cache_test COMMAND word_cache_test)
 
+add_executable(tokenizer_patterns_test tests/host/tokenizer_patterns_test.cpp)
+target_link_libraries(tokenizer_patterns_test PRIVATE dgpp_text)
+dgpp_set_common(tokenizer_patterns_test)
+add_test(NAME tokenizer_patterns_test
+  COMMAND tokenizer_patterns_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data)
+
 # M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
 # the model cache is absent (same discipline as the real-checkpoint gates).
 add_executable(tokenizer_test tests/host/tokenizer_test.cpp)
@@ -2739,7 +2745,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
+set_tests_properties(tokenizer_patterns_test word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test chat_template_generator_test route_trace_test sampling_profile_test spec_ab_probe_test
@@ -2751,7 +2757,7 @@ endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
   dsv4_tokenizer_test dsv4_prompt_test glm_dsa_tokenizer_test mimo_tokenizer_test flint_tokenizer_test
-  glm_dsa_chat_template_test mimo_chat_template_test flint_chat_template_test
+  glm_dsa_chat_template_test mimo_chat_template_test flint_chat_template_test dory_grammar_repro
   PROPERTIES LABELS "host;checkpoint")
 foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
     glm4_forward_generate mimo_forward_fixture mimo_forward_generate mimo_forward_generate_teacher

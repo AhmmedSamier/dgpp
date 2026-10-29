@@ -419,7 +419,7 @@ class SplitScanner {
   std::vector<std::string_view>* out_;
   bool marks_ = false;
   bool single_number_ = false;
-  bool nemotron_ = false;  // the Nemotron/Dory CamelCase pattern (pattern_ 4)
+  bool nemotron_ = false;  // the Nemotron/Dory CamelCase pattern (Pattern::Nemotron)
   std::vector<uint32_t> cps_;
   std::vector<size_t> starts_;  // size = cps+1 (end sentinel)
 };
@@ -741,10 +741,10 @@ Tokenizer Tokenizer::load(const std::string& path, size_t word_cache_entries) {
   };
   if (splits == 1) {
     const std::string_view regex = split_regex(0);
-    if (regex == kSplitPattern) t.pattern_ = 0;
-    else if (regex == kSplitPatternQwen) t.pattern_ = 1;
-    else if (regex == kSplitPatternQwen2) t.pattern_ = 3;
-    else if (regex == kSplitPatternNemotron) t.pattern_ = 4;
+    if (regex == kSplitPattern) t.pattern_ = Pattern::Glm;
+    else if (regex == kSplitPatternQwen) t.pattern_ = Pattern::Qwen;
+    else if (regex == kSplitPatternQwen2) t.pattern_ = Pattern::Qwen2;
+    else if (regex == kSplitPatternNemotron) t.pattern_ = Pattern::Nemotron;
     else
       reject("Split pattern differs from the pinned regexes (the scanner "
              "hardcodes them — update the scanner or the checkpoint)");
@@ -752,8 +752,8 @@ Tokenizer Tokenizer::load(const std::string& path, size_t word_cache_entries) {
     if (split_regex(0) != kSplitPatternDsv41Numbers || split_regex(1) != kSplitPatternDsv41Cjk)
       reject("the first two Split patterns differ from the pinned three-stage regexes (the scanner "
              "hardcodes them — update the scanner or the checkpoint)");
-    if (split_regex(2) == kSplitPatternDsv41Main) t.pattern_ = 2;
-    else if (split_regex(2) == kSplitPatternFlintMain) t.pattern_ = 4;
+    if (split_regex(2) == kSplitPatternDsv41Main) t.pattern_ = Pattern::Dsv41;
+    else if (split_regex(2) == kSplitPatternFlintMain) t.pattern_ = Pattern::Flint;
     else
       reject("the third Split pattern differs from the pinned DeepSeek-V4.1 and Flint regexes (the scanner "
              "hardcodes them — update the scanner or the checkpoint)");
@@ -909,7 +909,7 @@ Tokenizer Tokenizer::load(const std::string& path, size_t word_cache_entries) {
       "tokenizer: loaded vocab {} merges {} added {} (revision 0x{:016x}; "
       "{} pattern, {}, ignore_merges {})",
       t.vocab_.size(), t.merge_rank_.size(), t.added_tokens_.size(),
-      t.revision_hash_, t.pattern_ == 2 ? "deepseek-v4.1" : t.pattern_ == 4 ? "flint/nemotron" : t.pattern_ == 1 ? "qwen" : t.pattern_ == 3 ? "qwen2" : "glm", t.nfc_ ? "NFC" : "no normalizer",
+      t.revision_hash_, t.pattern_ == Pattern::Dsv41 ? "deepseek-v4.1" : t.pattern_ == Pattern::Nemotron ? "nemotron" : t.pattern_ == Pattern::Flint ? "flint" : t.pattern_ == Pattern::Qwen ? "qwen" : t.pattern_ == Pattern::Qwen2 ? "qwen2" : "glm", t.nfc_ ? "NFC" : "no normalizer",
       t.ignore_merges_);
   return t;
 }
@@ -961,13 +961,13 @@ void Tokenizer::encode_segment(std::string_view segment,
     segment = normalized;
   }
   std::vector<std::string_view> pretokens;
-  if (pattern_ == 2 || pattern_ == 4) {
-    Dsv41Scanner scanner(segment, &pretokens, /*flint=*/pattern_ == 4);
+  if (pattern_ == Pattern::Dsv41 || pattern_ == Pattern::Flint) {
+    Dsv41Scanner scanner(segment, &pretokens, /*flint=*/pattern_ == Pattern::Flint);
     scanner.run();
   } else {
-    SplitScanner scanner(segment, &pretokens, /*marks=*/pattern_ == 1,
-                         /*single_number=*/pattern_ == 1 || pattern_ == 3 || pattern_ == 4,
-                         /*nemotron=*/pattern_ == 4);
+    SplitScanner scanner(segment, &pretokens, /*marks=*/pattern_ == Pattern::Qwen,
+                         /*single_number=*/pattern_ == Pattern::Qwen || pattern_ == Pattern::Qwen2 || pattern_ == Pattern::Nemotron,
+                         /*nemotron=*/pattern_ == Pattern::Nemotron);
     scanner.run();
   }
   for (const std::string_view p : pretokens) {
