@@ -16,8 +16,8 @@
 //                heads appended to the paged caches at each row's slot;
 //   attention    split-KV paged GQA attention: one block per (row, split,
 //                kv head), the kv head's query heads sharing every K/V
-//                tile, fp32 scores and online softmax, probabilities
-//                rounded to bf16 for the V accumulation, the denominator
+//                tile, fp32 scores and online softmax, fp32 probabilities
+//                carried into the V accumulation, the denominator
 //                unrounded; a row attends [0, pos] of its request (its own
 //                row already appended); rows with pos < 0 are padding;
 //   combine      the splits merged, out = bf16(C / L).

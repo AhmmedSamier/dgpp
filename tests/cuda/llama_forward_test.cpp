@@ -37,6 +37,7 @@ using dgpp::bf16_bits_to_float;
 using dgpp::float_to_bf16_bits;
 using dgpp::LlamaLayerStream;
 using dgpp::LlamaModel;
+using dgpp::LlamaResidency;
 using dgpp::LlamaTextConfig;
 
 namespace {
@@ -328,6 +329,55 @@ int run_host_parity(const std::string& dir) {
   return ok ? 0 : 1;
 }
 
+// Dump logits and, when requested, per-layer residual states for a token
+// sequence.  The raw state files are bf16 [tokens, hidden] rows and are a
+// deliberately simple interchange format for comparison with a framework
+// reference.
+// Usage: --logits <checkpoint_dir> <t1,t2,...,tN> [--dump-states DIR]
+int run_logits(const std::string& dir, const std::string& toks_str, const std::string& states_dir) {
+  const LlamaTextConfig cfg = LlamaTextConfig::from_json_file((fs::path(dir) / "config.json").string());
+  const int V = cfg.vocab_size;
+  std::vector<int64_t> tokens;
+  size_t start = 0;
+  while (start < toks_str.size()) {
+    size_t end = toks_str.find(',', start);
+    if (end == std::string::npos) end = toks_str.size();
+    tokens.push_back(std::stoll(toks_str.substr(start, end - start)));
+    start = end + 1;
+  }
+  const int T = static_cast<int>(tokens.size());
+  LlamaModel model(cfg, dir, T, 256, LlamaResidency::Streaming, nullptr, 0, 1, 1, false, 0, false);
+  const LlamaModel::Outputs out = model.forward(tokens, !states_dir.empty());
+  if (!states_dir.empty()) {
+    fs::create_directories(states_dir);
+    require(out.layer_states.size() == static_cast<size_t>(cfg.num_hidden_layers),
+            "logits: missing layer captures");
+    for (size_t layer = 0; layer < out.layer_states.size(); ++layer) {
+      const fs::path path = fs::path(states_dir) / ("layer_" + std::to_string(layer) + ".bf16");
+      std::FILE* f = std::fopen(path.c_str(), "wb");
+      require(f != nullptr, "logits: cannot open " + path.string());
+      const auto& state = out.layer_states[layer];
+      const size_t written = std::fwrite(state.data(), sizeof(uint16_t), state.size(), f);
+      std::fclose(f);
+      require(written == state.size(), "logits: cannot write " + path.string());
+    }
+    std::printf("wrote %zu layer states to %s\n", out.layer_states.size(), states_dir.c_str());
+  }
+  std::printf("position logits (top-5 id=value):\n");
+  for (int t = 0; t < T; ++t) {
+    const float* row = out.logits.data() + static_cast<size_t>(t) * V;
+    std::vector<std::pair<float, int>> scores(V);
+    for (int i = 0; i < V; ++i) scores[i] = {row[i], i};
+    std::partial_sort(scores.begin(), scores.begin() + 5, scores.end(),
+                      [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::printf("pos %2d: ", t);
+    for (int k = 0; k < 5; ++k)
+      std::printf("id=%d(%.4f) ", scores[k].second, scores[k].first);
+    std::printf("\n");
+  }
+  return 0;
+}
+
 // engine.dense_weights = "fp8" (slice 7): the same forward under the fp8
 // stack — deterministic (the scale GEMM's kernels are), finite, and within
 // a tolerance of the bf16 run's logits (fp8 is lossy; the host parity's
@@ -374,13 +424,15 @@ int run_fp8(const std::string& dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string fixture, smoke, checkpoint, fp8;
+  std::string fixture, smoke, checkpoint, fp8, logits_dir, logits_toks, dump_states;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--write-fixture" && i + 1 < argc) fixture = argv[++i];
     else if (a == "--smoke" && i + 1 < argc) smoke = argv[++i];
     else if (a == "--checkpoint-dir" && i + 1 < argc) checkpoint = argv[++i];
     else if (a == "--fp8" && i + 1 < argc) fp8 = argv[++i];
+    else if (a == "--logits" && i + 2 < argc) { logits_dir = argv[++i]; logits_toks = argv[++i]; }
+    else if (a == "--dump-states" && i + 1 < argc) dump_states = argv[++i];
     else { std::fprintf(stderr, "unknown argument %s\n", a.c_str()); return 2; }
   }
   try {
@@ -392,6 +444,7 @@ int main(int argc, char** argv) {
     if (!smoke.empty()) return run_smoke(smoke);
     if (!checkpoint.empty()) return run_host_parity(checkpoint);
     if (!fp8.empty()) return run_fp8(fp8);
+    if (!logits_dir.empty()) return run_logits(logits_dir, logits_toks, dump_states);
     std::fprintf(stderr,
                  "usage: --write-fixture DIR | --smoke DIR | --checkpoint-dir DIR | --fp8 DIR\n");
     return 2;

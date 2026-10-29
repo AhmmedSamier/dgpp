@@ -140,7 +140,10 @@ def chat(messages, max_tokens=None, response_format=None):
                 body.pop("chat_template_kwargs", None)
             elif "cannot be enforced on this engine" in detail and "response_format" in body:
                 body.pop("response_format", None)
-            elif "no chat template" in detail:
+            # A template-less family's refusal, either phrasing: DGPP ("it
+            # ships no chat template") or vLLM ("default chat template is no
+            # longer allowed") — the prompt verbatim as the completion prompt.
+            elif "chat template" in detail:
                 return completions(prompt, max_tokens)
             else:
                 raise

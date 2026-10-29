@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "common/cuda_check.hpp"
 #include "kernels/fp4_gemv.hpp"
@@ -135,18 +136,16 @@ void LlamaAttentionLayer::enqueue(const uint16_t* x, int tokens, const LlamaAttn
   // checkpoint they run the fp4 GEMV (decode rows) or the fp4 tile GEMM
   // (bf16 out, widened to fp32 — kernels/fp4w_gemm.hpp).
   if (w_.q_proj_fp4.payload) {
-    if (tokens <= decode_rows_) {
-      launch_fp4_gemv_f32(x, static_cast<size_t>(H), w_.q_proj_fp4, qd_, tokens, Q, H, stream);
-      launch_fp4_gemv_f32(x, static_cast<size_t>(H), w_.k_proj_fp4, kd_, tokens, KV, H, stream);
-      launch_fp4_gemv_f32(x, static_cast<size_t>(H), w_.v_proj_fp4, vd_, tokens, KV, H, stream);
-    } else {
-      launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.q_proj_fp4, q_, tokens, Q, H, stream);
-      cast_bf16_to_f32_rows(q_, qd_, tokens, Q, stream);
-      launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.k_proj_fp4, k4b_, tokens, KV, H, stream);
-      cast_bf16_to_f32_rows(k4b_, kd_, tokens, KV, stream);
-      launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.v_proj_fp4, v4b_, tokens, KV, H, stream);
-      cast_bf16_to_f32_rows(v4b_, vd_, tokens, KV, stream);
-    }
+    // NVFP4: one path for prefill and decode alike — the fp4 tile GEMM
+    // (bf16 out) widened to fp32 — so Q/K/V from a prefill chunk and from
+    // a decode row are bitwise consistent (no bf16-vs-f32 split that would
+    // corrupt the KV cache against the query).
+    launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.q_proj_fp4, q_, tokens, Q, H, stream);
+    cast_bf16_to_f32_rows(q_, qd_, tokens, Q, stream);
+    launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.k_proj_fp4, k4b_, tokens, KV, H, stream);
+    cast_bf16_to_f32_rows(k4b_, kd_, tokens, KV, stream);
+    launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.v_proj_fp4, v4b_, tokens, KV, H, stream);
+    cast_bf16_to_f32_rows(v4b_, vd_, tokens, KV, stream);
   } else if (w_.q_proj_fp8.payload) {
     launch_scale_gemm_f32(x, static_cast<size_t>(H), w_.q_proj_fp8.payload, w_.q_proj_fp8.scales, qd_, tokens, Q, H,
                           stream, static_cast<size_t>(Q), g_.mma_from_rows, /*last_row_only=*/false, g_.ws,
@@ -167,8 +166,8 @@ void LlamaAttentionLayer::enqueue(const uint16_t* x, int tokens, const LlamaAttn
   }
   // The full RoPE (no bias, no head norm) and the K/V append.
   glm4_qkv_finish(qd_, Q, kd_, KV, vd_, KV, nullptr, nullptr, nullptr, nullptr, nullptr, eps_, d_inv_freq_,
-                  rotary_, rows.req_ids, rows.pos, tokens, lh_, lkv_, cache.block_tables,
-                  cache.blocks_per_request, cache.block_tokens, q_, Q, cache.k_cache, cache.v_cache, stream);
+                   rotary_, rows.req_ids, rows.pos, tokens, lh_, lkv_, cache.block_tables,
+                   cache.blocks_per_request, cache.block_tokens, q_, Q, cache.k_cache, cache.v_cache, stream);
   // The attention: decode rows split the visible range (the capture's
   // geometry), prefill rows run one split each (T x kv-head blocks).
   const int n_split = rows.decode ? n_split_ : 1;
@@ -179,10 +178,7 @@ void LlamaAttentionLayer::enqueue(const uint16_t* x, int tokens, const LlamaAttn
                     stream);
   glm4_attn_combine(m_ws_, l_ws_, c_ws_, tokens, n_split, lh_, o_, stream);
   if (w_.o_proj_fp4.payload) {
-    if (tokens <= decode_rows_)
-      launch_fp4_gemv_bf16(o_, static_cast<size_t>(Q), w_.o_proj_fp4, out, tokens, H, Q, stream);
-    else
-      launch_fp4w_gemm_bf16(o_, static_cast<size_t>(Q), w_.o_proj_fp4, out, tokens, H, Q, stream);
+    launch_fp4w_gemm_bf16(o_, static_cast<size_t>(Q), w_.o_proj_fp4, out, tokens, H, Q, stream);
   } else if (w_.o_proj_fp8.payload)
     launch_scale_gemm_bf16(o_, static_cast<size_t>(Q), w_.o_proj_fp8.payload, w_.o_proj_fp8.scales, out, tokens, H, Q,
                            stream, static_cast<size_t>(H), g_.mma_from_rows, g_.ws, g_.ws_bytes);
@@ -244,16 +240,10 @@ void LlamaDenseMlp::enqueue(const uint16_t* x, int tokens, uint16_t* out, cudaSt
   if (!x || !out) throw std::invalid_argument("LlamaDenseMlp: null pointer");
   const int H = hidden_, I = static_cast<int>(inter_);
   if (w_.gate_fp4.payload) {
-    // NVFP4: the GEMV on decode rows, the fp4 tile GEMM on prefill chunks
-    // (the glm4 dense path's boundary).
-    if (tokens <= decode_rows_) {
-      launch_fp4_gemv_bf16(x, static_cast<size_t>(H), w_.gate_fp4, gate_, tokens, I, H, stream);
-      launch_fp4_gemv_bf16(x, static_cast<size_t>(H), w_.up_fp4, up_, tokens, I, H, stream);
-      launch_moe_swiglu_clamp(gate_, up_, act_, static_cast<int64_t>(tokens) * I,
-                              std::numeric_limits<float>::infinity(), stream);
-      launch_fp4_gemv_bf16(act_, static_cast<size_t>(I), w_.down_fp4, out, tokens, H, I, stream);
-      return;
-    }
+    // NVFP4: one path for prefill and decode alike — fp4 tile GEMM
+    // (bf16 out) — so gate/up/down from a prefill chunk and from a decode
+    // row are bitwise consistent (no bf16-vs-f32 split that would shift
+    // swiglu argmax at early tokens).
     launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.gate_fp4, gate_, tokens, I, H, stream);
     launch_fp4w_gemm_bf16(x, static_cast<size_t>(H), w_.up_fp4, up_, tokens, I, H, stream);
     launch_moe_swiglu_clamp(gate_, up_, act_, static_cast<int64_t>(tokens) * I,
