@@ -3472,6 +3472,71 @@ DGPP_TEST(scheduler_prefixCache_entriesGiveTheirBlocksToABeginJoiningTheWalk) {
   require(run() == run(), "replicated requests produce identical engine operations and cache digests");
 }
 
+DGPP_TEST(scheduler_prefixCache_plannedAttachSurvivesLaterFitEvictions) {
+  const auto run = [] {
+    ChunkSharedPrefixEngine engine(/*slots=*/2, /*blocks=*/10, /*arena_slots=*/8);
+    engine.arm(0, {1}, 1);
+    engine.arm(0, {10}, 1);
+    engine.arm(0, {20}, 1);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 8;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_cached_request("seed", counted_prompt(25), {24}, 1));
+    sched.run_to_completion();
+    require(engine.pool_blocks_in_use() == 6, "seed pins six of ten blocks");
+
+    // first needs four new blocks because it can share seed's six. second
+    // cannot fit: evicting seed would invalidate first's already-counted
+    // savings and admit thirteen blocks into a ten-block pool.
+    sched.submit(make_cached_request("first", counted_prompt(37), {24}, 1));
+    sched.submit(make_cached_request("second", counted_prompt(9, 2000), {4}, 1));
+    sched.tick();
+    require(sched.meters().prefilling == 1 && sched.meters().queued == 1,
+            "the later request waits instead of evicting the earlier begin's prefix");
+    require(sched.meters().prefix_hits == 1 && sched.meters().prefix_tokens_saved == 24 &&
+                sched.meters().prefix_evictions == 0 && engine.pool_blocks_in_use() == 10,
+            "planning protects the prefix without adding hits or reservations");
+    sched.run_to_completion();
+    require(sched.find("first")->generated == std::vector<int64_t>{10} &&
+                sched.find("second")->generated == std::vector<int64_t>{20},
+            "both requests finish after the deferred admission");
+    return std::make_pair(engine.op_stream(), sched.prefix_digest());
+  };
+  require(run() == run(), "planned prefix protection preserves replicated decisions");
+}
+
+DGPP_TEST(scheduler_prefixCache_plannedAttachSurvivesEarlierBeginSnapshot) {
+  ChunkSharedPrefixEngine engine(/*slots=*/2, /*blocks=*/14, /*arena_slots=*/1);
+  engine.arm(0, {1}, 1);
+  engine.arm(0, {10}, 1);
+  engine.arm(1, {20}, 1);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 8;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_cached_request("seed", counted_prompt(25), {24}, 1));
+  sched.run_to_completion();
+
+  // Both begins fit. The first one's new snapshot must not evict the only
+  // arena entry before the second begin gets to attach to it.
+  sched.submit(make_cached_request("cold", counted_prompt(13, 2000), {4}, 1));
+  sched.submit(make_cached_request("cached", counted_prompt(37), {24}, 1));
+  sched.tick();
+  require(sched.meters().prefilling == 2 && sched.meters().prefix_hits == 1 &&
+              sched.meters().prefix_tokens_saved == 24 && sched.meters().prefix_evictions == 0,
+          "the later begin keeps its planned hit while the earlier snapshot skips");
+  sched.run_to_completion();
+  require(sched.find("cold")->generated == std::vector<int64_t>{10} &&
+              sched.find("cached")->generated == std::vector<int64_t>{20},
+          "both co-beginners finish");
+  // A new cold request can reclaim the entry after the real attach and the
+  // planning hold have both ended; no temporary reference leaks.
+  engine.arm(0, {30}, 1);
+  const auto evictions = sched.meters().prefix_evictions;
+  sched.submit(make_cached_request("replacement", counted_prompt(13, 3000), {4}, 1));
+  sched.run_to_completion();
+  require(sched.meters().prefix_evictions > evictions, "planning holds release after begin");
+}
+
 // ---- the NVMe cold tier (issue #26) -------------------------------------------
 // The commits ride the journal in production; here the driver hands the
 // fake's completions straight back to the scheduler before each tick, the

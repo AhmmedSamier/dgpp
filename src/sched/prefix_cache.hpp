@@ -48,7 +48,7 @@ class PrefixCache {
     int slot = -1;              // the arena slot; -1 once evicted
     uint64_t hash = 0;
     uint64_t last_use = 0;      // the tick of the last attach / insert
-    int attached = 0;           // live requests attached (never evicted)
+    int attached = 0;           // live or planned request references (never evicted)
     bool live = false;
     // The NVMe cold tier (issue #26): the disk entry holding this
     // entry's state (-1: none), and whether a spill is reading it — a
@@ -171,6 +171,9 @@ class PrefixCache {
   int size() const { return static_cast<int>(entries_.size()); }  // records, live or dead
   // `key` (prompt_cache_key) pins the entry when it carries none yet.
   void attach(int index, uint64_t now, const std::string& key = "");
+  // Protect a planned attach until admission takes its own reference. No
+  // hit, LRU or digest change; pair with detach even if admission throws.
+  void retain(int index);
   int pinned_entries() const;  // live entries with a key
   void detach(int index);
   // Refreshes an entry's LRU stamp without a decision (no stats, no digest).

@@ -29,6 +29,30 @@ std::vector<std::vector<int32_t>> SchedulerEngine::step_batch(
 
 namespace {
 
+// Fit calculations borrow full blocks from cached prefixes before the
+// selected requests begin. Keep those entries alive through every begin:
+// both a later fit and an earlier begin's snapshot can otherwise evict one.
+class PlannedPrefixes {
+ public:
+  explicit PlannedPrefixes(PrefixCache& cache) : cache_(cache) {}
+  ~PlannedPrefixes() { release(); }
+  PlannedPrefixes(const PlannedPrefixes&) = delete;
+  PlannedPrefixes& operator=(const PlannedPrefixes&) = delete;
+  void retain(int entry) {
+    if (entry < 0) return;
+    entries_.push_back(entry);
+    cache_.retain(entry);
+  }
+  void release() {
+    for (const int entry : entries_) cache_.detach(entry);
+    entries_.clear();
+  }
+
+ private:
+  PrefixCache& cache_;
+  std::vector<int> entries_;
+};
+
 // A request's lifetime token footprint: the prompt plus every token it
 // can generate. The last generated token is never fed back, so a one-row
 // decode writes no position past prompt + max_steps - 2 and this count
@@ -1660,6 +1684,7 @@ bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
   // trimmed share do not measure the cost of a 1024-token service quantum.
   prefill_pass_budget_tokens_ = budget;
   std::vector<int> inflight, begins;
+  PlannedPrefixes planned_prefixes(cache_);
   int64_t align = 0;
   size_t max_advances = 0;
   if (chunk_tick) {
@@ -1703,8 +1728,10 @@ bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
         if (need > free_blocks && !evict_to_fit(requests_[i], free_blocks)) continue;
         // The victim may have been the plan's attach entry; recompute so
         // the bookkeeping below matches the plan the begin itself takes.
-        need = new_blocks(requests_[i], plan_prefix(requests_[i]));
+        const PrefixPlan plan = plan_prefix(requests_[i]);
+        need = new_blocks(requests_[i], plan);
         begins.push_back(static_cast<int>(i));
+        planned_prefixes.retain(plan.attach_entry);
         if (!group_advance) break;
         free_blocks -= need;
         --open_slots;
@@ -1731,6 +1758,7 @@ bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
       begin_prefill(b, share);
       admitted_any = true;
     }
+    planned_prefixes.release();  // the begun requests now hold their own refs
     int64_t leftover = budget - n * share;
     if (group_advance && inflight.size() >= 2) {
       // One walk for all of them: the budget in aligned units, by need.
