@@ -1,4 +1,5 @@
 #include "kernels/dory_attn.hpp"
+#include "kernels/pdl.cuh"
 
 #include <cmath>
 #include <stdexcept>
@@ -60,6 +61,7 @@ __global__ void __launch_bounds__(256) qkv_finish_kernel(
     int local_heads, int kv_heads, const int32_t* __restrict__ block_tables,
     int blocks_per_request, int block_tokens, uint16_t* __restrict__ q_out,
     int64_t q_out_stride, uint16_t* __restrict__ k_cache, uint16_t* __restrict__ v_cache) {
+  dgpp_pdl_wait();
   const int heads_total = local_heads + 2 * kv_heads;
   const int item = static_cast<int>(blockIdx.x) * (blockDim.x / 32) + threadIdx.x / 32;
   if (item >= rows * heads_total) return;
@@ -153,6 +155,7 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_st
                                     int blocks_per_request, int window, float scale,
                                     float* __restrict__ m_ws, float* __restrict__ l_ws,
                                     float* __restrict__ c_ws) {
+  dgpp_pdl_wait();
   extern __shared__ __align__(16) uint16_t smem[];
   const int hpk = local_heads / kv_heads;
   const int r = static_cast<int>(blockIdx.x);
@@ -282,6 +285,7 @@ __global__ void attn_partial_kernel(const uint16_t* __restrict__ q, int64_t q_st
 __global__ void attn_combine_kernel(const float* __restrict__ m_ws, const float* __restrict__ l_ws,
                                     const float* __restrict__ c_ws, int n_split, int local_heads,
                                     uint16_t* __restrict__ out) {
+  dgpp_pdl_wait();
   const int r = static_cast<int>(blockIdx.x);
   const int h = static_cast<int>(blockIdx.y);
   const int d = threadIdx.x;  // D threads

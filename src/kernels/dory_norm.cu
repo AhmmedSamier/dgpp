@@ -1,4 +1,5 @@
 #include "kernels/dory_norm.hpp"
+#include "kernels/pdl.cuh"
 
 #include <algorithm>
 #include <stdexcept>
@@ -92,6 +93,7 @@ __device__ __forceinline__ void block_rstd_pair(double sa, double sb, double* pa
 __global__ void __launch_bounds__(kThreads) justnorm_kernel(const uint16_t* __restrict__ x,
                                                             uint16_t* __restrict__ y, int dim,
                                                             float eps) {
+  dgpp_pdl_wait();
   const int tid = threadIdx.x;
   const size_t row = static_cast<size_t>(blockIdx.x) * dim;
   const int nvec = dim / (kThreads * kVecElems);
@@ -136,6 +138,7 @@ __global__ void __launch_bounds__(kThreads) add_justnorm_kernel(const uint16_t* 
                                                                 const uint16_t* __restrict__ b,
                                                                 uint16_t* __restrict__ y, int dim,
                                                                 float eps) {
+  dgpp_pdl_wait();
   const int tid = threadIdx.x;
   const size_t row = static_cast<size_t>(blockIdx.x) * dim;
   const int nvec = dim / (kThreads * kVecElems);
@@ -185,6 +188,7 @@ __global__ void __launch_bounds__(kThreads)
     slerp_alpha_kernel(const uint16_t* __restrict__ a, const uint16_t* __restrict__ b,
                        const uint16_t* __restrict__ alpha, float scale, uint16_t* __restrict__ y,
                        int dim, float eps) {
+  dgpp_pdl_wait();
   const int tid = threadIdx.x;
   const size_t row = static_cast<size_t>(blockIdx.x) * dim;
   const int nvec = dim / (kThreads * kVecElems);
@@ -277,6 +281,7 @@ __global__ void __launch_bounds__(kThreads)
     gate_justnorm_kernel(const uint16_t* __restrict__ attn, const uint16_t* __restrict__ gate,
                          const uint16_t* __restrict__ s_gate, float sg_factor,
                          uint16_t* __restrict__ y, int dim, float eps) {
+  dgpp_pdl_wait();
   const int tid = threadIdx.x;
   const size_t row = static_cast<size_t>(blockIdx.x) * dim;
   const int nvec = dim / (kThreads * kVecElems);
@@ -331,6 +336,7 @@ __global__ void __launch_bounds__(kThreads)
     silu_justnorm_kernel(const uint16_t* __restrict__ g_in, const uint16_t* __restrict__ u_in,
                          const uint16_t* __restrict__ suv_gate, const uint16_t* __restrict__ suv_up,
                          float suv_factor, uint16_t* __restrict__ y, int dim, float eps) {
+  dgpp_pdl_wait();
   const int tid = threadIdx.x;
   const size_t row = static_cast<size_t>(blockIdx.x) * dim;
   const int nvec = dim / (kThreads * kVecElems);
@@ -399,6 +405,7 @@ bool aligned16(const void* p) { return (reinterpret_cast<uintptr_t>(p) & 15u) ==
 // a memcpy node.
 __global__ void __launch_bounds__(256) copy_rows_kernel(const uint4* __restrict__ src,
                                                         uint4* __restrict__ dst, size_t chunks) {
+  dgpp_pdl_wait();
   const size_t stride = static_cast<size_t>(gridDim.x) * blockDim.x;
   for (size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < chunks;
        i += stride)

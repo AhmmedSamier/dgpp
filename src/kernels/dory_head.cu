@@ -1,4 +1,5 @@
 #include "kernels/dory_head.hpp"
+#include "kernels/pdl.cuh"
 
 #include <stdexcept>
 
@@ -18,6 +19,7 @@ __global__ void __launch_bounds__(kThreads) logits_scale_kernel(float* __restric
                                                                 const uint16_t* __restrict__ logit_scale,
                                                                 float factor, int64_t total,
                                                                 int vocab) {
+  dgpp_pdl_wait();
   const int64_t stride = static_cast<int64_t>(gridDim.x) * kThreads;
   for (int64_t i = static_cast<int64_t>(blockIdx.x) * kThreads + threadIdx.x; i < total; i += stride)
     logits[i] *= bf16_bits_to_float(logit_scale[i % vocab]) * factor;
