@@ -77,16 +77,54 @@ these decisions.
 ## Across restarts
 
 With `persist` (the default) the slab outlives the process. Its index and
-checksums live beside it under a directory named by the binding: the binary,
-the checkpoint, the effective settings and the slab geometry. A release
-upgrade or a settings change therefore starts fresh.
+checksums live beside it under a directory named by the automatic binding:
+the build version (including its commit), the checkpoint path, the effective
+settings and the slab geometry. By default, a build or settings change
+therefore starts fresh. The previous binding's files remain on disk.
+
+To keep using an existing cache across upgrades, set `nvme_cache.reuse_binding`
+to its 16-character binding from the previous startup log (`binding ...`) or
+its directory name under `nvme_cache.path`:
+
+```json
+"nvme_cache": {
+  "enabled": true,
+  "path": "~/dgpp/nvme-cache",
+  "capacity_gib": 64,
+  "persist": true,
+  "reuse_binding": "0123456789abcdef"
+}
+```
+
+Replace the example binding with the one belonging to this deployment and
+keep its existing capacity. The server selects that directory and its stored
+binding directly; it does not rename the cache, rewrite its identity, or
+require a new cache format. Keep this setting on subsequent upgrades. Remove
+it to return to automatic selection. Rank 0 sends the selection to every
+rank; that binding must exist on each node under its local cache path.
+
+Explicit reuse overrides the automatic build, checkpoint-path and settings
+identity. It is the operator's assertion that the same model artifacts and
+cached-state interpretation remain compatible. The old index does not store
+the original inputs to its binding, so matching byte counts cannot establish
+that assertion. Changes to weights, RoPE, quantization, tensor-parallel layout
+or state layout can make a cache incompatible even at the same size.
+
+The file formats, geometry, page checksums, exclusive slab lock and agreement
+across ranks remain enforced. A missing binding, incompatible index or
+geometry, or disagreement across ranks refuses startup without clearing the
+selected cache. Existing checks still prune stale or unreadable entries;
+successfully adopted caches resume normal writes and retention. `--memory-plan`
+checks the selected files read-only; actual snapshot geometry and entry
+checksums are checked when the engine opens the tier.
 
 A start under the same binding validates every entry of the previous index
 before offering it. An entry's pages must still carry the checksums its
 spill recorded, and its token ids must read back. An entry whose pages a
 later run reused before a crash, or whose ids are unreadable, is pruned. The
 ranks then compare their candidates at the warm handshake and adopt only
-when every rank holds the same one, otherwise every slab starts fresh, so
+when every rank holds the same one. Otherwise automatic selection starts
+fresh and explicit reuse refuses startup, so
 the world never runs with an index that differs by rank. Adopted entries
 keep their pins, rank older than anything the new run makes, and restore
 exactly as before. One world holds a slab, and a second process under the

@@ -412,6 +412,9 @@ struct ClusterConfig {
     // settings and slab geometry adopts its entries (when every rank holds
     // the same index). False recreates the slab at every start.
     bool persist = true;
+    // Select an existing binding across build/settings changes. This is
+    // the operator's compatibility assertion; structural checks still run.
+    std::string reuse_binding;
     // A filesystem that refuses direct I/O (tmpfs) is refused unless this
     // allows buffered I/O: the page cache would grow into the model's memory.
     bool allow_buffered = false;

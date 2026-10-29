@@ -222,7 +222,9 @@ The long-context templates carry an `nvme_cache` block, off. Turning it on
 keeps the prefix entries memory evicts on each node's local NVMe, so a
 document pushed out of the cache comes back from disk instead of being
 recomputed. Read [the cold tier](nvme-cache.md) before sizing
-`capacity_gib`.
+`capacity_gib`. To retain an existing compatible cache when upgrading the
+server, set `nvme_cache.reuse_binding` to its previous binding as described
+in [reuse across upgrades](nvme-cache.md#across-restarts).
 
 ## 3. Set your node addresses and SSH user
 

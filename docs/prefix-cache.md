@@ -193,4 +193,7 @@ slot count bounds what is hot, not what is remembered. A restored prefix
 still needs room in the KV pool. [The cold tier](nvme-cache.md) describes
 what is kept, how entries move, persistence across restarts, pins and the
 bounds, and the [configuration reference](configuration.md#nvme-cache)
-lists the keys.
+lists the keys. Automatic bindings change with the server build and settings.
+Use `nvme_cache.reuse_binding` to select an existing compatible cache across
+upgrades; [reuse across upgrades](nvme-cache.md#across-restarts) explains how
+to find its binding and which checks still apply.

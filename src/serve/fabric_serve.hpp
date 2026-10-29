@@ -238,6 +238,7 @@ struct WorldSettings {
   int64_t nvme_cache_max_ops = 4;      // ops started but not committed (a decision input)
   double nvme_cache_reserve_gib = 1.0;  // the pre-flight's free-space reserve
   bool nvme_cache_persist = true;      // the slab outlives the process
+  std::string nvme_cache_reuse_binding;  // explicit existing binding, shared by the world
   int64_t nvme_cache_op_timeout_s = 120;  // an op without progress this long fails
   bool operator==(const WorldSettings&) const = default;
 };

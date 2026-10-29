@@ -74,6 +74,20 @@ class PortabilityTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     site_env.resolve_config(self.config, self.values)
 
+    def test_nvme_reuse_binding_survives_resolution(self):
+        cache = {"enabled": True, "capacity_gib": 64, "reuse_binding": "0123456789abcdef"}
+        self.config.write_text(json.dumps({"model": "org/model", "world_size": 1, "nvme_cache": cache}))
+        resolved = site_env.server_config(site_env.resolve_config(self.config, self.values))
+        self.assertEqual(resolved["nvme_cache"], cache)
+        for changes in ({"reuse_binding": True}, {"reuse_binding": "../cache"},
+                        {"reuse_binding": "0123456789abcdeF"}, {"reuse_binding": "0123"},
+                        {"enabled": False}, {"persist": False}):
+            with self.subTest(changes=changes):
+                self.config.write_text(json.dumps({"model": "org/model", "world_size": 1,
+                                                  "nvme_cache": {**cache, **changes}}))
+                with self.assertRaisesRegex(ValueError, "nvme_cache.reuse_binding"):
+                    site_env.resolve_config(self.config, self.values)
+
     def test_http_types_and_ports_rejected(self):
         for http in ({"bind_host": 0}, {"bind_host": "localhost"}, {"port": True}, {"port": 0}, {"host": "a"}):
             with self.subTest(http=http):

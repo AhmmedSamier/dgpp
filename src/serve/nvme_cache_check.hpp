@@ -29,6 +29,20 @@ struct NvmeCachePlan {
 // The reserve the tier never takes from a filesystem (nvme_cache.reserve_gib): 1 GiB by default.
 constexpr size_t kNvmeCacheReserveBytes = size_t{1} << 30;
 
+// Existing automatically generated bindings are sixteen lowercase hex digits.
+bool valid_nvme_cache_binding(const std::string& binding);
+
+// Keep the legacy automatic binding byte-for-byte when no reuse is requested.
+std::string nvme_cache_binding(const std::string& version, const std::string& config_digest,
+                               const std::string& checkpoint, size_t block_bytes, size_t snapshot_bytes,
+                               double capacity_gib, int64_t block_tokens, int world,
+                               const std::string& reuse_binding = "");
+
+// Read-only preflight for explicit reuse; never creates or clears a cache.
+// The tier checks the actual snapshot geometry and page checksums at open.
+std::string check_nvme_cache_reuse(const NvmeCachePlan& plan, const std::string& binding,
+                                  int rank, int64_t block_tokens);
+
 // Plans the slab for a rank: `block_bytes` one cache block's bytes across
 // its planes (0: a family without a paged cache — blobs alone),
 // `blob_bytes` the snapshot size, `block_tokens` the pool's block (0: no

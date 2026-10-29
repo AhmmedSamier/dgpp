@@ -371,7 +371,7 @@ commands.
 | [Speculative decoding](docs/mtp.md) | MTP execution and correctness |
 | [Continuous batching](docs/continuous-batching.md) | admission, shared prefill and the adaptive policy |
 | [Prefix cache](docs/prefix-cache.md) | prefix reuse and memory sizing |
-| [NVMe cold tier](docs/nvme-cache.md) | evicted prefix entries on local NVMe: persistence, pins, bounds and metrics |
+| [NVMe cold tier](docs/nvme-cache.md) | evicted prefix entries on local NVMe: persistence, explicit reuse across upgrades (`nvme_cache.reuse_binding`), pins, bounds and metrics |
 | [Optimizing performance](docs/optimizing_performance.md) | the levers, which pay on which model, and how to measure a change |
 | [Numerics](docs/numerics.md) | judging a numerics change |
 | [Benchmarks](docs/benchmarks.md) | every measured serving number with its method and reproduction |

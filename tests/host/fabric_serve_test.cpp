@@ -1900,6 +1900,21 @@ DGPP_TEST(journal_disk_commits_ride_the_tick_record) {
   require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(on)).world_settings == on,
           "the tier's settings round trip");
   {
+    auto reuse = on;
+    reuse.nvme_cache_persist = true;
+    reuse.nvme_cache_reuse_binding = "0123456789abcdef";
+    require(dgpp::serve::decode_journal_line(dgpp::serve::encode_journal_settings(reuse)).world_settings == reuse,
+            "every rank receives the explicit reuse binding");
+    for (const std::string value : {"true", "\"../another-cache\"", "\"0123456789abcdeF\"", "\"\""}) {
+      std::string bad = dgpp::serve::encode_journal_settings(on);
+      bad.insert(bad.size() - 1, ",\"nvmereuse\":" + value);
+      bool rejected = false;
+      try { (void)dgpp::serve::decode_journal_line(bad); }
+      catch (const std::runtime_error&) { rejected = true; }
+      require(rejected, "invalid reuse or reuse without persistence rejected");
+    }
+  }
+  {
     // A record from before the op bound and the pin cap (2026-10-28)
     // decodes to what such a rank 0 ran: no bound, the default cap.
     std::string legacy = dgpp::serve::encode_journal_settings(on);

@@ -59,8 +59,13 @@ so one model, quant and world has one file however many worlds it serves.
 The long-context templates also carry a top-level `nvme_cache` block, off by
 default: set `enabled` to true and size `capacity_gib` to the node's free
 NVMe to keep evicted prefix entries on disk. The slab outlives the process
-by default, so a restart under the same binary, checkpoint and settings
-adopts its entries. [The cold tier](../docs/nvme-cache.md) describes the
+by default, so a restart under the same build, checkpoint and settings
+adopts its entries. To retain an existing compatible cache across upgrades,
+set `nvme_cache.reuse_binding` to its 16-character binding from the previous
+startup log or cache directory. Keep the same capacity; all ranks must have
+that binding. [Reuse across upgrades](../docs/nvme-cache.md#across-restarts)
+explains the compatibility assertion and the checks that remain enforced.
+[The cold tier](../docs/nvme-cache.md) describes the
 behaviour and the [configuration reference](../docs/configuration.md#nvme-cache)
 lists the keys. The shapes
 a template does not name are knobs appended at boot:

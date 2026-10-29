@@ -1,4 +1,5 @@
 #include "serve/cluster_config.hpp"
+#include "serve/nvme_cache_check.hpp"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -535,12 +536,18 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           n.reserve_gib = number(p.value, nk, what);
           if (n.reserve_gib < 0.0) fail(what, "'" + nk + "' must be >= 0");
         } else if (p.key == "persist") n.persist = boolean(p.value, nk, what);
-        else if (p.key == "allow_buffered") n.allow_buffered = boolean(p.value, nk, what);
+        else if (p.key == "reuse_binding") {
+          n.reuse_binding = text(p.value, nk, what);
+          if (!n.reuse_binding.empty() && !valid_nvme_cache_binding(n.reuse_binding))
+            fail(what, "'" + nk + "' must be an existing binding (16 lowercase hexadecimal digits)");
+        } else if (p.key == "allow_buffered") n.allow_buffered = boolean(p.value, nk, what);
         else if (p.key == "op_timeout_s") n.op_timeout_s = integer(p.value, nk, what, 0, 86400);
         else fail(what, "unknown key '" + nk + "'");
       }
       if (n.enabled && n.capacity_gib <= 0.0)
         fail(what, "'nvme_cache.capacity_gib' must be positive when the cache is enabled");
+      if (!n.reuse_binding.empty() && (!n.enabled || !n.persist))
+        fail(what, "'nvme_cache.reuse_binding' requires enabled and persist to be true");
     } else if (k == "paths") {
       if (!v.is_object()) fail(what, "'paths' must be an object");
       for (const Member& p : v.members()) {

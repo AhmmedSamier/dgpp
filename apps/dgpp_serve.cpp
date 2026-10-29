@@ -1928,6 +1928,7 @@ int main(int argc, char** argv) {
   int64_t nvme_cache_max_ops = 4;
   double nvme_cache_reserve_gib = 1.0;
   bool nvme_cache_persist = true;
+  std::string nvme_cache_reuse_binding;
   bool nvme_cache_allow_buffered = false;
   int64_t nvme_cache_op_timeout_s = 120;
   std::optional<float> temperature, top_p, min_p, repetition_penalty;
@@ -2077,6 +2078,7 @@ int main(int argc, char** argv) {
     nvme_cache_max_ops = c.nvme_cache.max_ops;
     nvme_cache_reserve_gib = c.nvme_cache.reserve_gib;
     nvme_cache_persist = c.nvme_cache.persist;
+    nvme_cache_reuse_binding = c.nvme_cache.reuse_binding;
     nvme_cache_allow_buffered = c.nvme_cache.allow_buffered;
     nvme_cache_op_timeout_s = c.nvme_cache.op_timeout_s;
     admission_mode = e.admission;
@@ -2484,7 +2486,8 @@ int main(int argc, char** argv) {
         nvme_cache ? std::format("{}:{}:{}:{}:{}:{}:{}", nvme_cache_gib, nvme_cache_min_tokens, nvme_cache_chunk_mib,
                                  nvme_cache_max_ops, nvme_cache_reserve_gib, nvme_cache_persist ? 1 : 0,
                                  nvme_cache_op_timeout_s)
-                   : std::string("off"));
+                   : std::string("off")) +
+        (nvme_cache_reuse_binding.empty() ? std::string() : " nvme_reuse=" + nvme_cache_reuse_binding);
   };
   // Dory1.0-4B is a one-rank family (the reference refuses
   // tensor_parallel_size != 1; docs/dory_plan.md §2): refuse a world > 1
@@ -2633,6 +2636,7 @@ int main(int argc, char** argv) {
         ws.nvme_cache_max_ops = nvme_cache_max_ops;
         ws.nvme_cache_reserve_gib = nvme_cache_reserve_gib;
         ws.nvme_cache_persist = nvme_cache_persist;
+        ws.nvme_cache_reuse_binding = nvme_cache_reuse_binding;
         ws.nvme_cache_op_timeout_s = nvme_cache_op_timeout_s;
         journal->broadcast(dgpp::serve::encode_journal_settings(ws));
         DGPP_LOG_INFO("journal: settings pushed to {} peer(s): {}", world - 1,
@@ -2748,6 +2752,7 @@ int main(int argc, char** argv) {
         stats_interval_s = ws.stats_interval_s;
         reasoning_in_content = ws.reasoning_in_content;
         nvme_cache = ws.nvme_cache;
+        nvme_cache_reuse_binding = ws.nvme_cache_reuse_binding;
         if (nvme_cache) {
           nvme_cache_gib = ws.nvme_cache_capacity_gib;
           nvme_cache_min_tokens = ws.nvme_cache_min_tokens;
@@ -3086,6 +3091,10 @@ int main(int argc, char** argv) {
   if (nvme_cache && !(nvme_cache_gib > 0.0)) {
     DGPP_LOG_ERROR("nvme_cache.capacity_gib must be positive when the NVMe cache is enabled (got {})",
                    nvme_cache_gib);
+    return 2;
+  }
+  if (!nvme_cache_reuse_binding.empty() && (!nvme_cache || !nvme_cache_persist)) {
+    DGPP_LOG_ERROR("nvme_cache.reuse_binding requires enabled and persist to be true");
     return 2;
   }
   if (nvme_cache && !(prefix_cache_gib > 0.0)) {
@@ -3522,19 +3531,23 @@ int main(int argc, char** argv) {
     // under another one never sees these entries.
     const std::string nvme_binding =
         nvme_cache && nvme_cache_persist
-            ? dgpp::serve::config_digest(
-                  std::string(DGPP_VERSION) + "|" + config_digest + "|" + ckpt + "|" +
-                  std::to_string(family->cache_block_bytes(world, mtp && graph_world)) + "|" +
-                  std::to_string(snapshot_bytes) + "|" + std::format("{:.17g}", nvme_cache_gib) + "|" +
-                  std::to_string(block_tokens) + "|" + std::to_string(world))
+            ? dgpp::serve::nvme_cache_binding(
+                  DGPP_VERSION, config_digest, ckpt, family->cache_block_bytes(world, mtp && graph_world),
+                  snapshot_bytes, nvme_cache_gib, block_tokens, world, nvme_cache_reuse_binding)
             : std::string();
     if (nvme_cache) {
       nvme_plan = dgpp::serve::plan_nvme_cache(nvme_cache_path, nvme_cache_gib, rank,
                                                family->cache_block_bytes(world, mtp && graph_world),
                                                snapshot_bytes, block_tokens, context_limit,
-                                               /*create_directory=*/!memory_plan_only,
+                                               /*create_directory=*/!memory_plan_only && nvme_cache_reuse_binding.empty(),
                                                static_cast<size_t>(nvme_cache_reserve_gib * 1024.0 * 1024.0 * 1024.0),
                                                nvme_binding, kNvmeChunkBytes);
+      if (nvme_plan.error.empty() && !nvme_cache_reuse_binding.empty()) {
+        nvme_plan.error = dgpp::serve::check_nvme_cache_reuse(nvme_plan, nvme_binding, rank, block_tokens);
+        if (nvme_plan.error.empty())
+          DGPP_LOG_INFO("rank {}: NVMe cache: explicitly reusing binding {}; build/settings identity overridden, "
+                        "format, geometry, checksums and world agreement still checked", rank, nvme_binding);
+      }
       DGPP_LOG_INFO("rank {}: {}", rank, nvme_plan.describe());
       if (!nvme_plan.error.empty()) {
         DGPP_LOG_ERROR("rank {}: the NVMe cache does not fit — {}", rank, nvme_plan.error);
@@ -3563,6 +3576,7 @@ int main(int argc, char** argv) {
       en.rank = rank;
       en.persist = nvme_cache_persist;
       en.binding = nvme_binding;
+      en.require_existing = !nvme_cache_reuse_binding.empty();
       en.allow_buffered = nvme_cache_allow_buffered;
       en.op_timeout_s = static_cast<int>(nvme_cache_op_timeout_s);
       eng->disk_enable(en);
@@ -3827,7 +3841,9 @@ int main(int argc, char** argv) {
                   }
                 DGPP_LOG_INFO("rank 0: NVMe cache: {}",
                               adopt ? "every rank holds the same previous index; the world adopts it"
-                                    : "no previous index every rank holds; the slabs start fresh");
+                                    : (nvme_cache_reuse_binding.empty()
+                                           ? "no previous index every rank holds; the slabs start fresh"
+                                           : "no previous index every rank holds; explicit reuse refused"));
                 eng->disk_adopt(adopt);
               }
               journal->broadcast(dgpp::serve::encode_journal_warm(
