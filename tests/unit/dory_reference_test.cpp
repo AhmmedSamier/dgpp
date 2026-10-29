@@ -11,6 +11,7 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "models/dory/reference.hpp"
+#include "../dory_slerp_golden.hpp"
 
 namespace {
 
@@ -138,6 +139,22 @@ DGPP_TEST(dory_slerp_alpha_uses_the_absolute_learned_scale) {
   dgpp::dory_ref::slerp_alpha(a.data(), b.data(), neg.data(), 0.5f, yn.data(), 1, 4);
   for (int i = 0; i < 4; ++i) require(yp[static_cast<size_t>(i)] == yn[static_cast<size_t>(i)], "|alpha|");
   require_near(sum_sq(yp), 1.0, 1.5e-2, "unit norm");
+}
+
+DGPP_TEST(dory_slerp_preserves_fp32_interpolation_until_normalized) {
+  namespace g = dory_slerp_golden;
+  const auto a = bf16_row({g::a.begin(), g::a.end()});
+  const auto b = bf16_row({g::b.begin(), g::b.end()});
+  const auto alpha = bf16_row(std::vector<float>(g::a.size(), g::alpha));
+  const auto expected = bf16_row({g::output.begin(), g::output.end()});
+  std::vector<uint16_t> got(a.size());
+  dgpp::dory_ref::slerp_alpha(a.data(), b.data(), alpha.data(), g::scale,
+                            got.data(), 1, static_cast<int64_t>(a.size()));
+  require(got == expected, "the residual matches the upstream FP32 interpolation golden");
+  const float lr[] = {dgpp::bf16_bits_to_float(alpha[0]) * g::scale};
+  dgpp::dory_ref::slerp_norm_rows(a.data(), b.data(), lr, got.data(), 1,
+                                static_cast<int64_t>(a.size()));
+  require(got == expected, "the row form preserves the same rounding boundaries");
 }
 
 DGPP_TEST(dory_slerp_norm_cols_matches_the_row_form) {

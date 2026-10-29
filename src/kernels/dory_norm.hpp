@@ -10,9 +10,9 @@
 //   slerp_alpha(a, b, α, s) = justnorm( bf16(a·ra) + lr · (bf16(b·rb) − bf16(a·ra)) )
 //
 // with ra, rb the two input rows' rstds and lr = |fp32(α) · s| per column
-// (α is the layer's `attn_alpha` / `mlp_alpha`, broadcast along rows). There
-// are two roundings: the combine is rounded back to bf16 before the output
-// row's own normalization, exactly as the reference stores it (`cast_back`).
+// (α is the layer's `attn_alpha` / `mlp_alpha`, broadcast along rows). The
+// operands normalize to bf16, but the interpolation and its output
+// normalization stay fp32 until the final conversion back to bf16.
 //
 // The row sum is accumulated in fp64 (the add_rmsnorm trick): every bf16
 // square is exact in fp64, so the sum is the exact one and `float(sum) + eps`

@@ -191,7 +191,8 @@ __global__ void __launch_bounds__(kThreads)
   const int tail = (dim - nvec * kThreads * kVecElems) / kVecElems;
 
   // Pass 1: both input rows held in registers, their two sums in one trip.
-  uint4 va[kMaxVecs], vb[kMaxVecs], vy[kMaxVecs];
+  uint4 va[kMaxVecs], vb[kMaxVecs];
+  float mixed[kMaxVecs][kVecElems];
   double sa[4] = {0.0, 0.0, 0.0, 0.0}, sb[4] = {0.0, 0.0, 0.0, 0.0};
 #pragma unroll
   for (int i = 0; i < kMaxVecs; ++i) {
@@ -216,8 +217,8 @@ __global__ void __launch_bounds__(kThreads)
   const float rstd_a = s_rstd_a, rstd_b = s_rstd_b;
 
   // Pass 2: the two normalized rows, the per-column slerp, and the output
-  // row's own sum over the ROUNDED combine (the reference stores it before
-  // re-normalizing).
+  // row's sum over the FP32 combine. The reference normalizes that float
+  // tensor before converting its output back to bf16.
   double sy[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 #pragma unroll
   for (int i = 0; i < kMaxVecs; ++i) {
@@ -227,7 +228,6 @@ __global__ void __launch_bounds__(kThreads)
     const uint32_t* ap = reinterpret_cast<const uint32_t*>(&va[i]);
     const uint32_t* bp = reinterpret_cast<const uint32_t*>(&vb[i]);
     const uint32_t* pp = reinterpret_cast<const uint32_t*>(alpha + e0);
-    uint32_t yp[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const float lr_lo = fabsf(lo_bf16(pp[j]) * scale);
@@ -238,13 +238,13 @@ __global__ void __launch_bounds__(kThreads)
       const uint16_t nb_hi = float_to_bf16_bits(hi_bf16(bp[j]) * rstd_b);
       const float na0 = bf16_bits_to_float(na_lo), nb0 = bf16_bits_to_float(nb_lo);
       const float na1 = bf16_bits_to_float(na_hi), nb1 = bf16_bits_to_float(nb_hi);
-      yp[j] = pack_bf16(float_to_bf16_bits(na0 + lr_lo * (nb0 - na0)),
-                        float_to_bf16_bits(na1 + lr_hi * (nb1 - na1)));
-      const float f0 = lo_bf16(yp[j]), f1 = hi_bf16(yp[j]);
+      const float f0 = na0 + lr_lo * (nb0 - na0);
+      const float f1 = na1 + lr_hi * (nb1 - na1);
+      mixed[i][2 * j] = f0;
+      mixed[i][2 * j + 1] = f1;
       sy[2 * j] = fma(static_cast<double>(f0), static_cast<double>(f0), sy[2 * j]);
       sy[2 * j + 1] = fma(static_cast<double>(f1), static_cast<double>(f1), sy[2 * j + 1]);
     }
-    vy[i] = make_uint4(yp[0], yp[1], yp[2], yp[3]);
   }
 
   const double ss = ((sy[0] + sy[1]) + (sy[2] + sy[3])) + ((sy[4] + sy[5]) + (sy[6] + sy[7]));
@@ -256,12 +256,11 @@ __global__ void __launch_bounds__(kThreads)
     const bool live = i < nvec || (i == nvec && tid < tail);
     if (!live) continue;
     const int e0 = (i * kThreads + tid) * kVecElems;
-    const uint32_t* yp = reinterpret_cast<const uint32_t*>(&vy[i]);
     uint32_t zp[4];
 #pragma unroll
     for (int j = 0; j < 4; ++j)
-      zp[j] = pack_bf16(float_to_bf16_bits(lo_bf16(yp[j]) * rstd_y),
-                        float_to_bf16_bits(hi_bf16(yp[j]) * rstd_y));
+      zp[j] = pack_bf16(float_to_bf16_bits(mixed[i][2 * j] * rstd_y),
+                        float_to_bf16_bits(mixed[i][2 * j + 1] * rstd_y));
     *reinterpret_cast<uint4*>(y + row + e0) = make_uint4(zp[0], zp[1], zp[2], zp[3]);
   }
 }

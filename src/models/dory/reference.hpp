@@ -37,6 +37,8 @@ void justnorm(const uint16_t* x, uint16_t* y, int64_t rows, int64_t dim,
 void add_justnorm(const uint16_t* a, const uint16_t* b, uint16_t* y, int64_t rows, int64_t dim,
                   float eps = kDoryJustnormEps);
 
+// The operands normalize to bf16, then the interpolation and its final
+// normalization stay fp32 until the output conversion to bf16.
 // y = justnorm(justnorm(a) + lr * (justnorm(b) - justnorm(a))) with one fp32
 // `lr` per row (the residual scales are per-channel, broadcast along rows).
 void slerp_norm_rows(const uint16_t* a, const uint16_t* b, const float* lr, uint16_t* y,

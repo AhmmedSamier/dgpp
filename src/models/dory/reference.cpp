@@ -52,6 +52,7 @@ void add_justnorm(const uint16_t* a, const uint16_t* b, uint16_t* y, int64_t row
 void slerp_norm_rows(const uint16_t* a, const uint16_t* b, const float* lr, uint16_t* y,
                      int64_t rows, int64_t dim, float eps) {
   std::vector<uint16_t> na(static_cast<size_t>(dim)), nb(static_cast<size_t>(dim));
+  std::vector<float> mixed(static_cast<size_t>(dim));
   for (int64_t r = 0; r < rows; ++r) {
     const uint16_t* ar = a + r * dim;
     const uint16_t* br = b + r * dim;
@@ -59,34 +60,39 @@ void slerp_norm_rows(const uint16_t* a, const uint16_t* b, const float* lr, uint
     const float s = lr[r];
     justnorm_row(ar, na.data(), dim, eps);
     justnorm_row(br, nb.data(), dim, eps);
+    float ss = 0.0f;
     for (int64_t i = 0; i < dim; ++i) {
       const float x = bf16_bits_to_float(na[static_cast<size_t>(i)]);
       const float d = bf16_bits_to_float(nb[static_cast<size_t>(i)]) - x;
-      yr[i] = float_to_bf16_bits(x + s * d);
+      mixed[static_cast<size_t>(i)] = x + s * d;
+      ss = std::fma(mixed[static_cast<size_t>(i)], mixed[static_cast<size_t>(i)], ss);
     }
-    const float rstd = row_rstd(yr, dim, eps);
+    const float rstd = 1.0f / std::sqrt(ss + eps);
     for (int64_t i = 0; i < dim; ++i)
-      yr[i] = float_to_bf16_bits(bf16_bits_to_float(yr[i]) * rstd);
+      yr[i] = float_to_bf16_bits(mixed[static_cast<size_t>(i)] * rstd);
   }
 }
 
 void slerp_norm_cols(const uint16_t* a, const uint16_t* b, const float* lr_col, uint16_t* y,
                      int64_t rows, int64_t dim, float eps) {
   std::vector<uint16_t> na(static_cast<size_t>(dim)), nb(static_cast<size_t>(dim));
+  std::vector<float> mixed(static_cast<size_t>(dim));
   for (int64_t r = 0; r < rows; ++r) {
     const uint16_t* ar = a + r * dim;
     const uint16_t* br = b + r * dim;
     uint16_t* yr = y + r * dim;
     justnorm_row(ar, na.data(), dim, eps);
     justnorm_row(br, nb.data(), dim, eps);
+    float ss = 0.0f;
     for (int64_t i = 0; i < dim; ++i) {
       const float x = bf16_bits_to_float(na[static_cast<size_t>(i)]);
       const float d = bf16_bits_to_float(nb[static_cast<size_t>(i)]) - x;
-      yr[i] = float_to_bf16_bits(x + lr_col[i] * d);
+      mixed[static_cast<size_t>(i)] = x + lr_col[i] * d;
+      ss = std::fma(mixed[static_cast<size_t>(i)], mixed[static_cast<size_t>(i)], ss);
     }
-    const float rstd = row_rstd(yr, dim, eps);
+    const float rstd = 1.0f / std::sqrt(ss + eps);
     for (int64_t i = 0; i < dim; ++i)
-      yr[i] = float_to_bf16_bits(bf16_bits_to_float(yr[i]) * rstd);
+      yr[i] = float_to_bf16_bits(mixed[static_cast<size_t>(i)] * rstd);
   }
 }
 

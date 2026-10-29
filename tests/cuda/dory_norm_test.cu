@@ -12,8 +12,8 @@
 //    sums of a model-sized row stay exact too, so the sum is the exact one and
 //    `float(sum) + eps` rounds once. An oracle that sums the same terms in
 //    fp64 therefore has the same rstd bit for bit, whatever order either
-//    uses, and pins the kernel's arithmetic — the two roundings of the slerp
-//    combine included — exactly.
+//    uses, and pins the kernel's arithmetic — the fp32 slerp
+//    combine and final bf16 conversion included — exactly.
 // 2. Against the transcription — the reference's own sequential fp32 fma
 //    chain, whose sum differs from the exact one by ~sqrt(dim)·2^-24 relative
 //    (2048 additions of rounding noise), so the kernel's outputs drift from
@@ -43,6 +43,7 @@
 #include "kda_test_helpers.hpp"
 #include "kernels/dory_norm.hpp"
 #include "models/dory/reference.hpp"
+#include "../dory_slerp_golden.hpp"
 
 using namespace dgpp::kda_test;
 
@@ -147,21 +148,25 @@ void justnorm(const uint16_t* x, uint16_t* y, int rows, int dim, float eps) {
 void slerp_alpha(const uint16_t* a, const uint16_t* b, const uint16_t* alpha, float scale, uint16_t* y,
                  int rows, int dim, float eps) {
   std::vector<uint16_t> na(static_cast<size_t>(dim)), nb(static_cast<size_t>(dim));
+  std::vector<float> mixed(static_cast<size_t>(dim));
   for (int r = 0; r < rows; ++r) {
     const uint16_t* ar = a + static_cast<size_t>(r) * dim;
     const uint16_t* br = b + static_cast<size_t>(r) * dim;
     uint16_t* yr = y + static_cast<size_t>(r) * dim;
     justnorm(ar, na.data(), 1, dim, eps);
     justnorm(br, nb.data(), 1, dim, eps);
+    double ss = 0.0;
     for (int i = 0; i < dim; ++i) {
       const float x = dgpp::bf16_bits_to_float(na[static_cast<size_t>(i)]);
       const float lr = std::fabs(dgpp::bf16_bits_to_float(alpha[i]) * scale);
       const float d = dgpp::bf16_bits_to_float(nb[static_cast<size_t>(i)]) - x;
-      yr[i] = dgpp::float_to_bf16_bits(x + lr * d);
+      mixed[static_cast<size_t>(i)] = x + lr * d;
+      const double v = mixed[static_cast<size_t>(i)];
+      ss = std::fma(v, v, ss);
     }
-    const float rd = rstd(yr, dim, eps);
+    const float rd = 1.0f / std::sqrt(static_cast<float>(ss) + eps);
     for (int i = 0; i < dim; ++i)
-      yr[i] = dgpp::float_to_bf16_bits(dgpp::bf16_bits_to_float(yr[i]) * rd);
+      yr[i] = dgpp::float_to_bf16_bits(mixed[static_cast<size_t>(i)] * rd);
   }
 }
 
@@ -345,6 +350,26 @@ DGPP_TEST(dory_norm_slerp_alpha_matches_the_reference) {
   // exact-oracle check still holds bitwise there.
   for (int dim : {256, 4096})
     for (float scale : {10.0f, 100.0f}) slerp_case(48, dim, scale, 3.0f, rng);
+}
+
+DGPP_TEST(dory_norm_slerp_matches_upstream_golden) {
+  namespace g = dory_slerp_golden;
+  std::vector<uint16_t> a(g::a.size()), b(a.size()), alpha(a.size()), expected(a.size());
+  for (size_t i = 0; i < a.size(); ++i) {
+    a[i] = dgpp::float_to_bf16_bits(g::a[i]);
+    b[i] = dgpp::float_to_bf16_bits(g::b[i]);
+    alpha[i] = dgpp::float_to_bf16_bits(g::alpha);
+    expected[i] = dgpp::float_to_bf16_bits(g::output[i]);
+  }
+  DevBuf d_a = up(a), d_b = up(b), d_alpha = up(alpha), d_y(a.size() * 2);
+  dgpp::dory_slerp_alpha_bf16(static_cast<const uint16_t*>(d_a.p),
+                            static_cast<const uint16_t*>(d_b.p),
+                            static_cast<const uint16_t*>(d_alpha.p), g::scale,
+                            static_cast<uint16_t*>(d_y.p), 1, static_cast<int>(a.size()),
+                            dgpp::kDoryJustnormEps, nullptr);
+  DGPP_CUDA_OK(cudaStreamSynchronize(nullptr));
+  require(down<uint16_t>(d_y, a.size()) == expected,
+          "the device residual matches the upstream FP32 interpolation golden");
 }
 
 DGPP_TEST(dory_norm_gate_justnorm_matches_the_reference) {
