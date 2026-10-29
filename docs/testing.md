@@ -223,6 +223,28 @@ false or true, multiple choices exceeding available slots, single-token
 completions and speculative batches. It also checks that existing usage, JSON
 metrics and Prometheus token counters keep their definitions.
 
+The NVMe cold tier is covered by `unit_tests` (the disk index: page
+allocation, block sharing, retention with pins and the pin cap, the index's
+round trip, pruning and adoption with content digests, and mutated index
+bytes), `scheduler_test` (the cold-tier cases: spill, evict, restore and
+attach, failed restores and spills, retention, two requests on one restore,
+a cancel while restoring, the adopted index, and two replicas fed random
+streams whose op streams and digests must stay identical),
+`fabric_serve_test` (the journal's return path, the commit collector, the
+settings and warm records, and the flow across three ranks over real
+sockets), `qwen_decode_test`'s tier block (spill and restore bitwise on the
+fixture, attach parity, a corrupted page detected, the slab across a
+restart and across a crash with content-bound adoption, the lock, damaged
+files, the op timeout and injected I/O failures), `nvme_tier_families_test`
+(spill, restore, attach and step bitwise on the MiMo, Flint and Qwen3.5
+tiny checkpoints) and `dflash2_integration_test`'s `prefix_tier` cases (a
+drafter world's entry spilled and restored with its draft K/V context
+intact on both Qwen families). On a booted world,
+`scripts/serve_nvme_cache_check.py` drives the whole flow and
+`scripts/serve_nvme_cache_fuzz.py` drives random workloads with pins,
+opt-outs, concurrent clients, mid-flight cancels, clean restarts and rank
+crashes, checking every repeated answer against its first.
+
 Release and testing builds use separate CMake presets and directories:
 
 | Preset | Directory | Purpose |

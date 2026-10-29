@@ -16,6 +16,13 @@ except ModuleNotFoundError as error:
     print("SKIP: chat-template generator tests require Jinja2 from requirements-tools.txt")
     raise SystemExit(2)
 
+if tuple(int(x) for x in jinja2.__version__.split(".")[:3]) < (3, 1, 6):
+    # The sandbox's mutable-method list grew with 3.1.6 (list.clear among
+    # them), and requirements-tools.txt pins that floor; an older system
+    # Jinja2 would fail the mutation case for the wrong reason.
+    print("SKIP: chat-template generator tests need Jinja2 >= 3.1.6 from requirements-tools.txt, found "
+          + jinja2.__version__)
+    sys.exit(2)
 from jinja2.sandbox import SecurityError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))

@@ -834,3 +834,71 @@ DGPP_TEST(cluster_config_prefill_dense_defaults_to_family_policy) {
   const auto b = dgpp::serve::parse_cluster_config(engine_json(R"({"prefill_dense":"auto"})"), "test");
   require(b.engine.prefill_dense == "auto", "explicit automatic policy is accepted");
 }
+
+DGPP_TEST(cluster_config_parses_nvme_cache) {
+  // Absent: off, the default path, no capacity.
+  const dgpp::serve::ClusterConfig off =
+      dgpp::serve::parse_cluster_config(engine_json("{\"kv_capacity\":8192}"), "t");
+  require(!off.nvme_cache.enabled && off.nvme_cache.capacity_gib == 0.0 &&
+              off.nvme_cache.path == "~/dgpp/nvme-cache" && off.nvme_cache.min_tokens == 0,
+          "off by default");
+  // The top-level block: on, a path, a capacity, a minimum.
+  const dgpp::serve::ClusterConfig on = dgpp::serve::parse_cluster_config(
+      "{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"enabled\":true,\"path\":\"/nvme/dgpp\","
+      "\"capacity_gib\":64,\"min_tokens\":2048}}",
+      "t");
+  require(on.nvme_cache.enabled && on.nvme_cache.path == "/nvme/dgpp" && on.nvme_cache.capacity_gib == 64.0 &&
+              on.nvme_cache.min_tokens == 2048,
+          "every field parses");
+  require(on.nvme_cache.chunk_mib == 64 && on.nvme_cache.max_ops == 4 && on.nvme_cache.reserve_gib == 1.0,
+          "the pacing, op bound and reserve default");
+  const dgpp::serve::ClusterConfig tuned = dgpp::serve::parse_cluster_config(
+      "{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"enabled\":true,\"capacity_gib\":8,"
+      "\"chunk_mib\":32,\"max_ops\":2,\"reserve_gib\":2.5}}",
+      "t");
+  require(tuned.nvme_cache.chunk_mib == 32 && tuned.nvme_cache.max_ops == 2 && tuned.nvme_cache.reserve_gib == 2.5,
+          "the pacing, op bound and reserve parse");
+  require(tuned.nvme_cache.persist && !dgpp::serve::parse_cluster_config(
+                                           "{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"persist\":false}}", "t")
+                                           .nvme_cache.persist,
+          "persist defaults on and parses off");
+  require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"persist\":1}}").find("nvme_cache.persist") !=
+              std::string::npos,
+          "a non-boolean persist is refused by name");
+  require(!tuned.nvme_cache.allow_buffered && tuned.nvme_cache.op_timeout_s == 120,
+          "buffered I/O refused and a two-minute op bound by default");
+  const dgpp::serve::ClusterConfig bounded = dgpp::serve::parse_cluster_config(
+      "{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"allow_buffered\":true,\"op_timeout_s\":30}}", "t");
+  require(bounded.nvme_cache.allow_buffered && bounded.nvme_cache.op_timeout_s == 30,
+          "allow_buffered and op_timeout_s parse");
+  for (const char* bad : {"\"allow_buffered\":1", "\"op_timeout_s\":-1", "\"op_timeout_s\":90000", "\"op_timeout_s\":1.5"})
+    require(refusal(std::string("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{") + bad + "}}")
+                    .find("nvme_cache.") != std::string::npos,
+            std::string("refused by name: ") + bad);
+  require(dgpp::serve::parse_cluster_config(engine_json("{\"prefix_pin_max_pct\":25}"), "t").engine.prefix_pin_max_pct == 25 &&
+              off.engine.prefix_pin_max_pct == 50,
+          "the pin cap parses and defaults to half");
+  require(refusal(engine_json("{\"prefix_pin_max_pct\":101}")).find("prefix_pin_max_pct") != std::string::npos,
+          "a cap past 100 is refused by name");
+  for (const char* bad : {"\"chunk_mib\":2", "\"chunk_mib\":8192", "\"chunk_mib\":1.5", "\"max_ops\":0",
+                          "\"max_ops\":257", "\"reserve_gib\":-1", "\"reserve_gib\":true"})
+    require(refusal(std::string("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{") + bad + "}}")
+                    .find("nvme_cache.") != std::string::npos,
+            std::string("refused by name: ") + bad);
+  // Refusals, by name.
+  require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"enabled\":true}}")
+                  .find("capacity_gib") != std::string::npos,
+          "enabled without a capacity is refused");
+  require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"capacity_gib\":-1}}")
+                  .find("capacity_gib") != std::string::npos,
+          "a negative capacity is refused");
+  require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"enabled\":1}}")
+                  .find("nvme_cache.enabled") != std::string::npos,
+          "a non-boolean flag is refused");
+  require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"size\":3}}")
+                  .find("unknown key 'nvme_cache.size'") != std::string::npos,
+          "unknown keys are refused");
+  require(refusal("{\"model\":\"m\",\"nodes\":[\"h\"],\"nvme_cache\":{\"path\":\"\"}}")
+                  .find("nvme_cache.path") != std::string::npos,
+          "an empty path is refused");
+}

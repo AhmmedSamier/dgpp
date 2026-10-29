@@ -366,6 +366,10 @@ struct ClusterConfig {
     double prefix_cache_gib = 1.5;
     int prefix_min_tokens = 1024;       // no prefix snapshot below this position (0: every cut)
     bool prefix_head_snapshots = true;  // a cold prompt also keeps its first structural cut (the system prompt's end)
+    // prompt_cache_key pins protect their entries while the pinned entries
+    // hold at most this share of the arena's slots and the NVMe slab's
+    // pages; past it a pin protects nothing (100: always).
+    int prefix_pin_max_pct = 50;
     std::string admission = "full";
     int admission_window = 256;
     int prefill_budget_tokens = -1;  // automatic: 256 tokens, adjusted to engine geometry
@@ -383,6 +387,38 @@ struct ClusterConfig {
     double stats_interval_s = 10.0;
     bool reasoning_in_content = false;
   } engine;
+  // The NVMe cold tier for the prefix cache (issue #26): a preallocated
+  // slab per rank under `path`, sized to `capacity_gib`, that evicted
+  // entries spill to and later requests restore from. Top-level, so a
+  // deployment turns the tier on with one value; `enabled` requires a
+  // positive capacity. Startup checks the path, the free space and the
+  // minimum size before anything is allocated. `min_tokens` (0: one
+  // prefill chunk) is the shortest entry worth keeping cold.
+  struct NvmeCache {
+    bool enabled = false;
+    std::string path = "~/dgpp/nvme-cache";
+    double capacity_gib = 0.0;
+    int64_t min_tokens = 0;
+    // One staging slice in MiB: two slices of device work move per tick, so
+    // the chunk paces spills and restores against the decode step and
+    // sizes the staging (4 x chunk + 8 MiB) in the memory plan.
+    int64_t chunk_mib = 64;
+    // Spills and restores started but not yet committed by the world: a
+    // started entry is busy (never evicted) until its commit.
+    int64_t max_ops = 4;
+    // Free space the pre-flight leaves on the slab's filesystem, in GiB.
+    double reserve_gib = 1.0;
+    // The slab outlives the process: a start with the same checkpoint,
+    // settings and slab geometry adopts its entries (when every rank holds
+    // the same index). False recreates the slab at every start.
+    bool persist = true;
+    // A filesystem that refuses direct I/O (tmpfs) is refused unless this
+    // allows buffered I/O: the page cache would grow into the model's memory.
+    bool allow_buffered = false;
+    // An op without progress for this long fails, so a request waiting on
+    // its restore admits cold instead of never (0: never).
+    int64_t op_timeout_s = 120;
+  } nvme_cache;
   struct Paths {
     std::string log_dir = "~/dgpp/log";
     std::string stage_dir = "/tmp/bus4";     // where the launcher puts the peers' binary and config

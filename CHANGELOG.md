@@ -3,7 +3,32 @@
 The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
-## Unreleased
+## v0.1.0 — 2026-10-28, the first published release (0.1.0+g11fe1807d63d)
+- **The README and the repository scaffolding** (2026-10-28): the README
+  restructured around what the engine is (Why DGPP, a headline table sourced
+  from `docs/benchmarks.md`, the architecture diagram, capability columns in
+  the model table, a first-deployment guide, the API section, credits);
+  GitHub Actions for the Python host suites, the documentation gate
+  (`scripts/docs_check.py`: relative links, heading anchors, the README's
+  punctuation rule) and the GB10 cross-build; issue forms, a pull request
+  template and `SECURITY.md`; Discussions and private vulnerability
+  reporting switched on for the repository.
+- **NVMe cold tier for the prefix cache** (2026-10-28, issue #26, PR #53): a
+  top-level `nvme_cache` deployment block keeps the prefix entries memory
+  evicts in a preallocated slab per rank on local NVMe and restores an entry
+  before a later matching request prefills its suffix. Entries persist
+  across restarts under a binding of the binary, checkpoint, settings and
+  slab geometry, with adoption bound to each entry's page checksums and
+  agreed by every rank. `prompt_cache_key` pins the entries a request
+  creates or attaches to, within `engine.prefix_pin_max_pct` of the cache.
+  Spills and restores are scheduler decisions journaled across the world,
+  so a failure on any rank is the same cold miss everywhere. Keys:
+  `enabled`, `path`, `capacity_gib`, `min_tokens`, `chunk_mib`, `max_ops`,
+  `reserve_gib`, `persist`, `allow_buffered`, `op_timeout_s`. On four
+  Sparks with GLM-5.3-Flash a 25K-token document comes back from disk in
+  about 120 ms of restore against 15 s of cold prefill, bitwise the
+  in-memory hit. See [the cold tier](docs/nvme-cache.md) and the
+  [configuration reference](docs/configuration.md#nvme-cache).
 - **DFlash2 integration fixes** (2026-10-25): the shared drafter follows
   the active eager/capture reducer, copies complete draft KV blocks during
   prefix reuse, and arms sampled proposal distributions on Flash-Next.

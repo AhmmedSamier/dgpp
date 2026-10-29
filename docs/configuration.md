@@ -18,6 +18,7 @@ Restart the deployment after changing either file.
 | Accept larger file uploads or keep them across restarts | [File inputs](#file-inputs) |
 | Serve longer prompts or more simultaneous requests | [Request capacity and memory](#request-capacity-and-memory) |
 | Reuse work from earlier prompts | [Prefix caching](#prefix-caching) |
+| Keep evicted prefix entries on local NVMe | [NVMe cache](#nvme-cache) |
 | Balance prompt processing against smooth streaming | [Prefill scheduling](#prefill-scheduling) |
 | Change model storage, precision or generation speed | [Execution and performance](#execution-and-performance) |
 | Extend a supported Qwen model's context limit | [Extended context](#extended-context) |
@@ -223,9 +224,42 @@ Its memory budget is separate from the KV token pool.
 | `engine.prefix_cache_gib` | Memory budget per rank for saved prompt state. A larger cache can retain more reusable prefixes but leaves less memory for other uses. `0` disables it. A chat turn costs about two entries, an agent call about three, and eviction is LRU without time expiry, so an idle agent session survives about slots ÷ 3 other calls. See [cache sizing](prefix-cache.md). | 1.5 GiB |
 | `engine.prefix_min_tokens` | Earliest prompt position at which any snapshot may be saved. Higher values keep short probes and requests from replacing longer cached conversations. Shorter prompts can still reuse matching entries. `0` allows snapshots at every supported cut. | 1024 tokens |
 | `engine.prefix_head_snapshots` | Save an extra snapshot at the first structural prompt boundary, such as the end of the system prompt. This can help a new conversation or a client that shortened its history reuse that prefix. Uses another cache entry and obeys `prefix_min_tokens`. Disabled on DeepSeek's bounded prefill path, which cannot take extra cuts. | true |
+| `engine.prefix_pin_max_pct` | How much of the cache `prompt_cache_key` pins may protect, as a percentage of the arena's slots and of the NVMe slab's pages. While the pinned entries stay within it, unpinned entries are evicted first. Past it a pin protects nothing and plain least-recently-used order applies, so one client cannot pin the whole cache against everyone else. `100` lets pins always protect and `0` ignores pins. Every rank runs rank 0's value. | 50 |
 
 See [prefix caching](prefix-cache.md#the-entry-floor-and-the-head-cut) for how
 snapshot positions and reuse work.
+
+### NVMe cache
+
+The `nvme_cache` block is a top-level deployment key beside `engine`. It keeps
+the prefix-cache entries memory evicts, the snapshot and the KV blocks it
+pins, in one preallocated slab file per rank on local NVMe, and restores an
+entry before a later matching request prefills its suffix. Startup checks the
+directory, the free space and the minimum size on every rank and refuses to
+boot when they do not fit, and `dgpp-serve --memory-plan` runs the same check.
+[The cold tier](nvme-cache.md) describes what is stored, how entries move and
+how retention works.
+
+```json
+"nvme_cache": {
+  "enabled": true,
+  "path": "~/dgpp/nvme-cache",
+  "capacity_gib": 64
+}
+```
+
+| Key | What it controls and what to expect | Default |
+|---|---|---|
+| `nvme_cache.enabled` | Turns the cold tier on. Requires `engine.prefix_cache_gib` above 0 (the tier holds what the arena evicts) and a positive `capacity_gib`. Rank 0's value is applied on every rank. | false |
+| `nvme_cache.path` | Directory for the slab files, created at startup if missing. Choose one on every node's local NVMe. Each rank keeps `<path>/<binding>/rank<N>.slab` on its own node, where the binding names the binary, the checkpoint, the deployment's effective settings and the slab geometry, with the index and the page checksums beside it. Another model or configuration served from the same node gets its own binding directory. Startup names other bindings' slabs left in the directory and their size. Remove them to reclaim the disk. | `~/dgpp/nvme-cache` |
+| `nvme_cache.capacity_gib` | Size of each rank's slab in GiB. Retention evicts the least recently used entries so the slab never grows past it. Must hold at least one entry at the request context limit plus its snapshot (startup names the number) and must fit the filesystem's free space beside a 1 GiB reserve. Every rank runs rank 0's value. | 0 |
+| `nvme_cache.min_tokens` | The shortest entry worth keeping cold, in prompt tokens. Shorter entries stay memory-only. `0` keeps every entry memory keeps, which `engine.prefix_min_tokens` already floors. | 0 |
+| `nvme_cache.chunk_mib` | One staging slice in MiB, from 4 to 4096. Two slices of device work move per scheduler tick, so this paces a spill or restore against the decode step (128 MiB per tick at the default) and sizes the staging buffers in the memory plan (4 × chunk + 8 MiB). A slice must hold one cache block. Every rank runs rank 0's value. | 64 |
+| `nvme_cache.max_ops` | Spills and restores started but not yet committed by the world, from 1 to 256. A started entry is busy, never evicted, until its commit, so a higher bound protects more freshly taken entries on a slow device at the cost of slots the arena cannot reclaim meanwhile. Every rank runs rank 0's value. | 4 |
+| `nvme_cache.reserve_gib` | Free space the pre-flight leaves on the slab's filesystem, in GiB. Startup refuses a capacity that would cut into it. | 1 |
+| `nvme_cache.persist` | Keep the slab across restarts. A start under the same binding (the same binary, checkpoint, effective settings and slab geometry) adopts the previous run's entries when every rank holds the same index, so switching models and back finds the earlier model's entries, while a release upgrade starts fresh. Under another binding, and with `false`, the slab starts fresh. Each entry is bound to the checksums of its pages when it was written: an entry whose pages a later run reused before a crash, or whose token ids are unreadable, is dropped at startup rather than restored. Entries with image inputs and spills in flight at shutdown are not kept. | true |
+| `nvme_cache.allow_buffered` | Allow the slab on a filesystem that refuses direct I/O (tmpfs, some network filesystems). Off, startup refuses such a path, because buffered writes grow the page cache into memory the model plans on. For tests and experiments only. | false |
+| `nvme_cache.op_timeout_s` | Give up on a spill or restore that makes no progress for this many seconds (a stuck device or filesystem): the op fails, a request waiting on the restore prefills cold, and the staging buffer the stuck call holds returns when the call does. `0` waits forever. The stall is logged at 30 s and every minute regardless. Every rank runs rank 0's value. | 120 |
 
 ## Prefill scheduling
 

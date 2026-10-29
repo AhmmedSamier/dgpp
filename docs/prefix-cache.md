@@ -4,8 +4,8 @@
 `engine.kv_capacity` sizes the separate KV token pool. Increasing the snapshot
 budget helps only when snapshot slots are the limiting resource. Cached
 documents and live requests still need room in the KV pool.
-Evicted entries are not spilled to disk; NVMe-backed retention is tracked
-separately in [enhancement #26](https://github.com/HawkBearPig/dgpp/issues/26).
+Entries evicted from memory are lost unless the
+[NVMe cold tier](nvme-cache.md) is enabled.
 
 ## Changed questions after a long document
 
@@ -184,3 +184,13 @@ Resolve the site configuration before running a recipe's plan:
 python3 scripts/dgpp-cluster resolve --config deploy/cluster_qwen-3.8-flash-next_nvfp4_w2_yarn512k.example.json > /tmp/qwen-resolved.json
 build-release/dgpp-serve --config /tmp/qwen-resolved.json --rank 0 --memory-plan
 ```
+
+## The NVMe cold tier
+
+With `nvme_cache` enabled, the entries the arena evicts are kept on each
+node's local NVMe and restored for a later matching request, so the arena's
+slot count bounds what is hot, not what is remembered. A restored prefix
+still needs room in the KV pool. [The cold tier](nvme-cache.md) describes
+what is kept, how entries move, persistence across restarts, pins and the
+bounds, and the [configuration reference](configuration.md#nvme-cache)
+lists the keys.

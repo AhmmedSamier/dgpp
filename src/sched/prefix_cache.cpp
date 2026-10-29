@@ -192,20 +192,36 @@ void PrefixCache::give_back_slot(int slot) {
   free_.insert(it, slot);
 }
 
-int PrefixCache::evict_lru() {
+int PrefixCache::evict_lru(int* disk) {
+  // The least recently used unpinned entry; a pinned one only when every
+  // candidate is pinned — or when the pinned entries hold more slots than
+  // the cap allows, where a pin protects nothing.
+  int pinned_slots = 0;
+  for (const Entry& e : entries_) pinned_slots += e.live && !e.key.empty() ? 1 : 0;
+  const bool protect = cfg_.pin_max_pct >= 100 ||
+                       (cfg_.pin_max_pct > 0 && pinned_slots * 100 <= cfg_.pin_max_pct * cfg_.slots);
   int victim = -1;
   for (size_t i = 0; i < entries_.size(); ++i) {
     const Entry& e = entries_[i];
-    if (!e.live || e.attached > 0) continue;
-    if (victim < 0 ||
-        e.last_use < entries_[static_cast<size_t>(victim)].last_use)
+    if (!e.live || e.attached > 0 || e.busy) continue;
+    if (victim < 0) {
+      victim = static_cast<int>(i);
+      continue;
+    }
+    const Entry& v = entries_[static_cast<size_t>(victim)];
+    const bool pinned = protect && !e.key.empty(), victim_pinned = protect && !v.key.empty();
+    if ((victim_pinned && !pinned) || (pinned == victim_pinned && e.last_use < v.last_use))
       victim = static_cast<int>(i);
   }
+  if (disk != nullptr) *disk = -1;
   if (victim < 0) return -1;
   Entry& e = entries_[static_cast<size_t>(victim)];
   const int slot = e.slot;
+  if (disk != nullptr) *disk = e.disk;
+  e.disk = -1;
   e.live = false;
   e.slot = -1;
+  e.key.clear();
   e.ids.clear();
   e.ids.shrink_to_fit();
   Images().swap(e.images);
@@ -232,7 +248,7 @@ int PrefixCache::acquire_slot() {
 }
 
 int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t now,
-                        const Images& images, int64_t next_token) {
+                        const Images& images, int64_t next_token, const std::string& key) {
   if (position <= 0) throw std::invalid_argument("PrefixCache: empty entry");
   if (slot < 0 || slot >= cfg_.slots)
     throw std::out_of_range("PrefixCache: slot out of range");
@@ -267,6 +283,7 @@ int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t
   e.hash = h;
   e.last_use = now;
   e.live = true;
+  e.key = key;
   // Reuse a dead record's index when one exists (bounded memory), else
   // append; either way the choice is deterministic.
   int index = -1;
@@ -295,11 +312,12 @@ int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t
   return index;
 }
 
-void PrefixCache::attach(int index, uint64_t now) {
+void PrefixCache::attach(int index, uint64_t now, const std::string& key) {
   Entry& e = entries_.at(static_cast<size_t>(index));
   if (!e.live) throw std::logic_error("PrefixCache: attach to a dead entry");
   ++e.attached;
   e.last_use = now;
+  if (e.key.empty() && !key.empty()) e.key = key;
   ++stats_.hits;
   stats_.tokens_saved += e.position;
   note(1, static_cast<uint64_t>(e.position), static_cast<uint64_t>(e.slot));
@@ -309,6 +327,24 @@ void PrefixCache::touch(int index, uint64_t now) {
   Entry& e = entries_.at(static_cast<size_t>(index));
   if (!e.live) throw std::logic_error("PrefixCache: touch of a dead entry");
   e.last_use = now;
+}
+
+int PrefixCache::pinned_entries() const {
+  int n = 0;
+  for (const Entry& e : entries_) n += e.live && !e.key.empty() ? 1 : 0;
+  return n;
+}
+
+void PrefixCache::set_disk(int index, int disk) {
+  Entry& e = entries_.at(static_cast<size_t>(index));
+  if (!e.live) throw std::logic_error("PrefixCache: disk link on a dead entry");
+  e.disk = disk;
+}
+
+void PrefixCache::set_busy(int index, bool busy) {
+  Entry& e = entries_.at(static_cast<size_t>(index));
+  if (!e.live) throw std::logic_error("PrefixCache: busy flag on a dead entry");
+  e.busy = busy;
 }
 
 void PrefixCache::detach(int index) {

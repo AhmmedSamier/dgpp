@@ -1,0 +1,51 @@
+#pragma once
+// The NVMe cold tier's pre-flight (issue #26): before a rank allocates
+// anything, the configured slab must have a directory it can write, room
+// on that filesystem for its whole capacity beside a reserve, and a
+// capacity that holds at least one entry at the request context limit —
+// a tier that cannot hold the prompts it exists for is a configuration
+// error, not a quiet degradation. The same check runs under
+// --memory-plan and prints the plan line.
+#include <cstddef>
+#include <cstdint>
+#include <string>
+
+namespace dgpp::serve {
+
+struct NvmeCachePlan {
+  std::string directory;      // the configured path, ~ expanded
+  std::string slab;           // <directory>/rank<r>.slab
+  size_t capacity_bytes = 0;  // the configured capacity
+  size_t page_bytes = 0;      // one cache block's record (4 KiB multiple)
+  int64_t pages = 0;          // records the capacity holds
+  int64_t blob_pages = 0;     // pages one snapshot blob spans
+  size_t minimum_bytes = 0;   // one entry at the context limit plus its blob
+  size_t free_bytes = 0;      // the filesystem's free bytes (an existing slab counted as free)
+  size_t reserve_bytes = 0;   // the free space the tier leaves alone
+  std::string error;          // empty: the plan fits
+  std::string describe() const;
+};
+
+// The reserve the tier never takes from a filesystem (nvme_cache.reserve_gib): 1 GiB by default.
+constexpr size_t kNvmeCacheReserveBytes = size_t{1} << 30;
+
+// Plans the slab for a rank: `block_bytes` one cache block's bytes across
+// its planes (0: a family without a paged cache — blobs alone),
+// `blob_bytes` the snapshot size, `block_tokens` the pool's block (0: no
+// pool) and `context_limit` the longest request. With `create_directory`
+// the directory is made (mkdir -p) so the free-space probe sees the
+// filesystem the slab will live on; without it (--memory-plan: a dry run
+// leaves no trace) the probe takes the nearest existing ancestor, which
+// is where mkdir -p would put it. The plan's `error` names what to change
+// when it does not fit.
+// With a `binding` (nvme_cache.persist) the slab lives under
+// <path>/<binding>/, so another checkpoint's or configuration's slab is
+// never mistaken for this deployment's.
+// `chunk_bytes` (nvme_cache.chunk_mib) must hold one page: a family whose
+// block outgrows the slice is refused here, not after the model loaded.
+NvmeCachePlan plan_nvme_cache(const std::string& path, double capacity_gib, int rank, size_t block_bytes,
+                              size_t blob_bytes, int64_t block_tokens, int64_t context_limit,
+                              bool create_directory = true, size_t reserve_bytes = kNvmeCacheReserveBytes,
+                              const std::string& binding = "", size_t chunk_bytes = 0);
+
+}  // namespace dgpp::serve

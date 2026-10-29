@@ -4,7 +4,7 @@ Run setup on the first Spark in your cluster (rank 0).
 A supported deployment uses one GB10 per node
 on Linux/aarch64; choose a model and node count from the
 [supported configurations](../README.md#supported-models-and-configurations).
-For the abbreviated command sequence, see the [quickstart](../README.md#quickstart).
+For the abbreviated command sequence, see the README's [getting started](../README.md#getting-started).
 
 For compilation on an x86 Linux workstation, see [cross-compiling for Spark](cross-compiling.md).
 
@@ -217,6 +217,12 @@ measured best. The other shapes (plain decode with `--no-mtp`, another draft
 depth, slot count or cache budget) are boot knobs; see
 [deployment templates](../deploy/README.md) for the list and the knobs that
 reproduce every retired variant.
+
+The long-context templates carry an `nvme_cache` block, off. Turning it on
+keeps the prefix entries memory evicts on each node's local NVMe, so a
+document pushed out of the cache comes back from disk instead of being
+recomputed. Read [the cold tier](nvme-cache.md) before sizing
+`capacity_gib`.
 
 ## 3. Set your node addresses and SSH user
 

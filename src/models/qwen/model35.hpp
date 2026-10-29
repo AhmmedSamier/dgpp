@@ -24,6 +24,7 @@
 #include <cuda_runtime.h>
 
 #include "core/graph.hpp"
+#include "engine/cache_planes.hpp"
 #include "engine/paged_blocks.hpp"
 #include "engine/session_model.hpp"
 #include "models/glm/moe.hpp"
@@ -147,6 +148,13 @@ class Qwen35KvPool {
   // Every layer's rows of physical block `src` into `dst`, stream-ordered.
   void copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream);
   int32_t block_refcount(int32_t block) const { return table_.block_refcount(block); }
+  // The NVMe cold tier's view (issue #26, engine/cache_planes.hpp): the
+  // block's identity (its id and the generation of its contents) and every
+  // plane a block spans (each Full layer's K and V rows — bf16 or e4m3
+  // codes at the layers' shipped scales — then the drafter's planes over
+  // the same table: the regions copy_block_contents walks).
+  uint64_t block_identity(int32_t block) const { return table_.block_identity(block); }
+  std::vector<CachePlane> planes() const;
 
  private:
   Qwen35KvPoolShape shape_;
@@ -261,6 +269,12 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // Prefix-snapshot arena size: all GDN recurrent + conv state of one slot.
   static size_t session_snapshot_bytes(const Qwen35TextConfig& cfg, int world, bool mtp);
   size_t session_snapshot_bytes() const { return session_snapshot_bytes(cfg_, 1, mtp_); }
+  // One cache block's bytes across every pool plane (the NVMe cold tier's
+  // record, issue #26) for a shape that is not built yet: the pool
+  // plan_memory sizes, with the drafter's planes and the K/V format.
+  static size_t kv_block_bytes_static(const Qwen35TextConfig& cfg, int rank, int world, bool mtp,
+                                      const std::string& dflash2_dir = "",
+                                      LatentFormat kv_format = LatentFormat::kBf16);
   static MemoryPlan plan_memory(const Qwen35TextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
                                 int rank, int world, LoaderResidency residency, int max_requests,
                                 bool mtp = false, int decode_rows = 0,

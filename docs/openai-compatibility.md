@@ -29,13 +29,27 @@ extensions. Model sampling defaults come from the checkpoint configuration.
 | Reasoning | `none/minimal/low/medium/high/xhigh/max` resolve through the model frontend into native effort and/or thinking switches. Unsupported settings and conflicting explicit switches return errors. `/v1/models` exposes `reasoning.effort_mapping`. `reasoning_content` and template switches are DGPP extensions. |
 | Request metadata | `store: false` (or omitted/null), text modality, bounded metadata, user and safety identifier accepted. Metadata is echoed on one-shot responses but not persisted. User/safety identifiers do not invoke an OpenAI safety or account service. `service_tier: auto/default` reports the actual `default` tier. |
 | Image inputs | GLM-5.3-Flash user messages accept `image_url` parts containing PNG/JPEG/WebP data URIs. `/v1/models` reports `input_modalities`. See [image inputs](vision.md) for budgets and caching behavior. |
-| Unsupported features | Stored-completion CRUD and `store: true`; remote image URLs, video/audio inputs and audio outputs; web search; predicted output; moderation configuration; explicit cache breakpoints/TTL/retention/key controls; verbosity; deprecated function-call API. Known unsupported API features return an error naming the field. |
+| Unsupported features | Stored-completion CRUD and `store: true`; remote image URLs, video/audio inputs and audio outputs; web search; predicted output; moderation configuration; explicit cache breakpoints/TTL/retention controls; verbosity; deprecated function-call API. Known unsupported API features return an error naming the field. |
 
 DGPP also accepts existing extensions: `top_k`, `min_p`,
 `repetition_penalty`, `prefix_cache`, `chat_template_kwargs`, object-valued
 historical tool arguments, flat function definitions, and template-specific
 tool output lists. These extensions should not be assumed portable to OpenAI.
 Historical function arguments must be valid JSON objects for DGPP's templates.
+`prefix_cache: false` opts one request out of the prefix cache: it attaches
+to no entry and publishes none, in memory or on NVMe. It prefills along the
+same structural cuts a cached prompt does: opting out changes what is kept,
+not the arithmetic.
+
+Both completion endpoints accept `prompt_cache_key` (OpenAI's field, DGPP's
+semantics): a string of 1 to 256 bytes that pins the prefix-cache entries the
+request creates or attaches to, in memory and in the NVMe cache: unpinned
+entries are evicted first, and a pinned one only when nothing unpinned is
+left within `engine.prefix_pin_max_pct` of the cache. The key is a priority,
+never a lookup key, and matching stays by exact token prefix. Null is absent,
+and other types return HTTP 400 naming the field.
+`prefix_cache.pinned` and `nvme_cache.pinned` in `/v1/metrics` count the
+pinned entries.
 
 Both completion endpoints accept the `ignore_eos` extension. It defaults to
 `false` and accepts only a boolean; explicit `null` and other non-boolean
@@ -380,6 +394,26 @@ For graph capacity and padded verification rows, see the
 They describe launched graph work, while these counters describe completed
 verification decisions; rejected drafts are not graph padding.
 
+### NVMe cache counters
+
+`nvme_cache` reports the prefix cache's cold tier (the top-level `nvme_cache`
+deployment key; `enabled` false leaves every count at zero):
+
+| Field | Meaning |
+| --- | --- |
+| `pages_total`, `pages_used`, `page_bytes` | The slab's records, the records in use and one record's bytes (one KV block's planes, rounded to 4 KiB); `bytes_total` and `bytes_used` are their products. |
+| `entries`, `blocks` | Entries on disk and the block records they reference (shared records count once). |
+| `spills`, `spilled`, `spill_failed`, `spill_skipped` | Spills begun, committed by the world, failed on some rank, and skipped for want of room after evicting every unused entry. |
+| `restores`, `restored`, `restore_failed`, `tokens_restored` | Restores begun, committed, failed (a short read, a device error or a checksum mismatch on some rank), and the prompt tokens committed restores brought back. |
+| `blocks_shared` | Blocks a spill found already on disk (a document shared by attached variants). |
+| `pinned`, `adopted` | Entries a `prompt_cache_key` pins, and entries taken over from the previous run's index (`nvme_cache.persist`). |
+| `evictions` | Entries disk retention evicted for room. |
+| `pending`, `worker_pending` | Ops awaiting the world's verdict, and ops queued or running on this rank's worker. |
+| `bytes_written`, `bytes_read`, `failures`, `spill_ms_avg`, `restore_ms_avg` | This rank's file traffic, its failed ops and its average op times. |
+
+Like the prefix-cache counters these are published after each scheduler
+pass on rank 0 (the decisions are identical on every rank; the bytes and
+times are rank 0's own).
 ### Prometheus exposition
 
 `GET /metrics/prometheus` returns `text/plain; version=0.0.4` for a

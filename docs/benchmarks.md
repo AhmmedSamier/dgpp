@@ -18,6 +18,8 @@ change again, keep each row's recorded configuration with its numbers.
 
 | Measurement set | Date (UTC) | Source revision | Scope |
 |---|---|---|---|
+| GLM-5.3-Flash NVFP4/FP8, four nodes | 2026-10-29 | `11fe1807`, the 0.1.0 release build (binary `1960b127b308e83e`), tree at `8216f398` (documentation commits only beyond the build) | The four-node template as shipped, every row from one `serve_campaign.py run` (00:59 to 01:51 UTC): five classes at C1/C2/C4/C8, three cold probes each at 512/2K/8K/32K, the context matrix through 512K on the 768K pool, the 300-item quality set, the API, greedy-transcript and isolation checks, and the plain boot (5/5 classes matched). Every rank at zero swap before and after, zero cached tokens in the twelve cold probes, matching operation streams. Replaces the 2026-10-06/07 and 2026-10-13 rows, which ran with fixed prefill budgets and kept only the C1 decode rate |
+| GLM-5.3-Flash NVFP4/FP8, two nodes | 2026-10-28/29 | `11fe1807`, the 0.1.0 release build (binary `1960b127b308e83e`), tree at `acd81cf1` (documentation commits only beyond the build) | The two-node template as shipped, every row from one `serve_campaign.py run` (23:21 to 00:15 UTC): five classes at C1/C2/C4/C8, three cold probes each at 512/2K/8K/32K, the context matrix to the 160K pool, the 300-item quality set, the API, greedy-transcript and isolation checks, and the plain boot (5/5 classes matched). Both ranks at zero swap before and after, zero cached tokens in the twelve cold probes, matching operation streams. Replaces the 2026-10-06/07 row, which ran with fixed prefill budgets and kept only its C1 decode rate |
 | DeepSeek-V4.1-Flash-1017 EXL3 3.5bpw | 2026-10-23 | `b423d5db` plus the day's second program in the working tree (binary `9a179b15a6de02fa`) | The EXL3 3.5 bpw template as shipped on four nodes after the day's second program — sixteen slots on the family's 96-row decode batch (the morning's twelve on 64), the balanced expert slices, the fused split reduce, the deep slot ring, the 128-row dense tile, a 4,096-token first prefill chunk, the expert-run slot form with its 64-row run groups, the attention split groups merged in L2, the tiled router and mHC dots from sixteen rows, the tensor-core GEMV's one split chain to 128 rows, the verify schedule's row and base costs measured on the pack (2.95 / 19.9 ms) and the five-draft DSpark block under the schedule's three options (1, 3, 5; `engine.mtp_depth` 5, `engine.mtp_schedule_options` 3) — in one `serve_campaign.py run` on 2026-10-24 00:06–00:54 UTC (with the five DSpark mode boots: plain and fixed depths 1/2/3/5 through `--no-mtp-schedule`): five classes at C1/C2/C4/C8, three cold probes each at 512/2K/8K/32K, the context matrix to 512K, the 300-item quality set, the API, greedy-transcript and isolation checks, every rank at zero swap, zero cached tokens in the 12 cold probes, matching operation streams in 7/7 launches. The day's earlier campaigns (six slots on `c7efb833f88a06e3`, twelve on `dde85abfaa953cc1` and `6f8bccfa5b70efef`, sixteen at depth 4 on `9a179b15a6de02fa`) are superseded by this row set; the [model card](model_cards/DeepSeek-V4.1-Flash-1017-EXL3-3.5bpw.md) keeps them beside the release's |
 | Flint FP8/NVFP4 | 2026-10-22 | `b3f9b538` (binary `15ac3372bb2e3230`) | The three templates as shipped (one, two and four nodes), every row from one `serve_campaign.py run` per template: C1/C2/C4/C8, twelve cold prefill probes, the context matrix to the 262,144 positional ceiling, the 300-item quality set with the first use of the retry beyond the cap, the API, greedy-transcript and isolation checks; every rank at zero swap, zero cached tokens in the cold probes, matching operation streams; the resident image cache off (boot path only). An earlier run of the one-node template on `4709d8d6` exposed the model-opened `<think>` defect fixed in `b3f9b538` and is not tabled |
 | Qwen3.8-Flash-Next FP4-Local | 2026-10-21 | `7c3086939006` (binary `c8f6aaf59ce5d08a`); HumanEval scorer `9b7439b5` | The one-node template as shipped, all inference from one `serve_campaign.py run`: C1/C2/C4/C8, twelve cold prefill probes, context through 512K, 164 HumanEval / 300 GSM8K / 100 extraction cases, API and transcript checks. Saved HumanEval answers were re-scored after fixing supplied-context handling; answers and inference are unchanged. Both boots had zero swap and matching operation streams. |
@@ -94,9 +96,9 @@ underlying quadratic cold-prefill work remains (see the
 
 | Model / weights | Nodes | Options | C1 decode tok/s | C2 decode tok/s | C4 decode tok/s | C8 decode tok/s | Cold prefill s: ~2K / ~8K / ~32K |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 30.6–36.0 | — | — | — | 2.057 / 8.384 / 35.312 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 31.2–36.7 | 44.8–49.1 | 59.7–65.3 | 58.4–61.7 | 2.217 / 7.142 / 29.634 |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 30.7–36.1 | — | — | — | 1.976 / 8.178 / 35.025 |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 58.1–63.7 | — | — | — | 1.182 / 5.075 / 21.843 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 59.0–64.7 | 82.1–91.3 | 111.1–120.4 | 103.9–112.9 | 1.174 / 4.627 / 20.493 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 46.7–51.5 | — | — | — | 1.334 / 5.686 / 24.491 |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 46.8–51.6 | — | — | — | 1.356 / 5.716 / 24.507 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 43.5–51.9 | — | — | — | 1.363 / 4.522 / 18.054 |
@@ -145,9 +147,9 @@ Request wall throughput, the service-level view: total completed output over the
 
 | Model / weights | Nodes | Options | C1 wall tok/s | C2 wall tok/s | C4 wall tok/s | C8 wall tok/s |
 | --- | --- | --- | --- | --- | --- | --- |
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 29.6–34.5 | 43.0–46.8 | 55.3–61.2 | 56.4–61.8 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 30.1–35.2 | 43.3–47.1 | 57.9–63.1 | 57.7–60.8 |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 29.6–34.6 | 43.1–46.9 | 44.7–48.1 | 44.5–47.2 |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 56.0–61.1 | 79.5–85.4 | 106.2–117.7 | 105.7–116.0 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 56.9–61.8 | 79.3–87.3 | 107.4–116.4 | 102.6–111.3 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 44.8–49.2 | 60.1–64.4 | 77.5–86.2 | 77.6–84.9 |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 44.9–49.3 | 60.2–64.4 | 77.8–86.3 | 77.5–85.8 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 42.4–50.1 | 62.1–73.1 | 86.5–97.7 | 84.3–98.9 |
@@ -244,9 +246,9 @@ a row exactly.
 
 | Model / weights | Nodes | Options | Slots | KV pool tokens | KV format | Prefix cache GiB | Prefill tokens/tick (busy / idle) | Recorded decode mode | Template at measurement |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 4 | 163,840 | fp8 | 4.5 | 256 / 2,048 | MTP1 | — |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 4 | 163,840 | fp8 | 4.5 | adaptive (default) | MTP1 | [JSON](../deploy/cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json) |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 2 | 262,144 | fp8 | 2 | 256 / 2,048 | MTP1 | — |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 4 | 786,432 | bf16 | 22 | 256 / 2,048 | MTP1 | — |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 4 | 786,432 | bf16 | 22 | adaptive (default) | MTP1 | [JSON](../deploy/cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 4 | 393,216 | bf16 | 8 | 256 / 2,048 | MTP1 | — |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 4 | 524,288 | bf16 | 2 | 256 / 2,048 | MTP1 | — |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 4 | 262,144 | bf16 | 3 | 4,096 / 4,096 | MTP1 | — |
@@ -355,9 +357,9 @@ Engine tokens/s, greedy; median of three repetitions.
 
 | Model / weights | Nodes | Options | Prose | Code | JSON | Math | Chat |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 34.2 | 35.9 | 36.0 | 34.6 | 30.6 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 34.9 | 36.6 | 36.7 | 35.3 | 31.2 |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 34.2 | 36.0 | 36.1 | 34.8 | 30.7 |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 61.4 | 63.1 | 63.7 | 61.4 | 58.1 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 61.6 | 63.2 | 64.7 | 62.4 | 59.0 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 49.6 | 50.6 | 51.5 | 50.1 | 46.7 |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 49.5 | 50.7 | 51.6 | 50.2 | 46.8 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 43.5 | 51.1 | 51.9 | 49.1 | 45.9 |
@@ -478,9 +480,9 @@ These are the original campaigns' quality results, retained separately from the 
 
 | Model / weights | Nodes | Options | HumanEval | GSM8K | Schema extraction | Responses at token cap | Completed at the 8,192 retry (passed) |
 |---|---|---|---|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 157/164 | 292/300 | 100/100 | 0 | 0 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 159/164 | 293/300 | 100/100 | 0 | 0 |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 158/164 | 292/300 | 100/100 | 0 | 0 |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 157/164 | 292/300 | 100/100 | 0 | 0 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 159/164 | 294/300 | 100/100 | 0 | 0 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 154/164 | 295/300 | 100/100 | 0 | 0 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 160/164 | 294/300 | 100/100 | 0 | 0 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 158/164 | 291/300 | 100/100 | 0 | 0 |
@@ -562,9 +564,9 @@ DeepSeek-V4's strict HumanEval scores count responses with unclosed code fences 
 
 | Model / weights | Nodes | Options | Rank checks passed | Plain/default greedy match | Solo/batched greedy text |
 |---|---|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 3/3 | 5/5 classes | different |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 9/9 | 5/5 classes | identical |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 3/3 | 5/5 classes | identical |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 7/7 | 5/5 classes | different |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 9/9 | 5/5 classes | identical |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 4/4 | 5/5 classes | different |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 4/4 | 5/5 classes | identical |
 | Qwen3.8-Flash-Next NVFP4 | 1 | BF16 dense | 4/4 | 5/5 classes | different |
@@ -665,9 +667,9 @@ The original matrix refresh fixed the three bottlenecks below. The completion ca
 
 | Model / weights | Nodes | Options | Context length (limit) | Cold prefill (s), 32K | Decode ms/pass (0) | Engine tok/s (0) | Decode ms/pass (32K) | Engine tok/s (32K) | Decode ms/pass (64K) | Engine tok/s (64K) | Decode ms/pass (128K) | Engine tok/s (128K) | Decode ms/pass (256K) | Engine tok/s (256K) | Decode ms/pass (512K) | Engine tok/s (512K) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 163,840 | 34.357 | 54.98 | 33.9 | 57.35 | 34.2 | 58.40 | 33.3 | 59.82 | 32.5 | Limit | Limit | Limit | Limit |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 163,840 | 29.798 | 54.18 | 33.4 | 55.93 | 35.1 | 56.60 | 34.4 | 58.15 | 33.7 | Limit | Limit | Limit | Limit |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 262,144 | 33.915 | 55.09 | 34.0 | 57.24 | 34.3 | 58.80 | 33.4 | 59.63 | 32.6 | 62.62 | 31.3 | Limit | Limit |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 786,432 | 21.799 | 31.85 | 58.9 | 33.55 | 58.5 | 34.33 | 57.1 | 35.96 | 54.1 | 39.15 | 50.1 | 45.52 | 43.4 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 786,432 | 20.980 | 30.74 | 61.5 | 32.24 | 60.8 | 33.80 | 58.0 | 34.67 | 56.1 | 37.88 | 51.8 | 44.64 | 44.3 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 393,216 | 24.243 | 38.49 | 47.3 | 40.43 | 48.5 | 41.25 | 47.9 | 42.83 | 45.8 | 46.07 | 41.9 | Limit | Limit |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 524,288 | 24.234 | 38.40 | 48.5 | 40.35 | 48.6 | 41.89 | 46.1 | 43.00 | 45.6 | 46.02 | 42.3 | 52.26 | 37.8 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 262,144 | 18.241 | 40.53 | 45.6 | 42.73 | 42.0 | 43.12 | 43.2 | 43.97 | 42.0 | 45.65 | 39.1 | Limit | Limit |
@@ -715,9 +717,9 @@ Engine prefill seconds at each context bucket, one uncached sample per cell:
 
 | Model / weights | Nodes | Options | 0 | 32K | 64K | 128K | 256K | 512K |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 0.383 | 34.357 | 74.549 | 166.938 | Limit | Limit |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 160K FP8 KV, 4 slots | 0.421 | 29.798 | 63.974 | 149.373 | Limit | Limit |
 | GLM-5.3-Flash NVFP4/FP8 | 2 | 256K FP8 KV, 2 slots | 0.389 | 33.915 | 72.716 | 162.731 | 395.664 | Limit |
-| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 0.236 | 21.799 | 48.172 | 114.093 | 303.271 | 925.281 |
+| GLM-5.3-Flash NVFP4/FP8 | 4 | 768K BF16 KV, 4 slots | 0.233 | 20.980 | 45.567 | 109.315 | 302.679 | 939.798 |
 | GLM-5.3-Flash FP8 | 4 | 384K BF16 KV, 4 slots | 0.331 | 24.243 | 52.909 | 123.326 | 317.875 | Limit |
 | GLM-5.3-Flash FP8 | 4 | 512K BF16 KV, 4 slots, 2 GiB prefix cache | 0.322 | 24.234 | 53.010 | 123.934 | 317.535 | 928.123 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | FP8 dense | 0.340 | 18.241 | 38.461 | 85.217 | 201.651 | Limit |
