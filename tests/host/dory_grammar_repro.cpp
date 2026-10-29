@@ -236,19 +236,19 @@ DGPP_TEST(dory_grammar_closes_thinking_into_an_allowed_call) {
 // (2026-10-26, 16:02 boot, direct on :5999). Each mask/advance pair the
 // engine takes, one id at a time.
 DGPP_TEST(dory_grammar_replays_the_captured_decode) {
+  const char* path = std::getenv("DGPP_OPS_LOG");
+  const char* req = std::getenv("DGPP_OPS_REQ");
+  if (!path || !req)
+    dgpp::test::skip("captured replay requires DGPP_OPS_LOG and DGPP_OPS_REQ");
   const auto vocab = dory_grammar_vocab();
   const auto spec = auto_spec();
 
   std::vector<int64_t> ids;
-  const char* path = std::getenv("DGPP_OPS_LOG");
-  const char* req = std::getenv("DGPP_OPS_REQ");
-  require(path != nullptr && req != nullptr,
-                      "set DGPP_OPS_LOG and DGPP_OPS_REQ");
   if (std::FILE* f = std::fopen(path, "rb")) {
-    char buf[1 << 20];
+    std::vector<char> buf(1 << 16);
     std::string ops;
     size_t n;
-    while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) ops.append(buf, n);
+    while ((n = std::fread(buf.data(), 1, buf.size(), f)) > 0) ops.append(buf.data(), n);
     std::fclose(f);
     const std::string want = std::string("T ") + req + " ";
     size_t pos = 0;
