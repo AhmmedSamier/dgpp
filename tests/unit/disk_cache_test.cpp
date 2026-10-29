@@ -309,7 +309,8 @@ DGPP_TEST(disk_cache_retention_evicts_lru_within_the_capacity) {
   require(d.pages_used() == 10 && d.live_entries() == 2 && d.stats().evictions == 1, "capacity held");
   d.commit_spill(plan.entry);
   // An entry the slab can never hold is refused without evicting anything.
-  const auto huge = d.begin_spill(prompt.data(), 40, -1, {}, 0, identities(10, 900), 0, 4, 12, 3);
+  const auto huge_prompt = counted(40, 3000);
+  const auto huge = d.begin_spill(huge_prompt.data(), 40, -1, {}, 0, identities(10, 900), 0, 4, 12, 3);
   require(!huge.ok && huge.evicted.empty() && d.live_entries() == 2, "an entry past the capacity is skipped");
   require(d.stats().spill_skipped == 1, "the skip counted");
   // Pages never exceed the capacity across the run.
