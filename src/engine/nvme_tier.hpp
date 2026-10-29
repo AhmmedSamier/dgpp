@@ -68,6 +68,7 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -131,8 +132,11 @@ class NvmeTier {
     per_chunk_ = static_cast<int64_t>(cfg_.chunk_bytes / page_bytes_);
     // The adoption's read buffer, before open_slab() reads the candidate's
     // ids runs with it (direct I/O needs the alignment).
-    if (::posix_memalign(&aligned_page_, kAlign, page_bytes_) != 0 || aligned_page_ == nullptr)
+    void* aligned_page = nullptr;
+    if (::posix_memalign(&aligned_page, kAlign, page_bytes_) != 0 || aligned_page == nullptr)
       throw std::runtime_error("NvmeTier: cannot allocate an aligned page");
+    // open_slab() can refuse a duplicate before this object's destructor runs.
+    aligned_page_.reset(aligned_page);
     open_slab();
     // Every CUDA object now, before the world's collectives (the fabric's
     // rule: nothing creates or frees one between them).
@@ -186,7 +190,6 @@ class NvmeTier {
         ::unlink(index_path_.c_str());
       }
     }
-    if (aligned_page_) std::free(aligned_page_);
   }
   NvmeTier(const NvmeTier&) = delete;
   NvmeTier& operator=(const NvmeTier&) = delete;
@@ -236,12 +239,12 @@ class NvmeTier {
     }
     for (int64_t i = 0; i < count; ++i) {
       std::string why;
-      if (!read_page(page + i, aligned_page_, &why)) {
+      if (!read_page(page + i, aligned_page_.get(), &why)) {
         DGPP_LOG_WARN("rank {}: NVMe cache: an adopted entry's ids run is unreadable ({}); the entry is dropped",
                       cfg_.rank, why);
         return false;
       }
-      std::memcpy(static_cast<uint8_t*>(dst) + static_cast<size_t>(i) * page_bytes_, aligned_page_, page_bytes_);
+      std::memcpy(static_cast<uint8_t*>(dst) + static_cast<size_t>(i) * page_bytes_, aligned_page_.get(), page_bytes_);
     }
     return true;
   }
@@ -779,9 +782,9 @@ class NvmeTier {
         const size_t want = static_cast<size_t>(rec.position) * sizeof(int64_t);
         for (uint32_t q = 0; q < rec.ids_pages && ok && ids.size() < want; ++q) {
           std::string why;
-          ok = read_page(rec.blob_page + blob_pages_ + q, aligned_page_, &why);
+          ok = read_page(rec.blob_page + blob_pages_ + q, aligned_page_.get(), &why);
           if (ok) {
-            const auto* bytes = static_cast<const uint8_t*>(aligned_page_);
+            const auto* bytes = static_cast<const uint8_t*>(aligned_page_.get());
             ids.insert(ids.end(), bytes, bytes + std::min(page_bytes_, want - ids.size()));
           }
         }
@@ -1278,7 +1281,8 @@ class NvmeTier {
   std::vector<uint8_t> candidate_;  // a previous run's index for this binding, until adopted or refused
   std::vector<uint64_t> adopted_digests_;  // its entries' content digests, in its order
   std::map<int64_t, std::vector<uint8_t>> adopted_ids_;  // its entries' ids by their run's first page, until the first tick
-  void* aligned_page_ = nullptr;    // the adoption's read buffer (direct I/O needs the alignment)
+  // The adoption's aligned read buffer, also released if construction fails.
+  std::unique_ptr<void, decltype(&std::free)> aligned_page_{nullptr, &std::free};
   std::vector<uint8_t> pending_index_;  // the worker's next index write
   std::vector<uint64_t> pending_digests_;
   bool has_pending_index_ = false;

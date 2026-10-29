@@ -2,8 +2,10 @@
 
 NVMe slab startup acquires its exclusive lock before truncation. Duplicate-open
 regressions check size and content preservation for fresh persistent and
-nonpersistent slabs. Local host checks cover the file-opening path; the added
-CUDA integration cases still require the fixture gate on idle GPU hardware.
+nonpersistent slabs, then verify that both modes clear stale contents after
+ownership is released. The aligned adoption buffer is released on constructor
+failure. Qwen's BF16/FP8-head fixtures and the NVMe family fixture pass on idle
+GB10 hardware; host sanitizer checks cover duplicate-open cleanup.
 
 HTTP framing validates complete decimal request lengths and matching repeated
 fields before dispatch. Host regressions cover malformed/overflowing lengths,
