@@ -54,7 +54,7 @@ prompt classes, and C is the number of concurrent client requests.
 
 | Model / weights | Nodes | C1 decode tok/s | C8 decode tok/s | Cold prefill s at 2K / 8K / 32K |
 |---|---|---|---|---|
-| GLM-5.3-Flash NVFP4/FP8 | 2 | 31-36 | | 2.06 / 8.38 / 35.3 |
+| GLM-5.3-Flash NVFP4/FP8 | 2 | 31-37 | 58-62 | 2.22 / 7.14 / 29.6 |
 | GLM-5.3-Flash NVFP4/FP8 | 4 | 58-64 | | 1.18 / 5.08 / 21.8 |
 | GLM-5.3-Flash FP8 | 4 | 47-52 | | 1.33 / 5.69 / 24.5 |
 | Qwen3.8-Flash-Next NVFP4 | 1 | 44-52 | | 1.36 / 4.52 / 18.1 |
