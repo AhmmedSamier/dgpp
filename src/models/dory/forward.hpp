@@ -88,6 +88,7 @@ class DoryModel : public SessionModel<DoryModel> {
   static constexpr int decode_rows_cap() { return 32; }
   static constexpr int prefill_chunk_tokens() { return kPrefillChunkTokens; }
   static constexpr int kv_block_tokens_static() { return kBlockTokens; }
+  static size_t kv_block_bytes_static(const DoryConfig& cfg, DoryKvPolicy policy);
   static size_t session_snapshot_bytes(const DoryConfig& cfg, bool mtp) { (void)cfg; (void)mtp; return kSnapshotStamp; }
   using Base::session_snapshot_bytes;
   // Several cold prompts as the spans of one walk (every row carries its own

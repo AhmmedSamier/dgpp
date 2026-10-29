@@ -1031,6 +1031,9 @@ struct DoryFamily final : ServeFamily {
   size_t snapshot_bytes(int, bool) const override {
     return dgpp::DoryModel::session_snapshot_bytes(cfg, false);
   }
+  size_t cache_block_bytes(int, bool) const override {
+    return dgpp::DoryModel::kv_block_bytes_static(cfg, dgpp::DoryModel::kv_policy());
+  }
   void build_model(dgpp::BoundaryReducer*, int, int, bool, int forward_rows, int64_t pool_tokens,
                    int slots, bool, int decode_rows) override {
     // The resident image cache: the same directory the process configured

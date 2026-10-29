@@ -21,9 +21,11 @@
 #include "common/cuda_check.hpp"
 #include "engine/nvme_tier.hpp"
 #include "engine/prefix_arena.hpp"
+#include "dory_fixture.hpp"
 #include "flint_fixture.hpp"
 #include "mimo_fixture.hpp"
 #include "models/flint/forward.hpp"
+#include "models/dory/forward.hpp"
 #include "models/mimo/forward.hpp"
 #include "models/qwen/model35.hpp"
 #include "qwen35_fixture.hpp"
@@ -161,6 +163,22 @@ int main() {
     const std::string base = (fs::temp_directory_path() / "dgpp_nvme_tier_families").string();
     fs::remove_all(base);
     fs::create_directories(base);
+    {
+      const std::string dir = base + "/dory";
+      const dgpp::DoryConfig cfg = doryfx::tiny_config();
+      doryfx::write_fixture(cfg, dir);
+      // Exercise the serving override too: each recurrent attention layer
+      // must expose all three loop planes, in addition to the fixed layers.
+      dgpp::DoryModel::set_recurrent_loops(3);
+      for (const auto policy : {dgpp::DoryKvPolicy::PerLoop, dgpp::DoryKvPolicy::LastLoop}) {
+        dgpp::DoryModel m(cfg, dir, 128, 512, dgpp::DoryResidency::Resident, 2, 8, false, policy);
+        require(dgpp::cache_block_bytes(m.cache_planes()) == dgpp::DoryModel::kv_block_bytes_static(cfg, policy),
+                "Dory: planned block bytes match every allocated K/V plane");
+        if (policy == dgpp::DoryKvPolicy::PerLoop)
+          check_tier(m, cfg.vocab_size, "Dory", base + "/dory-slab");
+      }
+      dgpp::DoryModel::clear_recurrent_loops();
+    }
     {
       const std::string dir = base + "/mimo";
       const dgpp::MimoTextConfig cfg = mimofx::tiny_config();

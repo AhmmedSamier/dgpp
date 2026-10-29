@@ -24,6 +24,7 @@
 #include <cuda_runtime.h>
 
 #include "engine/paged_blocks.hpp"
+#include "engine/cache_planes.hpp"
 
 namespace dgpp {
 
@@ -99,6 +100,8 @@ class DoryKvPool {
   // Every plane's rows of physical block `src` into `dst`, stream-ordered.
   void copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream);
   int32_t block_refcount(int32_t block) const { return table_.block_refcount(block); }
+  uint64_t block_identity(int32_t block) const { return table_.block_identity(block); }
+  std::vector<CachePlane> planes() const;
 
  private:
   DoryKvPoolShape shape_;

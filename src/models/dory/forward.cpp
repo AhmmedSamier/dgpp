@@ -45,6 +45,15 @@ void DoryModel::set_recurrent_loops(int loops) {
 
 void DoryModel::clear_recurrent_loops() { recurrent_loops_ = 0; }
 
+size_t DoryModel::kv_block_bytes_static(const DoryConfig& config, DoryKvPolicy policy) {
+  DoryConfig cfg = config;
+  if (recurrent_loops_ > 0) cfg.n_recurrent_loops = recurrent_loops_;
+  size_t planes = 0;
+  for (int l = 0; l < cfg.num_hidden_layers; ++l)
+    planes += kv_repeats_of(cfg, l, policy == DoryKvPolicy::LastLoop);
+  return 2 * planes * kBlockTokens * static_cast<size_t>(cfg.kv_size()) * sizeof(uint16_t);
+}
+
 DoryKvPolicy DoryModel::parse_kv_policy(const std::string& name) {
   if (name == "per_loop") return DoryKvPolicy::PerLoop;
   if (name == "last_loop") return DoryKvPolicy::LastLoop;

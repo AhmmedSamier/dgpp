@@ -90,6 +90,18 @@ void DoryKvPool::reset_all(cudaStream_t stream) {
   table_.reset_all(stream);
 }
 
+std::vector<CachePlane> DoryKvPool::planes() const {
+  std::vector<CachePlane> out;
+  if (!initialized_) return out;
+  const size_t blk = static_cast<size_t>(shape_.block_tokens) * kv_row_elems() * sizeof(uint16_t);
+  for (int p = 0; p < shape_.planes(); ++p) {
+    const DoryKvCache c = view_plane(p);
+    out.push_back({reinterpret_cast<uint8_t*>(c.k_cache), blk});
+    out.push_back({reinterpret_cast<uint8_t*>(c.v_cache), blk});
+  }
+  return out;
+}
+
 void DoryKvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream) {
   table_.check_block(src);
   table_.check_block(dst);
