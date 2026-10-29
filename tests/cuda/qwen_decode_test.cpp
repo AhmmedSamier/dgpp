@@ -824,6 +824,18 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           };
           check_markers(marker);
           owner.reset();
+          if (!persist) {
+            require(!fs::exists(fresh.slab_path), "lock: a transient tier removes its slab");
+            // Leave the stale bytes a crashed transient owner would leave.
+            const int fd = ::open(fresh.slab_path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+            require(fd >= 0, "lock: create a stale transient slab");
+            const bool sized = ::ftruncate(fd, static_cast<off_t>(bytes)) == 0;
+            ::close(fd);
+            require(sized, "lock: size the stale transient slab");
+            patch_file(fresh.slab_path, 0, &marker, 1);
+            patch_file(fresh.slab_path, static_cast<off_t>(bytes - 1), &marker, 1);
+          }
+          check_markers(marker);
           // With ownership released, a new tier still clears an unadopted slab.
           owner = std::make_unique<Tier>(&m, &arena, fresh);
           require(fs::file_size(fresh.slab_path) == bytes, "lock: a fresh reopen sizes the slab");
