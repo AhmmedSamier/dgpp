@@ -831,7 +831,7 @@ class NvmeTier {
       return;
     }
     if (fd_ >= 0) ::close(fd_);
-    const int flags = O_RDWR | O_CREAT | O_CLOEXEC | (keep_contents ? 0 : O_TRUNC);
+    const int flags = O_RDWR | O_CREAT | O_CLOEXEC;
     fd_ = ::open(cfg_.slab_path.c_str(), flags | O_DIRECT, 0600);
     direct_ = fd_ >= 0;
     if (fd_ < 0 && errno == EINVAL) fd_ = ::open(cfg_.slab_path.c_str(), flags, 0600);
@@ -856,6 +856,15 @@ class NvmeTier {
                                "nvme_cache.allow_buffered");
     }
     if (keep_contents) return;
+    // Opening with O_TRUNC would destroy another world's slab before the
+    // advisory lock can refuse us. Clear it only after acquiring ownership.
+    if (::ftruncate(fd_, 0) != 0) {
+      const int err = errno;
+      ::close(fd_);
+      fd_ = -1;
+      throw std::runtime_error("NvmeTier: cannot truncate " + cfg_.slab_path + ": " +
+                               std::strerror(err));
+    }
     size_slab();
   }
   // The whole capacity claimed now (unwritten extents): a full disk is a

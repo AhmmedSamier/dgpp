@@ -788,6 +788,49 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
           require(fd >= 0 && ::pwrite(fd, bytes, n, at) == static_cast<ssize_t>(n), "crash: patch " + path);
           ::close(fd);
         };
+        // A fresh slab has no index to adopt. A refused duplicate must not
+        // truncate it, whether or not persistence is enabled.
+        for (const bool persist : {false, true}) {
+          auto fresh = pc;
+          const fs::path fresh_dir =
+              fs::path(slab_dir) / (persist ? "lock-persistent" : "lock-transient");
+          fs::remove_all(fresh_dir);
+          fs::create_directories(fresh_dir);
+          fresh.slab_path = (fresh_dir / "rank0.slab").string();
+          fresh.persist = persist;
+          auto owner = std::make_unique<Tier>(&m, &arena, fresh);
+          const uintmax_t bytes = fs::file_size(fresh.slab_path);
+          require(bytes > 1 && !fs::exists(fresh_dir / "rank0.index"),
+                  "lock: a fresh slab has no index");
+          const uint8_t marker = 0x5a;
+          patch_file(fresh.slab_path, 0, &marker, 1);
+          patch_file(fresh.slab_path, static_cast<off_t>(bytes - 1), &marker, 1);
+          bool refused = false;
+          try {
+            Tier other(&m, &arena, fresh);
+          } catch (const std::runtime_error& e) {
+            refused = std::string(e.what()).find("held by another process") != std::string::npos;
+          }
+          require(refused, "lock: a duplicate fresh tier is refused");
+          require(fs::file_size(fresh.slab_path) == bytes, "lock: refusal preserves the slab size");
+          const auto check_markers = [&](uint8_t expected) {
+            const int fd = ::open(fresh.slab_path.c_str(), O_RDONLY);
+            require(fd >= 0, "lock: open the slab for verification");
+            uint8_t first = 0, last = 0;
+            const bool read = ::pread(fd, &first, 1, 0) == 1 &&
+                              ::pread(fd, &last, 1, static_cast<off_t>(bytes - 1)) == 1;
+            ::close(fd);
+            require(read && first == expected && last == expected, "lock: slab contents match");
+          };
+          check_markers(marker);
+          owner.reset();
+          // With ownership released, a new tier still clears an unadopted slab.
+          owner = std::make_unique<Tier>(&m, &arena, fresh);
+          require(fs::file_size(fresh.slab_path) == bytes, "lock: a fresh reopen sizes the slab");
+          check_markers(0);
+          owner.reset();
+          fs::remove_all(fresh_dir);
+        }
         // (a) The lock: a second tier on the slab is refused while the first holds it.
         {
           auto t = std::make_unique<Tier>(&m, &arena, pc);

@@ -1,5 +1,10 @@
 # DGPP implementation status
 
+NVMe slab startup acquires its exclusive lock before truncation. Duplicate-open
+regressions check size and content preservation for fresh persistent and
+nonpersistent slabs. Local host checks cover the file-opening path; the added
+CUDA integration cases still require the fixture gate on idle GPU hardware.
+
 HTTP framing validates complete decimal request lengths and matching repeated
 fields before dispatch. Host regressions cover malformed/overflowing lengths,
 keep-alive compatibility, canonical handler-visible headers, connection closure

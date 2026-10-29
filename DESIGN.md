@@ -1902,8 +1902,9 @@ file holds the world's bytes and, beside them, this rank's digest of every
 entry's page checksums taken at its commit. At open a rank validates each
 entry against its checksum table and reads its token ids back, pruning
 what fails, and the world adopts the candidate only when every rank
-validated the same bytes. The slab is locked by its world, an op without
-progress fails after `op_timeout_s`, and a stuck file worker refuses new
+validated the same bytes. The world acquires the slab's exclusive lock before
+truncating or sizing it, so a refused duplicate leaves its contents intact.
+An op without progress fails after `op_timeout_s`, and a stuck file worker refuses new
 restores at once.
 
 **Diagnostics.** Metrics report hits, misses, saved tokens, snapshots,
