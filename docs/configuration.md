@@ -19,6 +19,7 @@ Restart the deployment after changing either file.
 | Serve longer prompts or more simultaneous requests | [Request capacity and memory](#request-capacity-and-memory) |
 | Reuse work from earlier prompts | [Prefix caching](#prefix-caching) |
 | Keep evicted prefix entries on local NVMe | [NVMe cache](#nvme-cache) |
+| Keep an existing compatible NVMe cache across server upgrades | [`nvme_cache.reuse_binding`](nvme-cache.md#across-restarts) |
 | Balance prompt processing against smooth streaming | [Prefill scheduling](#prefill-scheduling) |
 | Change model storage, precision or generation speed | [Execution and performance](#execution-and-performance) |
 | Extend a supported Qwen model's context limit | [Extended context](#extended-context) |
