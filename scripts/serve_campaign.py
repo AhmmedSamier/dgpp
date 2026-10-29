@@ -236,7 +236,11 @@ def run_campaign(a):
                  "--limit", "300", "--concurrency", str(slots), "--allow-code-execution", "--data", "data"], out / "eval.log", env,
                 timeout=4 * 3600)
         if "api" in phases:
-            run(["python3", "scripts/serve_api_check.py", host, port], out / "api.log", env, check=False)
+            from cluster_doctor import cache_root, cached_snapshot
+            from site_env import cache_environment
+            tokenizer = cached_snapshot(cfg["model"], cache_root(cache_environment())) / "tokenizer.json"
+            run(["python3", "scripts/serve_api_check.py", host, port, "--tokenizer", tokenizer],
+                out / "api.log", env, check=False)
         if "transcripts" in phases:
             run(["python3", "scripts/serve_load.py", host, port, "--concurrency", "1", "--classes", "all", "--repeat", "3",
                  "--max-tokens", "256", "--json-out", out / "transcripts_default.json"], out / "transcripts_default.log", env)
