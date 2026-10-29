@@ -145,6 +145,7 @@ mechanism and depth the template ships with.
 | [DeepSeek-V4-Flash](docs/model_cards/DeepSeek-V4-Flash.md) | [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) | MXFP4 experts, FP8 dense | [2](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w2.example.json), [4](deploy/cluster_deepseek-v4-flash_mxfp4-fp8_w4.example.json) | 1M | DSpark 5 | |
 | [MiMo-V2.6-Flash](docs/model_cards/MiMo-V2.6-Flash.md) | [XiaomiMiMo/MiMo-V2.6-Flash-RL](https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL) | MXFP4 experts, FP8 dense | [2](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w2.example.json), [4](deploy/cluster_mimo-v2.6-flash_mxfp4-fp8_w4.example.json) | 256K on two, 128K on four | MTP 1 | |
 | [Flint](docs/model_cards/Flint-FP8-NVFP4.md) | [HawkBearPig/flint-FP8-NVFP4](https://huggingface.co/HawkBearPig/flint-FP8-NVFP4) | FP8 and NVFP4 experts, BF16 rest | [1](deploy/cluster_flint_fp8-nvfp4_w1.example.json), [2](deploy/cluster_flint_fp8-nvfp4_w2.example.json), [4](deploy/cluster_flint_fp8-nvfp4_w4.example.json) | 256K | none | |
+| [Dory1.0-4B](docs/model_cards/Dory1.0-4B-NVFP4.md) | [nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4](https://huggingface.co/nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4) | NVFP4 W4A16 | [1](deploy/cluster_dory1.0-4b_nvfp4_w1.example.json) | 256K | none | |
 
 Templates are named `cluster_<model>_<quant>_w<nodes>.example.json`. Copy
 one without `.example` and the launcher fills the node addresses, SSH user

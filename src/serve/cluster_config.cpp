@@ -304,6 +304,12 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
           e.prefill = text(x, ek, what);
           if (e.prefill != "bounded" && e.prefill != "exact")
             fail(what, "'" + ek + "' must be \"bounded\" or \"exact\"");
+        } else if (p.key == "dory_loops") {
+          e.dory_loops = static_cast<int>(integer(x, ek, what, 1, 1 << 16));
+        } else if (p.key == "dory_kv_cache") {
+          e.dory_kv_cache = text(x, ek, what);
+          if (e.dory_kv_cache != "per_loop" && e.dory_kv_cache != "last_loop")
+            fail(what, "'" + ek + "' must be \"per_loop\" or \"last_loop\"");
         } else if (p.key == "prefill_dense") {
           e.prefill_dense = text(x, ek, what);
           if (e.prefill_dense != "auto" && e.prefill_dense != "tile" && e.prefill_dense != "streaming")

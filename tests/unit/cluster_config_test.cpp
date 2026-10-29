@@ -782,6 +782,29 @@ DGPP_TEST(cluster_config_latency_tuning_defaults_and_bounds) {
           "a zero floor (the alignment) is a valid choice");
 }
 
+DGPP_TEST(cluster_config_dory_keys_default_parse_and_refuse) {
+  const auto refused = [](const std::string& body) -> std::string {
+    try {
+      (void)dgpp::serve::parse_cluster_config(engine_json(body), "t");
+    } catch (const std::exception& e) {
+      return e.what();
+    }
+    return "";
+  };
+  const dgpp::serve::ClusterConfig d = dgpp::serve::parse_cluster_config(engine_json("{}"), "t");
+  require(d.engine.dory_loops == 0 && d.engine.dory_kv_cache == "per_loop",
+          "the exact defaults: the checkpoint's loops, per_loop");
+  const dgpp::serve::ClusterConfig c = dgpp::serve::parse_cluster_config(
+      engine_json(R"({"dory_loops": 3, "dory_kv_cache": "last_loop"})"), "t");
+  require(c.engine.dory_loops == 3 && c.engine.dory_kv_cache == "last_loop", "the loop keys parse");
+  require(refused(R"({"dory_kv_cache": "shared"})").find("per_loop") != std::string::npos,
+          "an unknown policy refused by name");
+  require(!refused(R"({"dory_kv_cache": 2})").empty(), "a non-string policy refused");
+  require(!refused(R"({"dory_loops": 0})").empty(), "zero loops refused (the key overrides the checkpoint)");
+  require(!refused(R"({"dory_loops": -1})").empty(), "negative loops refused");
+  require(!refused(R"({"dory_loops": "two"})").empty(), "a non-integer loop count refused");
+}
+
 DGPP_TEST(cluster_config_tokenizer_cache) {
   const auto parse = [](const std::string& tokenizer) {
     return dgpp::serve::parse_cluster_config(

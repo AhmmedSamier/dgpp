@@ -218,6 +218,17 @@ struct ClusterConfig {
     // recipe, half the prefill work) or "exact" (every layer over every
     // row, the parity mode).
     std::string prefill = "bounded";
+    // The Dory1.0-4B loop (docs/dory_plan.md D1, D2). Applies to the Dory
+    // family only; every other family refuses them (serve, by name).
+    //   dory_loops: the recurrent block's loop count. Absent (0) is the
+    //     exact path: the checkpoint's own `n_recurrent_loops` (2 in the
+    //     release). Naming one changes what the engine computes.
+    //   dory_kv_cache: "per_loop" (the default, exact: every loop of the
+    //     recurrent block gets its own K/V planes) or "last_loop" (one
+    //     plane per layer, only the last loop's rows kept — the pool at
+    //     half the planes, the loops past the last one's history gone).
+    int dory_loops = 0;
+    std::string dory_kv_cache = "per_loop";
     std::string prefill_dense = "auto";  // family default | tile | streaming
     std::string prefill_window = "flash";  // the DeepSeek-V4.1 prefill's window attention: flash | scalar
     std::string decode_window = "flash";   // the DeepSeek-V4.1 decode's window attention: flash | scalar

@@ -1531,6 +1531,59 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
 
 }  // namespace
 
+// The transformers-generic template's syntax (the shape Dory1.0-4B ships,
+// 2026-10-18): the inline `for k in m if cond` filter over a MAP (jinja
+// iterates a mapping by keys), the `sequence` test (a str is a sequence,
+// a map is not), and tojson's separators. The filtered items get the loop
+// metadata; the keys keep the document's order.
+DGPP_TEST(chat_template_generic_hf_render_extra_keys) {
+  static const char* kSrc =
+      "{% macro render_extra_keys(json_dict, handled_keys) %}"
+      "{%- if json_dict is mapping %}"
+      "{%- for json_key in json_dict if json_key not in handled_keys %}"
+      "{%- if json_dict[json_key] is mapping or (json_dict[json_key] is sequence and json_dict[json_key] is not string) %}"
+      "<{{ json_key }}>{{ json_dict[json_key] | tojson | safe }}</{{ json_key }}>"
+      "{%- else %}"
+      "<{{ json_key }}>{{ json_dict[json_key] | string }}</{{ json_key }}>"
+      "{%- endif %}"
+      "{%- endfor %}"
+      "{%- endif %}"
+      "{% endmacro %}"
+      "{{ render_extra_keys(extra, ['handled']) }}";
+  const auto tpl = dgpp::text::ChatTemplate::compile(kSrc);
+  dgpp::text::Value::Members extra;
+  extra.emplace_back("handled", dgpp::text::Value::integer(1));
+  extra.emplace_back("tags", dgpp::text::Value::list_value(
+                                 {dgpp::text::Value::string_value("a"),
+                                  dgpp::text::Value::string_value("b")}));
+  extra.emplace_back("note", dgpp::text::Value::string_value("plain"));
+  dgpp::text::Value::Members g;
+  g.emplace_back("extra", dgpp::text::Value::map_value(std::move(extra)));
+  const std::string out = tpl.render(dgpp::text::Value::map_value(std::move(g)));
+  const std::string want = "<tags>[\"a\", \"b\"]</tags><note>plain</note>";
+  require(out == want, "generic-template render: got '" + out + "'");
+  // The loop metadata follows the FILTERED sequence.
+  const auto t2 = dgpp::text::ChatTemplate::compile(
+      "{% for k in m if k != 'x' %}{{ loop.index0 }}:{{ k }};{% endfor %}");
+  dgpp::text::Value::Members m2;
+  m2.emplace_back("x", dgpp::text::Value::integer(0));
+  m2.emplace_back("y", dgpp::text::Value::integer(1));
+  m2.emplace_back("z", dgpp::text::Value::integer(2));
+  dgpp::text::Value::Members g2;
+  g2.emplace_back("m", dgpp::text::Value::map_value(std::move(m2)));
+  require(t2.render(dgpp::text::Value::map_value(std::move(g2))) == "0:y;1:z;",
+          "filtered loop metadata");
+  // The iterable stays a ternary when its `if` carries an `else`.
+  const auto t3 = dgpp::text::ChatTemplate::compile(
+      "{% for k in (a if b else c) %}{{ k }}{% endfor %}");
+  dgpp::text::Value::Members g3;
+  g3.emplace_back("a", dgpp::text::Value::list_value({dgpp::text::Value::string_value("A")}));
+  g3.emplace_back("b", dgpp::text::Value::boolean(true));
+  g3.emplace_back("c", dgpp::text::Value::list_value({dgpp::text::Value::string_value("C")}));
+  require(t3.render(dgpp::text::Value::map_value(std::move(g3))) == "A",
+          "a parenthesized ternary iterable still parses");
+}
+
 int main(int argc, char** argv) {
   g_argc = argc;
   g_argv = argv;

@@ -518,6 +518,13 @@ std::string encode_journal_settings(const WorldSettings& s) {
   out += std::format(",\"compact\":{}", s.compact_batches ? 1 : 0);
   out += ",\"pf\":";
   append_json_string(&out, s.prefill);
+  // The Dory1.0-4B loop keys (docs/dory_plan.md D1, D2): the family is
+  // world-1, so no peer ever reads them — carried for the uniform rule
+  // (every lever rides the settings record) and the digest. Records before
+  // them carry none: the checkpoint's loops, per_loop.
+  if (s.dory_loops > 0) out += ",\"dlp\":" + std::to_string(s.dory_loops);
+  out += ",\"dkv\":";
+  append_json_string(&out, s.dory_kv_cache);
   out += ",\"pfd\":";
   append_json_string(&out, s.prefill_dense);
   out += std::format(",\"pfo\":{}", s.prefill_fold_overlap ? 1 : 0);
@@ -836,6 +843,13 @@ JournalRecord decode_journal_line(std::string_view line) {
     if (v.find("npre")) s.ngram_prestage = flag("npre");
     // Records before 2026-09-14 carry no prefill mode: bounded.
     if (const dgpp::minijson::Value* pf = v.find("pf")) s.prefill = std::string(pf->as_string());
+    // The Dory loop keys (2026-10-18): records before them carry none.
+    if (const dgpp::minijson::Value* dlp = v.find("dlp")) s.dory_loops = static_cast<int>(dlp->as_int());
+    if (const dgpp::minijson::Value* dkv = v.find("dkv")) {
+      s.dory_kv_cache = std::string(dkv->as_string());
+      if (s.dory_kv_cache != "per_loop" && s.dory_kv_cache != "last_loop")
+        throw std::runtime_error("journal: engine.dory_kv_cache must be per_loop or last_loop");
+    }
     // Older records carry no dense form: preserve each family's default.
     if (const dgpp::minijson::Value* pfd = v.find("pfd")) s.prefill_dense = std::string(pfd->as_string());
     else s.prefill_dense = "auto";

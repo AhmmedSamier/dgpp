@@ -1015,6 +1015,61 @@ project procedures and design guidance live in `docs/`.
   `timed_load.py` prints the decode-only
   per-class table before `serve_load.py`'s wall table. `AGENTS.md` carries
   the rules.
+- **A begin evicts its way into the in-flight prefill walk instead of
+  waiting it out** (2026-10-20). A queued request whose blocks are pinned
+  by retired sessions' cache entries now joins the walk other prefills are
+  advancing through — where it waited for the pool to drain before — by
+  taking the cache's LRU unattached entries, the give-way the idle path
+  already applied: never a block a live request holds (each in-flight
+  prefill keeps its own refcount on every reserved block and a victim
+  drops only the cache's extra ref), the planned attach touched first so
+  the join keeps its prefix hit, and the plan recomputed after every
+  eviction because the victim may have been that entry. Each begin's fit
+  is netted against the blocks the walk's earlier begins will take: the
+  2026-10-20 d8192 c2 crash (`session_reserve_blocks` "cannot cover
+  10 384 tokens") came from a fit check that recomputed the free pool
+  from the engine, discarding that projection and admitting an overdraw
+  the same walk would fill.
+- **The Dory1.0-4B template pins the exact walk and paces its prefill**
+  (2026-10-20).
+  [deploy/cluster_dory1.0-4b_nvfp4_w1.example.json](deploy/cluster_dory1.0-4b_nvfp4_w1.example.json)
+  states the exact path's two keys outright — `engine.dory_loops: 2` (the
+  checkpoint's own count) and `engine.dory_kv_cache: "per_loop"` (the
+  exact walk, one plane per attention layer per loop, ≈ 56 GiB of planes
+  at the full 262 144-token capacity; the lossy half-pool `last_loop`
+  stays the one-key alternative) — and paces prompt work with
+  `prefill_budget_tokens: 2048` under a `decode_gap_target_ms: 3000`.
+- **Dory1.0-4B served on one Spark** (2026-10-18). The looped normalized
+  GPT (`DoryForCausalLM`, `nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4`)
+  joins the served families: a 16-layer input block, a 40-layer recurrent
+  block walked the checkpoint's own 2 times with the input re-injected and
+  the state re-normalized per loop, a 16-layer output block — no
+  LayerNorm anywhere (nGPT `justnorm` at eight sites, `slerp_alpha` for
+  every residual), sliding/full GQA with the qk-norm applied after RoPE,
+  the head scaled per vocabulary entry. The 2.98 GiB NVFP4 W4A16 image
+  loads as shipped (packed e2m1, E4M3 blocks, F32 globals, BF16
+  activations — no requantization, no lossy levers), resident on one rank
+  (the release refuses TP), the paged BF16 K/V pool carrying the full
+  history per (layer, loop) under the exact `per_loop` policy; the
+  checkpoint ships no draft layer, so `engine.mtp`, the drafter keys and
+  `--world > 1` are refused at startup by name, not ignored. Two
+  [engine keys](docs/configuration.md): `engine.dory_loops` (the exact
+  path leaves it unset) and `engine.dory_kv_cache` (`per_loop` default,
+  `last_loop` lossy for decode and prefix reuse). The template is
+  [deploy/cluster_dory1.0-4b_nvfp4_w1.example.json](deploy/cluster_dory1.0-4b_nvfp4_w1.example.json);
+  the model card is [docs/model_cards/Dory1.0-4B-NVFP4.md](docs/model_cards/Dory1.0-4B-NVFP4.md)
+  and the survey [docs/dory_plan.md](docs/dory_plan.md). The forward gate
+  runs the CUDA walk against a CPU fp64 host reference (fixture logits
+  within 0.008 relative L2, worst element 0.9 % of the logits' peak,
+  prefill and session decode alike). Landing a real checkpoint found and
+  fixed three: the 7168-wide NVFP4 GEMV K (the MLP down projection) joins
+  the compiled set, the decode-graph walk is memcpy-clean (the theta
+  tables stage at build, the staging copies are kernels), and the
+  tokenizer grew the Nemotron CamelCase pretokenizer pattern while the
+  chat-template subset grew the generic transformers template's pieces —
+  the `for x in ys if cond` filter, mapping-key iteration and the
+  `sequence` test. Boot 1.7 s to listening; a 48-token greedy generation
+  reproduces bitwise across runs.
 - **The fp8 K/V pool on every Qwen3.5 release, and the Qwen3.8-27B FP8
   templates take it with the fp8 attention** (2026-10-18). `engine.kv_dtype:
   "fp8"` needed a release that ships its `kv_cache_scheme` scales (the

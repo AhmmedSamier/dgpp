@@ -2316,6 +2316,66 @@ class SharedPrefixEngine : public FakeEngine {
   std::map<int, std::vector<int>> request_blocks_, snapshot_blocks_;
 };
 
+// The chunked, walk-advancing version of the physical fake: the same
+// block-identity accounting as SharedPrefixEngine (an eviction that only
+// drops the cache's extra ref frees no physical block), plus ChunkFakeEngine's
+// resumable prefill and one-walk-per-tick group advance (the "GA" op).
+class ChunkSharedPrefixEngine : public SharedPrefixEngine {
+ public:
+  ChunkSharedPrefixEngine(int slots, int64_t blocks, int arena_slots)
+      : SharedPrefixEngine(slots, blocks, arena_slots) {}
+  int64_t prefill_chunk_alignment() const override { return 4; }
+  int64_t prefill_chunk_limit() const override { return 16; }
+  bool prefill_group_advance() const override { return true; }
+  void begin_prefill(int req, const std::vector<int64_t>& prompt, int64_t reserved,
+                     int64_t budget, const PrefixPrefill& plan) override {
+    if (plan.boundaries) last_boundaries = *plan.boundaries;
+    auto copy = plan;
+    const int32_t first = plan.attach_slot >= 0 || plan.snap_slot >= 0 ||
+                              plan.body_snap_slot >= 0 || plan.head_snap_slot >= 0
+                             ? prefill_cached(req, prompt, &copy)
+                             : prefill(req, prompt);
+    reserve(req, reserved);
+    pending_[req] = {static_cast<int64_t>(prompt.size()) - copy.attach_position, budget, first,
+                     copy.snap_taken, copy.body_snap_taken, copy.head_snap_taken};
+  }
+  PrefillProgress advance_prefill(int req, int64_t budget = 0) override {
+    auto& pending = pending_.at(req);
+    const int64_t count = std::min(pending.remaining, budget > 0 ? budget : pending.budget);
+    pending.remaining -= count;
+    ops_.push_back("PF:" + std::to_string(req) + ":" + std::to_string(count));
+    PrefillProgress out{count, pending.remaining == 0 ? pending.first : -1, pending.snap,
+                        pending.body, pending.head};
+    if (pending.remaining == 0) pending_.erase(req);
+    return out;
+  }
+  std::vector<PrefillProgress> advance_prefill_group(const std::vector<int>& reqs,
+                                                     const std::vector<int64_t>& budgets) override {
+    std::string op = "GA";
+    for (const int64_t b : budgets) op += ":" + std::to_string(b);
+    ops_.push_back(op);
+    std::vector<PrefillProgress> out;
+    for (size_t i = 0; i < reqs.size(); ++i) out.push_back(advance_prefill(reqs[i], budgets[i]));
+    return out;
+  }
+  std::vector<int32_t> step(int req) override {
+    require(!pending_.contains(req), "an unfinished prefill must not decode");
+    return SharedPrefixEngine::step(req);
+  }
+  void close(int req) override {
+    pending_.erase(req);
+    SharedPrefixEngine::close(req);
+  }
+
+ private:
+  struct Pending {
+    int64_t remaining, budget;
+    int32_t first;
+    bool snap, body, head;
+  };
+  std::map<int, Pending> pending_;
+};
+
 DGPP_TEST(scheduler_growOnDemand_reclaimsIdleCacheBeforeSheddingAndReplays) {
   const auto run = [] {
     SharedPrefixEngine engine(1, 8, 4);
@@ -3346,6 +3406,135 @@ DGPP_TEST(scheduler_prefixCache_attachedEntriesAreNeverEvicted) {
   require(sched.meters().prefix_skipped == 1 && sched.meters().prefix_evictions == 1 &&
               sched.meters().prefix_close_entries == 1,
           "c's snapshot skipped while b was attached; a's entry gave way to b's close entry");
+}
+
+DGPP_TEST(scheduler_prefixCache_entriesGiveTheirBlocksToABeginJoiningTheWalk) {
+  // GIVEN a walk-advancing engine, an 11-block pool (4 tokens/block), and
+  // two retired sessions pinning one block each (cut 4): two co-arrivals
+  // begin in the SAME walk — r0 (prompt 13, a four-block reservation) fits
+  // the nine free blocks, r1 (prompt 25, seven blocks) does not (nine - 4 =
+  // five, net of r0's own reservation in the same walk). The pinned entries
+  // must give way — both of them: r1 fits only after evicting TWO, and the
+  // fit check must net r0's four blocks against the pool the walk will fill
+  // (the 2026-10-20 d8192 crash over-fit by ignoring the co-begin and hit
+  // session_reserve_blocks "cannot cover"). r2 — which cannot fit even
+  // after every remaining eviction — stays queued rather than admitted.
+  const auto run = [] {
+    ChunkSharedPrefixEngine engine(/*slots=*/2, /*blocks=*/11, /*arena_slots=*/8);
+    engine.arm(0, {1}, 1);   // s0
+    engine.arm(0, {2}, 1);   // s1
+    engine.arm(0, {10}, 1);  // r0
+    engine.arm(1, {20}, 1);  // r1
+    engine.arm(0, {30}, 1);  // r2
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 8;
+    Scheduler sched(&engine, {}, 0, policy);
+    GrowLog log;
+    sched.set_observer(&log);
+    for (int i = 0; i < 2; ++i) {
+      sched.submit(make_cached_request("s" + std::to_string(i),
+                                       counted_prompt(13, 100 + i * 200), {4}, 1));
+      sched.run_to_completion();
+    }
+    require(sched.meters().prefix_entries == 2 && engine.pool_blocks_in_use() == 2,
+            "two retired sessions pin two of eleven blocks");
+    // The prompts are unaligned on purpose: a block-aligned end would take
+    // a rolling snapshot at prefill's end and pin the whole reservation.
+    sched.submit(make_cached_request("r0", counted_prompt(13, 1000), {4}, 1));
+    sched.submit(make_cached_request("r1", counted_prompt(25, 2000), {4}, 1));
+    sched.tick();
+    require(sched.meters().prefilling == 2,
+            "r1 joins r0's walk: its blocks came from the pinned entries, not a wait");
+    require(std::count(engine.ops().begin(), engine.ops().end(), "GA:4:4") == 1,
+            "the co-beginning pair shares one fair walk");
+    require(sched.meters().prefix_evictions == 2 && engine.pool_blocks_in_use() == 11,
+            "both entries evicted (netting r0's reservation), pool exactly full — no overdraw");
+    sched.submit(make_cached_request("r2", counted_prompt(25, 3000), {4}, 1));
+    sched.tick();
+    require(sched.meters().prefilling == 2 && sched.meters().queued == 1 &&
+                sched.meters().prefix_evictions == 2,
+            "r2 waits the walk's cap with the pool full, evicting nothing yet");
+    sched.run_to_completion();
+    require(sched.find("r0")->generated == std::vector<int64_t>({10}) &&
+                sched.find("r1")->generated == std::vector<int64_t>({20}) &&
+                sched.find("r2")->generated == std::vector<int64_t>({30}),
+            "co-beginners and the deferred all complete their transcripts");
+    // r1 (the joiner) reclaims the two seed entries; r2, which can never
+    // fit, later drains r0's own cut entry (on the arena slot r1's evictions
+    // freed) while staying queued.
+    require(log.evictions == std::vector<std::string>{"r1:0", "r1:1", "r2:0"},
+            "the joiner is credited for the two entries it reclaimed; r2's failed fit drains r0's entry");
+    require(sched.meters().prefix_evictions == 3 && sched.meters().prefix_entries == 2 &&
+                engine.pool_blocks_in_use() == 2,
+            "no reservation leak: only the two surviving requests' own entries remain");
+    return std::make_pair(engine.op_stream(), sched.prefix_digest());
+  };
+  require(run() == run(), "replicated requests produce identical engine operations and cache digests");
+}
+
+DGPP_TEST(scheduler_prefixCache_plannedAttachSurvivesLaterFitEvictions) {
+  const auto run = [] {
+    ChunkSharedPrefixEngine engine(/*slots=*/2, /*blocks=*/10, /*arena_slots=*/8);
+    engine.arm(0, {1}, 1);
+    engine.arm(0, {10}, 1);
+    engine.arm(0, {20}, 1);
+    dgpp::sched::AdmissionPolicy policy;
+    policy.prefill_budget_tokens = 8;
+    Scheduler sched(&engine, {}, 0, policy);
+    sched.submit(make_cached_request("seed", counted_prompt(25), {24}, 1));
+    sched.run_to_completion();
+    require(engine.pool_blocks_in_use() == 6, "seed pins six of ten blocks");
+
+    // first needs four new blocks because it can share seed's six. second
+    // cannot fit: evicting seed would invalidate first's already-counted
+    // savings and admit thirteen blocks into a ten-block pool.
+    sched.submit(make_cached_request("first", counted_prompt(37), {24}, 1));
+    sched.submit(make_cached_request("second", counted_prompt(9, 2000), {4}, 1));
+    sched.tick();
+    require(sched.meters().prefilling == 1 && sched.meters().queued == 1,
+            "the later request waits instead of evicting the earlier begin's prefix");
+    require(sched.meters().prefix_hits == 1 && sched.meters().prefix_tokens_saved == 24 &&
+                sched.meters().prefix_evictions == 0 && engine.pool_blocks_in_use() == 10,
+            "planning protects the prefix without adding hits or reservations");
+    sched.run_to_completion();
+    require(sched.find("first")->generated == std::vector<int64_t>{10} &&
+                sched.find("second")->generated == std::vector<int64_t>{20},
+            "both requests finish after the deferred admission");
+    return std::make_pair(engine.op_stream(), sched.prefix_digest());
+  };
+  require(run() == run(), "planned prefix protection preserves replicated decisions");
+}
+
+DGPP_TEST(scheduler_prefixCache_plannedAttachSurvivesEarlierBeginSnapshot) {
+  ChunkSharedPrefixEngine engine(/*slots=*/2, /*blocks=*/14, /*arena_slots=*/1);
+  engine.arm(0, {1}, 1);
+  engine.arm(0, {10}, 1);
+  engine.arm(1, {20}, 1);
+  dgpp::sched::AdmissionPolicy policy;
+  policy.prefill_budget_tokens = 8;
+  Scheduler sched(&engine, {}, 0, policy);
+  sched.submit(make_cached_request("seed", counted_prompt(25), {24}, 1));
+  sched.run_to_completion();
+
+  // Both begins fit. The first one's new snapshot must not evict the only
+  // arena entry before the second begin gets to attach to it.
+  sched.submit(make_cached_request("cold", counted_prompt(13, 2000), {4}, 1));
+  sched.submit(make_cached_request("cached", counted_prompt(37), {24}, 1));
+  sched.tick();
+  require(sched.meters().prefilling == 2 && sched.meters().prefix_hits == 1 &&
+              sched.meters().prefix_tokens_saved == 24 && sched.meters().prefix_evictions == 0,
+          "the later begin keeps its planned hit while the earlier snapshot skips");
+  sched.run_to_completion();
+  require(sched.find("cold")->generated == std::vector<int64_t>{10} &&
+              sched.find("cached")->generated == std::vector<int64_t>{20},
+          "both co-beginners finish");
+  // A new cold request can reclaim the entry after the real attach and the
+  // planning hold have both ended; no temporary reference leaks.
+  engine.arm(0, {30}, 1);
+  const auto evictions = sched.meters().prefix_evictions;
+  sched.submit(make_cached_request("replacement", counted_prompt(13, 3000), {4}, 1));
+  sched.run_to_completion();
+  require(sched.meters().prefix_evictions > evictions, "planning holds release after begin");
 }
 
 // ---- the NVMe cold tier (issue #26) -------------------------------------------
@@ -5211,14 +5400,18 @@ DGPP_TEST(scheduler_queuedText_mtp_cached_attach_and_clamp_fit) {
     engine.reset_tick();
     const auto before = sched.meters();
     sched.tick();
-    require(engine.begins.size() == (slack == 0 ? 1u : 0u),
-            "cached physical fit includes shared full blocks and rolling copy headroom");
-    if (slack == 0) {
-      require(engine.shared.at(1) == 1 && engine.advanced.at(1) == 4 &&
-                  sched.meters().prefix_hits == before.prefix_hits + 1 &&
-                  sched.meters().prefix_tokens_saved == before.prefix_tokens_saved + 3,
-              "attach and suffix computation preserved at the physical boundary");
-    }
+    // A begin one physical block short joins by evicting the cache's LRU
+    // unattached entry — never the entry it is about to attach (touched
+    // first), so the join keeps its hit. Exactly-fitting pools admit with
+    // no eviction, which is what pins the fit arithmetic at the boundary.
+    require(engine.begins.size() == 1,
+            "a begin one block short joins by evicting the non-attach LRU entry");
+    require(sched.meters().prefix_evictions == (slack == 0 ? 0 : 1),
+            "exactly-fitting pools admit without eviction");
+    require(engine.shared.at(1) == 1 && engine.advanced.at(1) == 4 &&
+                sched.meters().prefix_hits == before.prefix_hits + 1 &&
+                sched.meters().prefix_tokens_saved == before.prefix_tokens_saved + 3,
+            "attach and suffix computation preserved at the physical boundary");
     require(engine.pool_blocks_in_use() <= engine.pool_blocks_total(), "cache fit does not overdraw");
     require(sched.cancel("cached") && sched.cancel("long"), "cancel cache boundary fixtures");
     sched.run_to_completion();

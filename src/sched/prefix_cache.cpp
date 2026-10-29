@@ -313,14 +313,19 @@ int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t
 }
 
 void PrefixCache::attach(int index, uint64_t now, const std::string& key) {
+  retain(index);
   Entry& e = entries_.at(static_cast<size_t>(index));
-  if (!e.live) throw std::logic_error("PrefixCache: attach to a dead entry");
-  ++e.attached;
   e.last_use = now;
   if (e.key.empty() && !key.empty()) e.key = key;
   ++stats_.hits;
   stats_.tokens_saved += e.position;
   note(1, static_cast<uint64_t>(e.position), static_cast<uint64_t>(e.slot));
+}
+
+void PrefixCache::retain(int index) {
+  Entry& e = entries_.at(static_cast<size_t>(index));
+  if (!e.live) throw std::logic_error("PrefixCache: retain of a dead entry");
+  ++e.attached;
 }
 
 void PrefixCache::touch(int index, uint64_t now) {

@@ -163,6 +163,8 @@ struct WorldSettings {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
+  int dory_loops = 0;                  // engine.dory_loops (Dory1.0-4B, world 1 only; 0 = the checkpoint's)
+  std::string dory_kv_cache = "per_loop";    // engine.dory_kv_cache: per_loop | last_loop
   std::string prefill_dense = "auto";        // family default | tile | streaming
   bool prefill_fold_overlap = true;
   bool decode_pdl = true;                    // the decode graph's kernel edges programmatic          // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute

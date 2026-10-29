@@ -215,12 +215,21 @@ add_library(dgpp_kernels STATIC
   src/kernels/sink_attn.cu
   src/kernels/mimo_mtp_history.cu
   src/kernels/sink_attn_prefill.cu
-  src/kernels/add_rmsnorm.cu)
+  src/kernels/add_rmsnorm.cu
+  src/kernels/dory_norm.cu
+  src/kernels/dory_attn.cu
+  src/kernels/dory_head.cu)
 target_link_libraries(dgpp_kernels PUBLIC CUDA::cudart CUDA::cublasLt CUDA::cuda_driver dgpp_core dgpp_rope_scaling)
 dgpp_set_common(dgpp_kernels)
 # The device sampler mirrors the host oracle bit for bit: no contraction of
 # its multiplies and adds (the host builds with -ffp-contract=off).
 set_source_files_properties(src/kernels/sample_pick.cu PROPERTIES
+  COMPILE_OPTIONS "--fmad=false")
+# The same for the Dory normalizations: the residual combine
+# (na + lr * (nb - na)) rounds like the host reference's, which is built with
+# -ffp-contract=off, so the device must not contract it into an fma either.
+# The explicit fma() chains of the row sums are unaffected by -fmad.
+set_source_files_properties(src/kernels/dory_norm.cu PROPERTIES
   COMPILE_OPTIONS "--fmad=false")
 
 add_library(dgpp_models_doll STATIC
@@ -320,6 +329,33 @@ target_include_directories(dgpp_models_mimo PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(dgpp_models_mimo PUBLIC dgpp_loaders dgpp_common)
 dgpp_set_common(dgpp_models_mimo)
 
+# Dory1.0-4B (2026-10-16, docs/dory_plan.md): the host-side model description.
+add_library(dgpp_models_dory STATIC
+  src/models/dory/binding.cpp
+  src/models/dory/config.cpp
+  src/models/dory/reference.cpp)
+target_include_directories(dgpp_models_dory PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dory PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_dory)
+
+# The Dory1.0-4B resident loader (loaders/resident_stream.hpp + the family's
+# builders): one rank, packed NVFP4 kept as shipped.
+add_library(dgpp_models_dory_loader STATIC
+  src/models/dory/loader.cpp)
+target_include_directories(dgpp_models_dory_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dory_loader PUBLIC dgpp_models_dory dgpp_loaders CUDA::cudart dgpp_device_ranges)
+dgpp_set_common(dgpp_models_dory_loader)
+
+# The Dory layer objects and the looped model (the paged K/V pool, the
+# attention and MLP blocks, the session-core walk).
+add_library(dgpp_models_dory_layers STATIC
+  src/models/dory/kv_pool.cpp
+  src/models/dory/layers.cpp
+  src/models/dory/forward.cpp)
+target_include_directories(dgpp_models_dory_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_dory_layers
+  PUBLIC dgpp_models_dory dgpp_models_dory_loader dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_dory_layers)
 # Flint (2026-10-22, docs/flint_plan.md): the host-side config, binding
 # table and attention oracle.
 add_library(dgpp_models_flint STATIC
@@ -882,6 +918,7 @@ if(DGPP_ENABLE_IBV)
   add_executable(dgpp_serve_app apps/dgpp_serve.cpp)
   target_link_libraries(dgpp_serve_app PRIVATE dgpp_models_glm_loader dgpp_models_qwen_layers dgpp_models_glm4_layers dgpp_models_glm_dsa_layers
                                              dgpp_models_dsv41_layers dgpp_models_dsv4_layers dgpp_models_mimo_layers
+                                             dgpp_models_dory_layers
                                              dgpp_models_flint_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
@@ -982,6 +1019,9 @@ add_executable(unit_tests
   tests/unit/dsv4_binding_test.cpp
   tests/unit/mimo_config_test.cpp
   tests/unit/mimo_binding_test.cpp
+  tests/unit/dory_config_test.cpp
+  tests/unit/dory_binding_test.cpp
+  tests/unit/dory_reference_test.cpp
   tests/unit/flint_config_test.cpp
   tests/unit/flint_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
@@ -992,6 +1032,8 @@ target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm dgpp_models_qwen dgpp_models_qwen_loader
                                         dgpp_models_glm4
+                                        dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo
+                                        dgpp_models_dory
                                         dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo dgpp_models_flint
                                         dgpp_rope_scaling
                                         dgpp_net dgpp_serve Threads::Threads)
@@ -1028,6 +1070,12 @@ target_include_directories(word_cache_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/s
 target_link_libraries(word_cache_test PRIVATE Threads::Threads)
 dgpp_set_common(word_cache_test)
 add_test(NAME word_cache_test COMMAND word_cache_test)
+
+add_executable(tokenizer_patterns_test tests/host/tokenizer_patterns_test.cpp)
+target_link_libraries(tokenizer_patterns_test PRIVATE dgpp_text)
+dgpp_set_common(tokenizer_patterns_test)
+add_test(NAME tokenizer_patterns_test
+  COMMAND tokenizer_patterns_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data)
 
 # M6 Stage 3: the tokenizer differential gate (host). Skips with rc 2 when
 # the model cache is absent (same discipline as the real-checkpoint gates).
@@ -1097,6 +1145,16 @@ dgpp_set_common(chat_template_test)
 add_test(NAME chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/glm_chat_template_goldens.jsonl)
 set_tests_properties(chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
+
+# The M6 tool-grammar regression harness (the templates' host machine over
+# the real Dory checkpoint, grammar spec included): the probe set behind
+# the serve-side list_mask hard failure of 2026-10-26.
+add_executable(dory_grammar_repro tests/host/dory_grammar_repro.cpp)
+target_include_directories(dory_grammar_repro PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dory_grammar_repro PRIVATE dgpp_models_glm Threads::Threads)
+dgpp_set_common(dory_grammar_repro)
+add_test(NAME dory_grammar_repro COMMAND dory_grammar_repro)
+set_tests_properties(dory_grammar_repro PROPERTIES SKIP_RETURN_CODE 2)
 add_test(NAME qwen_chat_template_test
   COMMAND chat_template_test ${CMAKE_CURRENT_SOURCE_DIR}/tests/data/qwen_chat_template_goldens.jsonl)
 set_tests_properties(qwen_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
@@ -1678,6 +1736,33 @@ target_include_directories(add_rmsnorm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(add_rmsnorm_test PRIVATE dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(add_rmsnorm_test)
 add_test(NAME add_rmsnorm_test COMMAND add_rmsnorm_test)
+
+add_executable(dory_norm_test tests/cuda/dory_norm_test.cu)
+target_include_directories(dory_norm_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dory_norm_test PRIVATE dgpp_kernels dgpp_models_dory CUDA::cudart Threads::Threads)
+dgpp_set_common(dory_norm_test)
+add_test(NAME dory_norm_test COMMAND dory_norm_test)
+
+add_executable(dory_attn_test tests/cuda/dory_attn_test.cu)
+target_include_directories(dory_attn_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dory_attn_test PRIVATE dgpp_kernels dgpp_models_dory CUDA::cudart Threads::Threads)
+dgpp_set_common(dory_attn_test)
+add_test(NAME dory_attn_test COMMAND dory_attn_test)
+
+add_executable(dory_forward_test tests/cuda/dory_forward_test.cpp)
+target_include_directories(dory_forward_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(dory_forward_test PRIVATE dgpp_models_dory_layers dgpp_models_dory_loader dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(dory_forward_test)
+add_test(NAME dory_forward_test COMMAND dory_forward_test)
+# The fixture ladder (docs/adding_a_model.md §6): the tiny release-layout
+# checkpoint from the binding table, the CUDA model over it, and every
+# logits row against the CPU fp64 host reference (generate and decode).
+set(DORY_FORWARD_FIXTURE ${CMAKE_CURRENT_BINARY_DIR}/dory_forward_fixture)
+add_test(NAME dory_forward_fixture COMMAND dory_forward_test --write-fixture ${DORY_FORWARD_FIXTURE})
+add_test(NAME dory_forward_smoke COMMAND dory_forward_test --smoke ${DORY_FORWARD_FIXTURE})
+set_tests_properties(dory_forward_smoke PROPERTIES DEPENDS dory_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
+add_test(NAME dory_forward_reference COMMAND dory_forward_test --reference ${DORY_FORWARD_FIXTURE})
+set_tests_properties(dory_forward_reference PROPERTIES DEPENDS dory_forward_fixture LABELS "gpu" RUN_SERIAL TRUE)
 
 add_executable(glm4_loader_test tests/cuda/glm4_loader_test.cpp)
 target_include_directories(glm4_loader_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
@@ -2448,7 +2533,7 @@ add_test(NAME glm_forward_fixture
 set_tests_properties(glm_forward_fixture PROPERTIES SKIP_RETURN_CODE 2)
 add_executable(nvme_tier_families_test tests/cuda/nvme_tier_families_test.cpp)
 target_include_directories(nvme_tier_families_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
-target_link_libraries(nvme_tier_families_test PRIVATE dgpp_models_mimo_layers dgpp_models_flint_layers dgpp_models_qwen_layers dgpp_models_qwen_loader dgpp_models_qwen dgpp_models_glm_loader dgpp_kernels CUDA::cudart Threads::Threads)
+target_link_libraries(nvme_tier_families_test PRIVATE dgpp_models_dory_layers dgpp_models_mimo_layers dgpp_models_flint_layers dgpp_models_qwen_layers dgpp_models_qwen_loader dgpp_models_qwen dgpp_models_glm_loader dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(nvme_tier_families_test)
 add_test(NAME nvme_tier_families_test COMMAND nvme_tier_families_test)
 set_tests_properties(nvme_tier_families_test PROPERTIES RUN_SERIAL TRUE)
@@ -2660,7 +2745,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
+set_tests_properties(tokenizer_patterns_test word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test chat_template_generator_test route_trace_test sampling_profile_test spec_ab_probe_test
@@ -2672,7 +2757,7 @@ endif()
 set_tests_properties(tokenizer_test qwen_tokenizer_test glm4_tokenizer_test dsv41_tokenizer_test
   chat_template_test qwen_chat_template_test glm4_chat_template_test dsv41_prompt_test
   dsv4_tokenizer_test dsv4_prompt_test glm_dsa_tokenizer_test mimo_tokenizer_test flint_tokenizer_test
-  glm_dsa_chat_template_test mimo_chat_template_test flint_chat_template_test
+  glm_dsa_chat_template_test mimo_chat_template_test flint_chat_template_test dory_grammar_repro
   PROPERTIES LABELS "host;checkpoint")
 foreach(_test qwen_forward_fixture qwen_forward_generate glm4_forward_fixture
     glm4_forward_generate mimo_forward_fixture mimo_forward_generate mimo_forward_generate_teacher

@@ -29,6 +29,30 @@ std::vector<std::vector<int32_t>> SchedulerEngine::step_batch(
 
 namespace {
 
+// Fit calculations borrow full blocks from cached prefixes before the
+// selected requests begin. Keep those entries alive through every begin:
+// both a later fit and an earlier begin's snapshot can otherwise evict one.
+class PlannedPrefixes {
+ public:
+  explicit PlannedPrefixes(PrefixCache& cache) : cache_(cache) {}
+  ~PlannedPrefixes() { release(); }
+  PlannedPrefixes(const PlannedPrefixes&) = delete;
+  PlannedPrefixes& operator=(const PlannedPrefixes&) = delete;
+  void retain(int entry) {
+    if (entry < 0) return;
+    entries_.push_back(entry);
+    cache_.retain(entry);
+  }
+  void release() {
+    for (const int entry : entries_) cache_.detach(entry);
+    entries_.clear();
+  }
+
+ private:
+  PrefixCache& cache_;
+  std::vector<int> entries_;
+};
+
 // A request's lifetime token footprint: the prompt plus every token it
 // can generate. The last generated token is never fed back, so a one-row
 // decode writes no position past prompt + max_steps - 2 and this count
@@ -364,6 +388,26 @@ int64_t Scheduler::new_blocks(const Request& r, const PrefixPlan& plan) const {
   return std::max<int64_t>(blocks, 0);
 }
 
+bool Scheduler::evict_to_fit(const Request& r, int64_t& free_blocks) {
+  for (;;) {
+    const PrefixPlan plan = plan_prefix(r);
+    if (new_blocks(r, plan) <= free_blocks) return true;
+    if (plan.attach_entry >= 0) cache_.touch(plan.attach_entry, ticks_);
+    const int slot = evict_memory_entry();
+    if (slot < 0) return false;
+    const int64_t in_use_before = engine_->pool_blocks_in_use();
+    free_arena_slot(slot);
+    emit_prefix(r.spec.id, "evict", 0, slot);
+    // Add back only the blocks THIS eviction freed. free_blocks carries the
+    // caller's running projection — the needs of the begins already collected
+    // into this walk — which a raw `total - in_use` recompute would discard.
+    // Losing it lets a later begin over-fit a pool an earlier begin in the
+    // same walk will fill, and the engine's session_reserve_blocks then
+    // fails (the 2026-10-20 d8192 c2 "cannot cover 10384 tokens" crash).
+    free_blocks += in_use_before - engine_->pool_blocks_in_use();
+  }
+}
+
 int Scheduler::next_admissible() {
   for (size_t i = 0; i < requests_.size(); ++i) {
     if (requests_[i].state != State::kQueued) continue;
@@ -396,26 +440,10 @@ int Scheduler::next_admissible() {
       return static_cast<int>(i);
     // The prefix cache's entries pin blocks; the LRU unattached ones give
     // way to a request that needs them (never a block a live request
-    // holds). The planned entry is touched first so it is evicted last —
-    // and the plan is recomputed after every eviction, because the victim
-    // may have been that entry.
-    if (cache_.enabled()) {
-      bool evicted = false;
-      for (;;) {
-        const PrefixPlan plan = plan_prefix(requests_[i]);
-        if (new_blocks(requests_[i], plan) <= free_blocks) break;
-        if (plan.attach_entry >= 0) cache_.touch(plan.attach_entry, ticks_);
-        const int slot = evict_memory_entry();
-        if (slot < 0) break;
-        free_arena_slot(slot);
-        emit_prefix(requests_[i].spec.id, "evict", 0, slot);
-        evicted = true;
-        free_blocks = engine_->pool_blocks_total() - engine_->pool_blocks_in_use();
-      }
-      if (evicted &&
-          new_blocks(requests_[i], plan_prefix(requests_[i])) <= free_blocks)
-        return static_cast<int>(i);
-    }
+    // holds). Only reached when the request does not fit yet, so a fit
+    // from evict_to_fit implies at least one eviction happened.
+    if (cache_.enabled() && evict_to_fit(requests_[i], free_blocks))
+      return static_cast<int>(i);
   }
   return -1;
 }
@@ -1656,6 +1684,7 @@ bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
   // trimmed share do not measure the cost of a 1024-token service quantum.
   prefill_pass_budget_tokens_ = budget;
   std::vector<int> inflight, begins;
+  PlannedPrefixes planned_prefixes(cache_);
   int64_t align = 0;
   size_t max_advances = 0;
   if (chunk_tick) {
@@ -1668,10 +1697,14 @@ bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
       if (requests_[i].state == State::kPrefilling) inflight.push_back(static_cast<int>(i));
     align = engine_->prefill_chunk_alignment();
     max_advances = static_cast<size_t>(budget / align);
-    // The one new begin, when any: the oldest fitting eligible
-    // request (skip-fit, no eviction dance — a begin must not disturb the
-    // pool the in-flight prefills hold), gated so every share keeps at
-    // least one aligned chunk.
+    // The new begins, when any: the oldest eligible requests that fit, in
+    // arrival order, gated so every share keeps at least one aligned chunk.
+    // A begin that does not fit may evict the cache's LRU unattached
+    // entries to make room — the same give-way the idle pool applies, and
+    // never a block the in-flight prefills hold (each keeps its own
+    // refcount on every reserved block, and a victim only drops the
+    // cache's extra ref) — so a pool pinned by retired sessions cannot
+    // hold a peer out of the walk for a whole solo read-in.
     // An engine that advances its prefills as one walk begins as many as
     // the budget has aligned shares left (arrivals that came together are
     // read in together): the walk is bounded by the budget, not by them.
@@ -1691,9 +1724,14 @@ bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
         // existing eligibility rules.
         if ((!policy_.prefill_early_admission || !requests_[i].spec.images.empty()) &&
             !needs_chunked_prefill(static_cast<int>(i), budget)) continue;
-        const int64_t need = new_blocks(requests_[i], plan_prefix(requests_[i]));
-        if (need > free_blocks) continue;
+        int64_t need = new_blocks(requests_[i], plan_prefix(requests_[i]));
+        if (need > free_blocks && !evict_to_fit(requests_[i], free_blocks)) continue;
+        // The victim may have been the plan's attach entry; recompute so
+        // the bookkeeping below matches the plan the begin itself takes.
+        const PrefixPlan plan = plan_prefix(requests_[i]);
+        need = new_blocks(requests_[i], plan);
         begins.push_back(static_cast<int>(i));
+        planned_prefixes.retain(plan.attach_entry);
         if (!group_advance) break;
         free_blocks -= need;
         --open_slots;
@@ -1720,6 +1758,7 @@ bool Scheduler::quantum(std::optional<int64_t> adaptive_budget) {
       begin_prefill(b, share);
       admitted_any = true;
     }
+    planned_prefixes.release();  // the begun requests now hold their own refs
     int64_t leftover = budget - n * share;
     if (group_advance && inflight.size() >= 2) {
       // One walk for all of them: the budget in aligned units, by need.

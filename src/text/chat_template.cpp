@@ -77,6 +77,7 @@ struct Stmt {
   std::string target;             // Set target name
   std::string target_attr;        // Set target attribute ({% set ns.a = %})
   std::vector<std::string> names;  // For loop variables (1 or 2)
+  ExprPtr filter;                 // For: the trailing `if <cond>` inline filter
   std::shared_ptr<MacroDef> macro;      // Macro definition
   std::vector<StmtPtr> body;            // If-then / For / Macro body
   std::vector<std::pair<ExprPtr, std::vector<StmtPtr>>> elifs;
@@ -546,7 +547,7 @@ class ExprParser {
       const bool inv = accept_kw("not");
       if (peek().t != ETok::T::Ident) fail(line_, "'is' needs a test name");
       static const char* kTests[] = {"defined", "undefined", "none", "string",
-                                     "mapping", "sequence", "iterable", "true", "false"};
+                                     "mapping", "iterable", "sequence", "true", "false"};
       ExprPtr e = make(Expr::Tag::Test);
       e->name = peek().s;
       e->inverted = inv;
@@ -982,7 +983,47 @@ class StmtParser {
     }
     const size_t ib = rest.find_first_not_of(" \t", in + 4);
     if (ib == std::string::npos) fail(line, "for: missing iterable");
-    s->expr = parse_expr_str(rest.substr(ib), line);
+    const std::string es = rest.substr(ib);
+    try {
+      s->expr = parse_expr_str(es, line);  // the whole string, if it parses whole
+    } catch (const std::exception&) {
+      // e.g. a filter's `x if cond` with no else: a legal inline-if, tried below.
+    }
+    // The trailing inline filter, `for x in ys if cond` (the generic
+    // transformers template's render_extra_keys uses it). jinja consumes
+    // the iterable as one expression, so the split is the LAST top-level
+    // `if` whose two halves each parse: a `a if b else c` iterable leaves
+    // an `else` in the tail that no filter expression swallows, and the
+    // whole string stays the ternary it is.
+    std::vector<size_t> ifs;
+    int depth = 0;
+    char quote = 0;
+    for (size_t p = 0; p < es.size(); ++p) {
+      const char c = es[p];
+      if (quote) {
+        if (c == '\\') ++p;
+        else if (c == quote) quote = 0;
+        continue;
+      }
+      if (c == '\'' || c == '"') quote = c;
+      else if (c == '(' || c == '[' || c == '{') ++depth;
+      else if (c == ')' || c == ']' || c == '}') --depth;
+      else if (depth == 0 && c == 'i' && es.compare(p, 2, "if") == 0 &&
+               (p == 0 || es[p - 1] == ' ' || es[p - 1] == '\t') &&
+               (p + 2 >= es.size() || es[p + 2] == ' ' || es[p + 2] == '\t'))
+        ifs.push_back(p);
+    }
+    for (auto it = ifs.rbegin(); it != ifs.rend(); ++it) {
+      try {
+        ExprPtr f = parse_expr_str(es.substr(*it + 2), line);
+        ExprPtr e = parse_expr_str(es.substr(0, *it), line);
+        s->expr = std::move(e);
+        s->filter = std::move(f);
+        break;
+      } catch (const std::exception&) {
+      }
+    }
+    if (!s->expr) s->expr = parse_expr_str(es, line);  // the whole's own error message
     ++pos_;
     static const char* kForTerm[] = {"endfor"};
     std::string ended;
@@ -1592,8 +1633,13 @@ struct Renderer {
       const size_t e = x.find_last_not_of(ws);
       return Value::string_value(x.substr(b, e - b + 1));
     }
-    if (name == "default") {  // undefined -> the default (boolean=false form)
-      if (args.size() != 1) fail(ctx_.line, "default: takes one argument");
+    if (name == "default") {  // undefined -> the default; the two-value
+                              // form (fallback, true) adds the truthiness
+                              // test — falsy wraps take the fallback too
+                              // (Dory's `content | default('', true)`).
+      if (args.empty() || args.size() > 2)
+        fail(ctx_.line, "default: takes one or two arguments");
+      if (args.size() == 2 && args[1].truthy() && !v.truthy()) return args[0];
       return v.is_defined() ? v : args[0];
     }
     if (name == "string") {  // str(x); strings stay themselves
@@ -1864,7 +1910,7 @@ struct Renderer {
         else if (e.name == "mapping")
           r = v.kind() == Value::Kind::Map;  // namespaces are not mappings
         else if (e.name == "sequence")
-          r = v.kind() == Value::Kind::String || v.kind() == Value::Kind::List;  // Jinja: str counts
+          r = v.kind() == Value::Kind::String || v.kind() == Value::Kind::List;  // Python truth: a str is a sequence, a map is not
         else  // iterable (strings, lists and maps — Python truth)
           r = v.kind() == Value::Kind::String || v.kind() == Value::Kind::List ||
               v.kind() == Value::Kind::Map;
@@ -1951,21 +1997,57 @@ struct Renderer {
         }
         case Stmt::Tag::For: {
           const Value iter = eval(*s->expr);
-          if (iter.kind() != Value::Kind::List)
+          // Items: a list's elements or a map's KEYS (jinja iterates a
+          // mapping by keys — the generic template's render_extra_keys).
+          // The inline `if` filter drops items BEFORE the walk, so the loop
+          // metadata and the body see the filtered sequence (the generic
+          // template reads no loop.* inside a filtered loop).
+          std::vector<const Value*> items;
+          std::vector<Value> keys;  // storage for map-key iteration (reserved first)
+          if (iter.kind() == Value::Kind::List) {
+            for (const Value& it : iter.as_list()) items.push_back(&it);
+          } else if (iter.kind() == Value::Kind::Map) {
+            keys.reserve(iter.as_members()->size());
+            for (const auto& m : *iter.as_members()) {
+              keys.push_back(Value::string_value(m.first));
+              items.push_back(&keys.back());
+            }
+          } else {
             fail(s->line, "for: cannot iterate a non-list");
+          }
+          if (s->filter) {
+            std::vector<const Value*> kept;
+            for (const Value* it : items) {
+              ctx_.stack.emplace_back();
+              Frame& fframe = *ctx_.stack.rbegin();
+              const bool ftuple = s->names.size() == 2;
+              if (ftuple) {
+                if (it->kind() != Value::Kind::List || it->as_list().size() != 2)
+                  fail(s->line, "for: tuple target needs 2-element items");
+                fframe[s->names[0]] = it->as_list()[0];
+                fframe[s->names[1]] = it->as_list()[1];
+              } else {
+                fframe[s->names[0]] = *it;
+              }
+              const bool keep = eval(*s->filter).truthy();
+              ctx_.stack.pop_back();
+              if (keep) kept.push_back(it);
+            }
+            items.swap(kept);
+          }
           const bool tuple = s->names.size() == 2;
-          for (size_t idx = 0; idx < iter.as_list().size(); ++idx) {
+          for (size_t idx = 0; idx < items.size(); ++idx) {
             step();
             ctx_.stack.emplace_back();
             Frame& frame = *ctx_.stack.rbegin();
             if (tuple) {
-              const Value& item = iter.as_list()[idx];
+              const Value& item = *items[idx];
               if (item.kind() != Value::Kind::List || item.as_list().size() != 2)
                 fail(s->line, "for: tuple target needs 2-element items");
               frame[s->names[0]] = item.as_list()[0];
               frame[s->names[1]] = item.as_list()[1];
             } else {
-              frame[s->names[0]] = iter.as_list()[idx];
+              frame[s->names[0]] = *items[idx];
             }
             // Fresh loop metadata each iteration (index0/index/first/
             // last/length).
@@ -1976,16 +2058,13 @@ struct Renderer {
             lm.emplace_back("first", Value::boolean(idx == 0));
             lm.emplace_back("last", Value::boolean(
                                         static_cast<int64_t>(idx) + 1 ==
-                                        static_cast<int64_t>(
-                                            iter.as_list().size())));
+                                        static_cast<int64_t>(items.size())));
             lm.emplace_back("length",
-                            Value::integer(
-                                static_cast<int64_t>(iter.as_list().size())));
+                            Value::integer(static_cast<int64_t>(items.size())));
             // previtem / nextitem: undefined at the ends.
-            lm.emplace_back("previtem", idx > 0 ? iter.as_list()[idx - 1] : Value());
-            lm.emplace_back("nextitem", idx + 1 < iter.as_list().size()
-                                            ? iter.as_list()[idx + 1]
-                                            : Value());
+            lm.emplace_back("previtem", idx > 0 ? *items[idx - 1] : Value());
+            lm.emplace_back("nextitem",
+                            idx + 1 < items.size() ? *items[idx + 1] : Value());
             frame["loop"] = Value::namespace_value(std::move(lm));
             const Flow f = exec(s->body, out);
             ctx_.stack.pop_back();
@@ -2066,6 +2145,7 @@ void collect_global_reads(const std::vector<StmtPtr>& body,
         collect_name_reads(*s->expr, bound, out);  // the iterable is the parent's
         std::vector<std::string> inner = bound;
         for (const std::string& n : s->names) inner.push_back(n);
+        if (s->filter) collect_name_reads(*s->filter, inner, out);  // the loop's own
         collect_global_reads(s->body, std::move(inner), out);
         break;
       }
