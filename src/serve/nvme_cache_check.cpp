@@ -4,13 +4,19 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <stdexcept>
 
 #include "serve/cluster_config.hpp"
+#include "sched/disk_cache.hpp"
+#include "sched/nvme_index.hpp"
 
 namespace dgpp::serve {
 
@@ -19,6 +25,61 @@ constexpr size_t kAlign = 4096;
 
 std::string gib(double bytes) { return std::format("{:.2f} GiB", bytes / (1024.0 * 1024.0 * 1024.0)); }
 }  // namespace
+
+bool valid_nvme_cache_binding(const std::string& binding) {
+  return binding.size() == 16 && std::all_of(binding.begin(), binding.end(), [](char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+  });
+}
+
+std::string nvme_cache_binding(const std::string& version, const std::string& digest,
+                               const std::string& checkpoint, size_t block_bytes, size_t snapshot_bytes,
+                               double capacity_gib, int64_t block_tokens, int world,
+                               const std::string& reuse_binding) {
+  if (!reuse_binding.empty()) {
+    if (!valid_nvme_cache_binding(reuse_binding))
+      throw std::invalid_argument("nvme_cache.reuse_binding must be 16 lowercase hexadecimal digits");
+    return reuse_binding;
+  }
+  return config_digest(version + "|" + digest + "|" + checkpoint + "|" +
+                       std::to_string(block_bytes) + "|" + std::to_string(snapshot_bytes) + "|" +
+                       std::format("{:.17g}", capacity_gib) + "|" + std::to_string(block_tokens) + "|" +
+                       std::to_string(world));
+}
+
+std::string check_nvme_cache_reuse(const NvmeCachePlan& plan, const std::string& binding,
+                                  int rank, int64_t block_tokens) {
+  namespace fs = std::filesystem;
+  const auto refuse = [&](const std::string& why) {
+    return "nvme_cache.reuse_binding " + binding + ": " + why + "; existing cache left untouched";
+  };
+  if (!valid_nvme_cache_binding(binding)) return refuse("invalid binding");
+  const auto sized = [](const fs::path& path, uintmax_t bytes) {
+    std::error_code ec;
+    return fs::is_regular_file(path, ec) && fs::file_size(path, ec) == bytes && !ec;
+  };
+  const fs::path directory(plan.directory);
+  if (!sized(plan.slab, static_cast<uintmax_t>(plan.pages) * plan.page_bytes))
+    return refuse("slab missing or capacity/page geometry changed");
+  if (!sized(directory / ("rank" + std::to_string(rank) + ".crc"),
+             static_cast<uintmax_t>(plan.pages) * sizeof(uint32_t)))
+    return refuse("checksum table missing or wrong size");
+  std::ifstream input(directory / ("rank" + std::to_string(rank) + ".index"), std::ios::binary);
+  if (!input) return refuse("index missing or unreadable");
+  const std::vector<uint8_t> file{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  std::vector<uint8_t> shared;
+  std::vector<uint64_t> digests;
+  if (input.bad() || !sched::parse_nvme_index(file, binding, &shared, &digests))
+    return refuse("index format or stored binding does not match");
+  sched::DiskCache::Header header;
+  std::vector<sched::DiskCache::Record> records;
+  if (!sched::DiskCache::parse(shared, &header, &records) || records.size() != digests.size())
+    return refuse("index payload is invalid");
+  if (header.pages != static_cast<uint64_t>(plan.pages) || header.page_bytes != plan.page_bytes ||
+      header.block_tokens != static_cast<uint64_t>(block_tokens))
+    return refuse("cache geometry does not match");
+  return {};
+}
 
 std::string NvmeCachePlan::describe() const {
   return std::format(

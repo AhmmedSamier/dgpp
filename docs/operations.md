@@ -572,10 +572,16 @@ version; a rollback is `up` naming the previous one, which is still
 installed. `dgpp-cluster releases` shows what each node has;
 `dgpp-serve --version` prints a binary's version, and rank 0 puts its
 version on the journal's settings record so a peer of another version
-exits before its first tick rather than form a mixed world. A new version
-also retires the NVMe cache's slab: it starts a fresh one under its own
-binding, and the previous directory can be removed once the old version is
-no longer wanted.
+exits before its first tick rather than form a mixed world. By default a new
+build selects a fresh NVMe cache binding. To keep an existing compatible
+cache, record its 16-character binding from the current startup log or cache
+directory and set `nvme_cache.reuse_binding` to it in the deployment before
+starting the new version. Keep the setting on later upgrades and keep the
+cache capacity unchanged. This bypasses automatic build/settings identity;
+the model artifacts and cached-state interpretation must remain compatible.
+See [reuse across upgrades](nvme-cache.md#across-restarts) for the full example
+and refusal behavior. Keep the old cache directory while it is selected or
+needed for rollback.
 
 ## What a node needs
 
@@ -1215,11 +1221,16 @@ read came back wrong on some rank, which the world treats as a cold miss. A
 stalled operation is logged after 30 s without progress and fails after
 `op_timeout_s`.
 
-The slab persists across restarts under a directory named by the binary,
-the checkpoint, the effective settings and the slab geometry. A release
-upgrade or a settings change starts a fresh slab under a new directory, and
-startup names the directories of other bindings with their size. Those
-belong to no running world and can be removed to free the disk.
+The slab persists across restarts under a directory named by the build
+version, checkpoint, effective settings and slab geometry. A build or
+settings change selects a new directory by default. Set
+`nvme_cache.reuse_binding` to the existing binding to retain a compatible
+cache across those changes; the file format, geometry, checksum and
+cross-rank checks remain active. Explicit reuse refuses startup if the
+selected cache cannot be adopted, leaving its files intact. After a
+successful start, `nvme_cache.adopted` reports the retained entries.
+Startup names other binding directories and their sizes; remove only caches
+that are no longer selected by a deployment or needed for rollback.
 
 ### The resident image cache
 

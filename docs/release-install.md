@@ -152,3 +152,21 @@ original launcher; unrecorded processes are not adopted or killed.
 
 Source-only benchmarks and reference generators are not included. Resident
 weight caches are built locally at first load; allow additional NVMe space.
+
+## Retain an NVMe prefix cache across upgrades
+
+If the deployment uses persistent `nvme_cache`, automatic cache selection
+changes with the server build. Before upgrading, record the existing
+16-character binding from the startup log or its directory under
+`nvme_cache.path`. Add `"reuse_binding": "<existing binding>"` inside the
+deployment's `nvme_cache` block and keep its capacity unchanged. Leave this
+setting in place on subsequent upgrades to continue using that cache.
+
+This explicitly asserts that the model artifacts and cached-state
+interpretation remain compatible. File formats, geometry, page checksums
+and agreement across ranks are still checked; rejected reuse leaves the
+selected cache intact. The package includes the full guide at
+`docs/nvme-cache.md` and the configuration reference at `docs/configuration.md`.
+The [online example](https://github.com/HawkBearPig/dgpp/blob/master/docs/nvme-cache.md#across-restarts)
+and [upgrade/rollback operations](https://github.com/HawkBearPig/dgpp/blob/master/docs/operations.md#install-upgrade-roll-back)
+also cover this procedure.

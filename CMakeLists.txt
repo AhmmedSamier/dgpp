@@ -961,6 +961,7 @@ if(DGPP_ENABLE_IBV)
   install(FILES docs/release-install.md DESTINATION . RENAME README.md)
   install(FILES requirements-download.txt LICENSE DESTINATION .)
   install(FILES docs/dependencies.md docs/networking.md docs/vision.md DESTINATION docs)
+  install(FILES docs/nvme-cache.md docs/configuration.md docs/prefix-cache.md DESTINATION docs)
   install(FILES docs/licenses/PCRE2.md docs/licenses/stb_image.md docs/licenses/simplewebp.md
                 docs/licenses/pytorch.md DESTINATION docs/licenses)
   install(FILES deploy/nginx.example.conf DESTINATION deploy)
@@ -1198,6 +1199,11 @@ add_executable(http_server_test tests/host/http_server_test.cpp)
 target_link_libraries(http_server_test PRIVATE dgpp_serve Threads::Threads)
 dgpp_set_common(http_server_test)
 add_test(NAME http_server_test COMMAND http_server_test)
+
+add_executable(nvme_cache_test tests/host/nvme_cache_test.cpp)
+target_link_libraries(nvme_cache_test PRIVATE dgpp_serve)
+dgpp_set_common(nvme_cache_test)
+add_test(NAME nvme_cache_test COMMAND nvme_cache_test)
 
 # M6 Stage 4 service gate: the REAL HTTP/SSE service over a fake engine
 # + fake frontend — the OpenAI surface, host-only, always runs.
@@ -2745,7 +2751,7 @@ get_property(DGPP_ALL_TESTS DIRECTORY PROPERTY TESTS)
 foreach(_test IN LISTS DGPP_ALL_TESTS)
   set_tests_properties(${_test} PROPERTIES LABELS "gpu")
 endforeach()
-set_tests_properties(tokenizer_patterns_test word_cache_test bpe_test unit unit_tests http_server_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
+set_tests_properties(tokenizer_patterns_test word_cache_test bpe_test unit unit_tests http_server_test nvme_cache_test serve_test serve_test_wake fabric_serve_test fabric_serve_test_wake scheduler_test shutdown_watchdog_test engine_watchdog_test
   qwen_yarn_fixture_test qwen_w4a4_plan_default qwen_w4a4_plan_mode_0 qwen_w4a4_plan_mode_1
   qwen_w4a4_plan_mode_empty qwen_w4a4_plan_mode_invalid PROPERTIES LABELS "host")
 set_tests_properties(checkpoint_audit_test chat_template_generator_test route_trace_test sampling_profile_test spec_ab_probe_test

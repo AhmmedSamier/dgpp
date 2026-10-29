@@ -3,6 +3,17 @@
 The history by milestone. `PLAN.md` has the milestones' exit gates;
 project procedures and design guidance live in `docs/`.
 
+## Unreleased
+
+- **Keep an existing NVMe cache across upgrades**: set
+  `nvme_cache.reuse_binding` to the previous cache's 16-character binding to
+  bypass automatic build/settings invalidation. This selects the existing
+  files without changing their format or identity. The operator asserts
+  that model artifacts and cached-state interpretation remain compatible;
+  file format, geometry, checksum and cross-rank checks still apply. Rejected
+  explicit reuse refuses startup without clearing the selected cache.
+  See [reuse across upgrades](docs/nvme-cache.md#across-restarts).
+
 ## v0.1.0 — 2026-10-28, the first published release (0.1.0+g11fe1807d63d)
 - **The README and the repository scaffolding** (2026-10-28): the README
   restructured around what the engine is (Why DGPP, a headline table sourced

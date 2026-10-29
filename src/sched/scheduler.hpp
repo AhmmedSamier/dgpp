@@ -436,6 +436,9 @@ class SchedulerEngine {
     // geometry), and a start under the same binding offers them back.
     bool persist = false;
     std::string binding;
+    // Explicit reuse must refuse an incompatible/missing index or a world
+    // disagreement without clearing the cache the operator selected.
+    bool require_existing = false;
     // A filesystem that refuses direct I/O (tmpfs) gets buffered I/O only
     // when allowed: the page cache would grow into the memory the model
     // plans on. The tests allow it.

@@ -87,6 +87,7 @@
 #include "engine/prefix_arena.hpp"
 #include "kernels/segment_copy.hpp"
 #include "sched/scheduler.hpp"
+#include "sched/nvme_index.hpp"
 
 namespace dgpp {
 
@@ -109,6 +110,8 @@ class NvmeTier {
     if (arena_->slots() <= 0) throw std::invalid_argument("NvmeTier: the prefix arena has no slots");
     if (cfg_.chunk_bytes < kAlign || cfg_.chunk_bytes % kAlign != 0)
       throw std::invalid_argument("NvmeTier: the chunk must be a positive 4 KiB multiple");
+    if (cfg_.require_existing && (!cfg_.persist || cfg_.binding.empty()))
+      throw std::invalid_argument("NvmeTier: explicit reuse requires persistence and a binding");
     planes_ = model_->cache_planes();
     size_t off = 0;
     for (const CachePlane& p : planes_) {
@@ -137,7 +140,14 @@ class NvmeTier {
       throw std::runtime_error("NvmeTier: cannot allocate an aligned page");
     // open_slab() can refuse a duplicate before this object's destructor runs.
     aligned_page_.reset(aligned_page);
-    open_slab();
+    try {
+      open_slab();
+    } catch (...) {
+      // A rejected existing cache can fail after taking the slab lock.
+      if (fd_ >= 0) ::close(fd_);
+      if (crc_fd_ >= 0) ::close(crc_fd_);
+      throw;
+    }
     // Every CUDA object now, before the world's collectives (the fabric's
     // rule: nothing creates or frees one between them).
     const size_t max_segments = static_cast<size_t>(per_chunk_) * std::max<size_t>(1, planes_.size());
@@ -610,10 +620,6 @@ class NvmeTier {
     check_pages(job.blob_page, pages, -1);
   }
 
-  // The index file: magic, the binding, the scheduler's bytes (the
-  // world's) and the entries' content digests (this rank's).
-  static constexpr char kIndexFileMagic[8] = {'D', 'G', 'P', 'P', 'N', 'V', 'M', '2'};
-
   void open_slab() {
     namespace fs = std::filesystem;
     const fs::path slab(cfg_.slab_path);
@@ -664,9 +670,12 @@ class NvmeTier {
       if (slab_size == static_cast<uintmax_t>(pages_) * page_bytes_ &&
           crc_size == static_cast<uintmax_t>(pages_) * sizeof(uint32_t) && fs::is_regular_file(index_path_, ec)) {
         const std::vector<uint8_t> file = read_file(index_path_);
-        adopt = parse_index_file(file, &candidate_, &adopted_digests_);
+        adopt = sched::parse_nvme_index(file, cfg_.binding, &candidate_, &adopted_digests_);
       }
     }
+    if (!adopt && cfg_.require_existing)
+      throw std::runtime_error("NvmeTier: explicitly selected cache is missing or its index, binding or size "
+                               "does not match; existing cache left untouched: " + cfg_.slab_path);
     open_fd(adopt);
     if (adopt) {
       crc_.assign(static_cast<size_t>(pages_), 0);
@@ -683,8 +692,8 @@ class NvmeTier {
       }
       if (fd >= 0) ::close(fd);
       if (!ok) {
-        DGPP_LOG_WARN("rank {}: NVMe cache: the CRC table beside {} is unreadable; the slab starts fresh",
-                      cfg_.rank, cfg_.slab_path);
+        DGPP_LOG_WARN("rank {}: NVMe cache: the CRC table beside {} is unreadable; {}",
+                      cfg_.rank, cfg_.slab_path, cfg_.require_existing ? "explicit reuse refused" : "the slab starts fresh");
         candidate_.clear();
         adopted_digests_.clear();
         recreate_slab();
@@ -695,50 +704,10 @@ class NvmeTier {
       fresh_files();
     }
     if (cfg_.persist) {
-      crc_fd_ = ::open(crc_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+      crc_fd_ = ::open(crc_path_.c_str(), O_RDWR | O_CLOEXEC | (cfg_.require_existing ? 0 : O_CREAT), 0600);
       if (crc_fd_ < 0)
         throw std::runtime_error("NvmeTier: cannot open " + crc_path_ + ": " + std::strerror(errno));
     }
-  }
-
-  // The index file taken apart: the binding must be this deployment's, the
-  // digests one per entry of the scheduler's bytes.
-  bool parse_index_file(const std::vector<uint8_t>& file, std::vector<uint8_t>* shared,
-                        std::vector<uint64_t>* digests) const {
-    size_t at = 0;
-    const auto u32 = [&](uint32_t* v) {
-      if (at + 4 > file.size()) return false;
-      *v = 0;
-      for (int i = 0; i < 4; ++i) *v |= static_cast<uint32_t>(file[at + static_cast<size_t>(i)]) << (8 * i);
-      at += 4;
-      return true;
-    };
-    const auto u64 = [&](uint64_t* v) {
-      if (at + 8 > file.size()) return false;
-      *v = 0;
-      for (int i = 0; i < 8; ++i) *v |= static_cast<uint64_t>(file[at + static_cast<size_t>(i)]) << (8 * i);
-      at += 8;
-      return true;
-    };
-    if (file.size() < 8 || std::memcmp(file.data(), kIndexFileMagic, 8) != 0) return false;
-    at = 8;
-    uint32_t n = 0;
-    if (!u32(&n) || at + n > file.size()) return false;
-    if (std::string(reinterpret_cast<const char*>(file.data()) + at, n) != cfg_.binding) return false;
-    at += n;
-    uint64_t shared_len = 0;
-    if (!u64(&shared_len) || shared_len > file.size() - at) return false;
-    shared->assign(file.begin() + static_cast<std::ptrdiff_t>(at), file.begin() + static_cast<std::ptrdiff_t>(at + shared_len));
-    at += static_cast<size_t>(shared_len);
-    uint32_t count = 0;
-    if (!u32(&count) || static_cast<size_t>(count) * 8 != file.size() - at) return false;
-    digests->clear();
-    for (uint32_t i = 0; i < count; ++i) {
-      uint64_t d = 0;
-      if (!u64(&d)) return false;
-      digests->push_back(d);
-    }
-    return true;
   }
 
   // The candidate against the slab as it stands: an entry stays only when
@@ -750,9 +719,10 @@ class NvmeTier {
     std::vector<sched::DiskCache::Record> records;
     if (!sched::DiskCache::parse(candidate_, &header, &records) || records.size() != adopted_digests_.size() ||
         header.pages != static_cast<uint64_t>(pages_) || header.page_bytes != page_bytes_ ||
-        header.blob_pages != static_cast<uint64_t>(blob_pages_)) {
-      DGPP_LOG_WARN("rank {}: NVMe cache: the index beside {} does not describe this slab; the slab starts fresh",
-                    cfg_.rank, cfg_.slab_path);
+        header.blob_pages != static_cast<uint64_t>(blob_pages_) ||
+        header.block_tokens != static_cast<uint64_t>(model_->kv_block_tokens())) {
+      DGPP_LOG_WARN("rank {}: NVMe cache: the index beside {} does not describe this slab; {}",
+                    cfg_.rank, cfg_.slab_path, cfg_.require_existing ? "explicit reuse refused" : "the slab starts fresh");
       candidate_.clear();
       adopted_digests_.clear();
       recreate_slab();
@@ -834,7 +804,7 @@ class NvmeTier {
       return;
     }
     if (fd_ >= 0) ::close(fd_);
-    const int flags = O_RDWR | O_CREAT | O_CLOEXEC;
+    const int flags = O_RDWR | O_CLOEXEC | (cfg_.require_existing ? 0 : O_CREAT);
     fd_ = ::open(cfg_.slab_path.c_str(), flags | O_DIRECT, 0600);
     direct_ = fd_ >= 0;
     if (fd_ < 0 && errno == EINVAL) fd_ = ::open(cfg_.slab_path.c_str(), flags, 0600);
@@ -902,6 +872,9 @@ class NvmeTier {
     ::close(fd);
   }
   void recreate_slab() {
+    if (cfg_.require_existing)
+      throw std::runtime_error("NvmeTier: explicitly selected cache failed validation or world agreement; "
+                               "existing cache left untouched: " + cfg_.slab_path);
     open_fd(/*keep_contents=*/false);
     fresh_files();
   }
@@ -1169,20 +1142,7 @@ class NvmeTier {
       DGPP_LOG_WARN("rank {}: NVMe cache: cannot write {}: {}", cfg_.rank, tmp, std::strerror(errno));
       return;
     }
-    std::vector<uint8_t> out;
-    out.insert(out.end(), kIndexFileMagic, kIndexFileMagic + 8);
-    const auto put32 = [&](uint32_t v) {
-      for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
-    };
-    const auto put64 = [&](uint64_t v) {
-      for (int i = 0; i < 8; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
-    };
-    put32(static_cast<uint32_t>(cfg_.binding.size()));
-    out.insert(out.end(), cfg_.binding.begin(), cfg_.binding.end());
-    put64(static_cast<uint64_t>(bytes.size()));
-    out.insert(out.end(), bytes.begin(), bytes.end());
-    put32(static_cast<uint32_t>(digests.size()));
-    for (const uint64_t d : digests) put64(d);
+    const std::vector<uint8_t> out = sched::write_nvme_index(cfg_.binding, bytes, digests);
     size_t done = 0;
     bool ok = true;
     while (ok && done < out.size()) {

@@ -1,5 +1,14 @@
 # Tests
 
+`nvme_cache_test` checks reuse of an existing binding after build/settings
+changes, adoption and exact-token lookup through the host disk index, legacy
+index encoding, and non-destructive refusal of missing or incompatible files.
+`fabric_serve_test` covers transport of the explicit binding to peers, and
+`portability_test.py` checks launcher validation and configuration forwarding.
+The persistence section of `qwen_decode_test` also restores GPU state with
+explicit reuse and verifies that rejected reuse and world disagreement leave
+the selected files unchanged. Run GPU checks on idle hardware.
+
 `chat_template_generator_test` exercises the Python golden generator's Jinja
 sandbox without a checkpoint or GPU. It checks private-attribute restrictions,
 input immutability, literal message data, namespace/loop behavior, JSON rendering

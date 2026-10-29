@@ -159,9 +159,9 @@ def deployment(path):
     nvme = cfg.get("nvme_cache", {})
     if not isinstance(nvme, dict) or set(nvme) - {"enabled", "path", "capacity_gib", "min_tokens",
                                                    "chunk_mib", "max_ops", "reserve_gib", "persist",
-                                                   "allow_buffered", "op_timeout_s"}:
+                                                   "allow_buffered", "op_timeout_s", "reuse_binding"}:
         raise ValueError("nvme_cache may only contain enabled, path, capacity_gib, min_tokens, chunk_mib, "
-                         "max_ops, reserve_gib, persist, allow_buffered and op_timeout_s")
+                         "max_ops, reserve_gib, persist, allow_buffered, op_timeout_s and reuse_binding")
     if "persist" in nvme and not isinstance(nvme["persist"], bool):
         raise ValueError("nvme_cache.persist must be true or false")
     if "allow_buffered" in nvme and not isinstance(nvme["allow_buffered"], bool):
@@ -188,6 +188,12 @@ def deployment(path):
         raise ValueError("nvme_cache.min_tokens must be a non-negative integer")
     if nvme.get("enabled") and not nvme.get("capacity_gib"):
         raise ValueError("nvme_cache.capacity_gib must be positive when nvme_cache.enabled is true")
+    reuse = nvme.get("reuse_binding", "")
+    if not isinstance(reuse, str) or (reuse and
+            (len(reuse) != 16 or any(c not in "0123456789abcdef" for c in reuse))):
+        raise ValueError("nvme_cache.reuse_binding must be an existing binding (16 lowercase hexadecimal digits)")
+    if reuse and (not nvme.get("enabled", False) or not nvme.get("persist", True)):
+        raise ValueError("nvme_cache.reuse_binding requires enabled and persist to be true")
     if not isinstance(cfg.get("model"), str) or not cfg["model"]:
         raise ValueError("deployment model must be a non-empty string")
     release_name(cfg.get("release", ""))

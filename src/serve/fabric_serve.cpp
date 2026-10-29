@@ -1,4 +1,5 @@
 #include "serve/fabric_serve.hpp"
+#include "serve/nvme_cache_check.hpp"
 
 #include <format>
 
@@ -470,6 +471,10 @@ std::string encode_journal_settings(const WorldSettings& s) {
                        s.nvme_cache_capacity_gib, s.nvme_cache_min_tokens, s.nvme_cache_chunk_mib,
                        s.nvme_cache_max_ops, s.nvme_cache_reserve_gib, s.nvme_cache_persist ? 1 : 0,
                        s.nvme_cache_op_timeout_s);
+  if (s.nvme_cache && !s.nvme_cache_reuse_binding.empty()) {
+    out += ",\"nvmereuse\":";
+    append_json_string(&out, s.nvme_cache_reuse_binding);
+  }
   out += ",\"ngt\":";
   append_json_string(&out, s.ngram_table);
   out += ",\"dw\":";
@@ -783,6 +788,12 @@ JournalRecord decode_journal_line(std::string_view line) {
           s.nvme_cache_op_timeout_s = 0;
         }
       }
+    }
+    if (const auto* reuse = v.find("nvmereuse")) {
+      if (!reuse->is_string() || !valid_nvme_cache_binding(std::string(reuse->as_string())) ||
+          !s.nvme_cache || !s.nvme_cache_persist)
+        throw std::runtime_error("journal: settings record with a bad NVMe cache reuse binding");
+      s.nvme_cache_reuse_binding = std::string(reuse->as_string());
     }
     // Records before 2026-09-10 carry no table residency: resident.
     if (const dgpp::minijson::Value* ngt = v.find("ngt")) s.ngram_table = std::string(ngt->as_string());

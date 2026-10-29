@@ -24,6 +24,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -629,7 +631,58 @@ int run_fixture(const std::string& dir, bool fp8_head = false) {
       t2.reset();  // the worker lands the index; the slab stays
       require(fs::exists(pe.slab_path) && fs::exists(bdir + "/rank0.index") && fs::exists(bdir + "/rank0.crc"),
               "persist: the slab, its index and its CRC table stay");
-      auto t3 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, pe);
+      auto reuse = pe;
+      reuse.require_existing = true;
+      // Explicit reuse preserves the selected files on a rejected geometry,
+      // and releases the slab lock even if rejection follows opening it.
+      const auto file_bytes = [](const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+      };
+      const auto saved_slab = file_bytes(pe.slab_path);
+      const auto saved_index = file_bytes(bdir + "/rank0.index");
+      const auto saved_crc = file_bytes(bdir + "/rank0.crc");
+      for (const bool wrong_capacity : {true, false}) {
+        auto bad = reuse;
+        if (wrong_capacity) bad.capacity_bytes *= 2;
+        else bad.binding = "another-binding";
+        bool refused = false;
+        try { dgpp::NvmeTier<QwenModel> rejected(&m, &arena, bad); }
+        catch (const std::runtime_error&) { refused = true; }
+        require(refused && file_bytes(pe.slab_path) == saved_slab &&
+                    file_bytes(bdir + "/rank0.index") == saved_index && file_bytes(bdir + "/rank0.crc") == saved_crc,
+                "explicit reuse refuses incompatible files without clearing them");
+      }
+      {
+        auto bad_index = saved_index;
+        // Envelope, then world-index magic, page count and page bytes:
+        // change the snapshot's page count, checked after the slab is locked.
+        bad_index.at(8 + 4 + pe.binding.size() + 8 + 8 + 8 + 8) ^= 0x40;
+        const auto save_index = [&](const std::vector<uint8_t>& bytes) {
+          std::ofstream out(bdir + "/rank0.index", std::ios::binary);
+          out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+          require(static_cast<bool>(out), "write the fixture index");
+        };
+        save_index(bad_index);
+        bool refused = false;
+        try { dgpp::NvmeTier<QwenModel> rejected(&m, &arena, reuse); }
+        catch (const std::runtime_error&) { refused = true; }
+        require(refused && file_bytes(pe.slab_path) == saved_slab &&
+                    file_bytes(bdir + "/rank0.index") == bad_index && file_bytes(bdir + "/rank0.crc") == saved_crc,
+                "explicit reuse preserves an incompatible snapshot layout");
+        save_index(saved_index);
+      }
+      {
+        dgpp::NvmeTier<QwenModel> disagreement(&m, &arena, reuse);
+        bool refused = false;
+        try { disagreement.adopt(false); }
+        catch (const std::runtime_error&) { refused = true; }
+        require(refused, "explicit reuse refuses world disagreement");
+      }
+      require(file_bytes(pe.slab_path) == saved_slab && file_bytes(bdir + "/rank0.index") == saved_index &&
+                  file_bytes(bdir + "/rank0.crc") == saved_crc,
+              "world disagreement preserves every selected file");
+      auto t3 = std::make_unique<dgpp::NvmeTier<QwenModel>>(&m, &arena, reuse);
       require(t3->candidate_index() == index && t3->candidate_digest() != "0" && t3->adopted_digests() == index_digests,
               "persist: the index comes back for the binding, its content digest with it");
       std::vector<int64_t> ids_back(t3->page_bytes() / sizeof(int64_t));
