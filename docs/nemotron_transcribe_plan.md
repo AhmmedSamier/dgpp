@@ -68,24 +68,39 @@ Mamba-2 mixer (23 slots), from weight shapes:
   silu activation, `A_log`/`D`/`dt_bias` F32 [64],
   `time_step_limit` [0.001, 0.1], no projection bias.
 - `mixer.norm.weight` [4096]: the pre-out_proj gated norm (causal-conv1d
-  → SSM → SiLU(z)·norm → out_proj walk; exact order per
-  `mamba_ssm`/NeMo Automodel `hybrid` — pin against the oracle).
+  → SSM → SiLU(z)·norm → out_proj walk; the oracle pinned it 2026-10-31:
+  the SiLU gate acts before the group variance, groups of 512).
 - `mixer.out_proj.weight` [2688, 4096].
 
 Attention mixer (6 slots: block indices 5, 12, 19, 26, 33, 42):
 `q_proj` [4096, 2688] (32 heads × 128), `k_proj`/`v_proj` [256, 2688]
 (2 kv heads), `o_proj` [2688, 4096]; no biases, **no q/k norm** (the LM
-attention is plain — unlike the perception encoder), full rotary
-(`partial_rotary_factor` 1.0, `rope_theta` 10000), positions to 262144
-(the 65 536 training context is the contract; the pool may sit lower).
+attention is plain — unlike the perception encoder), and **no position
+embeddings at all**: the Nemotron-H paper (arXiv:2504.03624 §2.1) says
+"We do not use any position embeddings" for the hybrid — the attention
+slots are position-free GQA (positional information arrives only
+through the surrounding Mamba states). The `rope_theta` /
+`partial_rotary_factor` keys in `llm_backbone/config.json` are
+vestigial (Nemotron-T, the pure-Transformer comparison model, used
+RoPE; Nemotron-H does not), the release ships no rotary tensors, and
+both the HF `nemotron_h` implementation and Automodel never call
+`apply_rotary_pos_emb` on these q/k — the oracle gate confirmed the
+walk matches HF fp32-for-fp32 only without rotation (2026-10-31).
+Positions still run to 262144 (the 65 536 training context is the
+contract; the pool may sit lower).
 
 MoE MLP (23 slots): router `mixer.gate.weight` [128, 2688] plus F32
 `e_score_correction_bias` [128] — sigmoid scores with a learned
-correction bias, top-6 of 128, `norm_topk_prob` true, `n_groups` 8 with
-`topk_group` 1 (DeepSeek-V3-style group-limited no-aux routing;
-`n_group: 1` in the HF config vs `n_groups: 8` — resolve against the
-NeMo/Automodel router in the oracle step), `routed_scaling_factor` 2.5,
-one shared expert (up [3712, 2688], down [2688, 3712]). Routed experts
+correction bias, top-6 of 128, `norm_topk_prob` true, `routed_scaling_factor`
+2.5, one shared expert (up [3712, 2688], down [2688, 3712]). The group
+policy is settled (oracle, 2026-10-31): the router reads `n_group` = 1
+with `topk_group` = 1 — the group-limiting path is a **no-op** for this
+release (every expert pools; the top-2-per-group scores select the one
+group); the `n_groups: 8` key is the *Mamba* group count, a name
+collision, not routing. The bias corrects the **selection only**: top-k
+is chosen on `sigmoid(logits) + bias`, the mixed weights are the
+unbiased sigmoids, renormalized (÷ Σ + 1e-20) and scaled by 2.5.
+Routed experts
 ship **stacked**: `experts.gate_and_up_projs` [128, 2688, 1856] and
 `experts.down_projs` [128, 1856, 2688] — one fused matrix per expert,
 relu² activation (`mlp_hidden_act: relu2`), moe_intermediate 1856.
@@ -245,9 +260,6 @@ Still open:
 - Whether NeMo applies `dither` (1e-5) at eval (must be off for
   determinism; verify `AudioToMelSpectrogramPreprocessor.forward`
   gating).
-- Router group policy under `n_group: 1` vs `n_groups: 8`
-  (no-aux vs group-limited), and the `e_score_correction_bias`
-  application point (Automodel `nemotron_h` MoE source settles it).
 - The `<|audio|>` id and whether the LM input inserts pad rows around
   the locator (the HF processor's `apply_transcription_request` is the
   ground truth).
@@ -269,3 +281,30 @@ Still open:
   tests (fixture values transcribed from the release, plus the
   landed-checkpoint case) pass against the cached BF16 config.
   Next: the binding table + the torch oracle walk (milestones 1b/2).
+- 2026-10-31: milestone 1b — the expected-tensor binding table
+  (`src/models/nemotron_transcribe/binding.{hpp,cpp}`, matching the
+  cached release tensor for tensor; the Sortformer branch and the
+  deferred CTC head are named-but-ignored groups, as are
+  TransformerEngine's empty `*_extra_state`).
+- 2026-10-31: milestone 2 (LM side) — the host fp32 oracle
+  (`src/models/nemotron_transcribe/reference.{hpp,cpp}`): gemv/RMSNorm,
+  the causal depthwise conv + SiLU, the selective scan (sequential
+  form, dt clamped at `time_step_min` after softplus, the D skip on
+  the pre-dt x), the grouped gated norm (SiLU gate BEFORE the group
+  variance — `norm_before_gate` false, groups of d_inner/n_groups =
+  512), the sigmoid + bias-corrected top-6 router (selection on the
+  biased scores, weights from the unbiased sigmoids, renormalized and
+  scaled by 2.5), the stacked relu² experts in checkpoint bmm layout
+  plus the shared pair, and the position-free GQA attention — the
+  whole 52-slot-style walk ending at norm_f and the head. Pinned by
+  `tests/python/nemotron_transcribe_ref_oracle.py --emit` (a tiny
+  seed-filled nemotron_h walked on CPU through the pure-torch
+  reference: slot residuals, mixer in/outs, the router triple, the
+  logits, and the four primitives standalone) in
+  `tests/data/nemotron_transcribe_reference_oracle.json`; the
+  `nemotron_oracle_*` unit tests replay it to fp32 budgets (5e-4 rel).
+  The walk matched only with **no RoPE in the LM attention** — the
+  census correction above (Nemotron-H is a NoPE hybrid; the config's
+  rope keys are vestigial). Text goldens from the real 33 B checkpoint
+  (`tools/nemotron_transcribe_text_goldens.py`) still await a free
+  device; they replay the same walk at release geometry and dtype.
