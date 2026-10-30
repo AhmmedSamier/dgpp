@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 
 #include "engine/paged_blocks.hpp"
+#include "engine/cache_planes.hpp"
 
 namespace dgpp {
 
@@ -52,6 +53,13 @@ class LlamaKvPool {
   int64_t free_blocks() const { return table_.free_blocks(); }
   int64_t block_count_for_tokens(int64_t tokens) const { return table_.block_count_for_tokens(tokens); }
   const PagedBlockTable& blocks() const { return table_; }
+
+  // The NVMe cold tier's view of this pool's planes (issue #26): every
+  // layer's K plane followed by its V plane.
+  std::vector<CachePlane> planes() const;
+  uint64_t block_identity(int32_t block) const {
+    return table_.block_identity(block);
+  }
 
   LlamaKvCache view(int layer) const;
 

@@ -58,6 +58,19 @@ LlamaKvCache LlamaKvPool::view(int layer) const {
   return c;
 }
 
+std::vector<CachePlane> LlamaKvPool::planes() const {
+  if (!initialized_) throw std::logic_error("LlamaKvPool: planes before init");
+  const size_t L = static_cast<size_t>(shape_.layers);
+  const size_t blk = static_cast<size_t>(shape_.block_tokens) * kv_row_elems();
+  std::vector<CachePlane> planes;
+  planes.reserve(L * 2);
+  for (size_t l = 0; l < L; ++l) {
+    planes.push_back(CachePlane{reinterpret_cast<uint8_t*>(k_base_ + l * layer_kv_elems()), blk * 2});
+    planes.push_back(CachePlane{reinterpret_cast<uint8_t*>(v_base_ + l * layer_kv_elems()), blk * 2});
+  }
+  return planes;
+}
+
 void LlamaKvPool::reset_all(cudaStream_t stream) {
   if (!initialized_) throw std::logic_error("LlamaKvPool: reset_all before init");
   const size_t L = static_cast<size_t>(shape_.layers);

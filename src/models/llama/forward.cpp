@@ -154,7 +154,7 @@ LlamaModel::MemoryPlan LlamaModel::plan_memory(const LlamaTextConfig& cfg, int m
   }
   plan.add("gemm workspace (at least)", size_t{64} << 20);
   if (Bf12Companions::enabled() && residency == LlamaResidency::Resident &&
-      !LlamaLayerStream::dense_weights_fp8() && !cfg.weights_nvfp4) {
+      !LlamaLayerStream::dense_weights_fp8()) {
     // The lossless 12-bit companions of every layer's q/k/v/o projections
     // and gate/up/down matrices plus the lm head (kernels/bf12_companions.hpp).
     // engine.dense_weights = "fp8" plans none — its projection+head bytes
@@ -201,7 +201,7 @@ LlamaModel::MemoryPlan LlamaModel::plan_memory(const LlamaTextConfig& cfg, int m
   }
   plan.add("layer objects (attention, dense MLP)",
            LlamaAttentionLayer::scratch_bytes(cfg, geo.local_heads, geo.local_kv_heads, max_tokens, rows,
-                                              n_split, cfg.weights_nvfp4) +
+                                              n_split) +
                LlamaDenseMlp::scratch_bytes(cfg, geo.local_inter, max_tokens));
   return plan;
 }
@@ -391,8 +391,7 @@ void LlamaModel::graph_prepare() {
   // their companions). engine.dense_weights = "fp8" packs none — the fp8
   // form is already resident and the bf16 pointers are null. The NVFP4
   // checkpoint packs none either (no bf16 projection pointers at all).
-  const bool pack = Bf12Companions::enabled() && !bf12_built_ && !LlamaLayerStream::dense_weights_fp8() &&
-                    !LlamaLayerStream::weights_nvfp4();
+  const bool pack = Bf12Companions::enabled() && !bf12_built_ && !LlamaLayerStream::dense_weights_fp8();
   for (int layer = 0; layer < cfg_.num_hidden_layers; ++layer) {
     const LlamaLayerResident& r = loader_.load_layer(layer);
     build_layer_objects(r);

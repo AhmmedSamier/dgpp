@@ -12,7 +12,10 @@
 //              vocab-sharded under VocabSharded.
 //
 // All matrices are BF16. The projections and the head are packable (the
-// model's 12-bit companions replace them under bf12 residency).
+// model's 12-bit companions replace them under bf12 residency). Block FP8
+// at load (engine.dense_weights = "fp8") encodes every dense projection and
+// the head as E4M3 codes + one fp32 scale per 128 x 128 block; the layers
+// run the scale GEMM with bf16 activations.
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -45,10 +48,6 @@ struct LlamaAttnResident {
   // one fp32 scale per 128 x 128 block, loaders/fp8_quant.hpp); the BF16
   // pointers are null in that mode.
   GlmQuantMatrix q_proj_fp8, k_proj_fp8, v_proj_fp8, o_proj_fp8;
-  // A ModelOpt weight-only NVFP4 checkpoint: the same four as e2m1 pairs +
-  // e4m3 group-16 scales + one fp32 global (its reciprocal — the kernels
-  // divide by it once, models/quant_matrix.hpp); BF16 and FP8 null.
-  GlmFp4Matrix q_proj_fp4, k_proj_fp4, v_proj_fp4, o_proj_fp4;
   int local_heads = 0;
   int head_begin = 0;
   int local_kv_heads = 0;
@@ -60,7 +59,6 @@ struct LlamaDenseMlpResident {
   const uint16_t* up = nullptr;    // BF16 [I/W, hidden] (packed rows)
   const uint16_t* down = nullptr;  // BF16 [hidden, I/W] (packed columns)
   GlmQuantMatrix gate_fp8, up_fp8, down_fp8;  // dense_weights = "fp8"
-  GlmFp4Matrix gate_fp4, up_fp4, down_fp4;    // the ModelOpt NVFP4 checkpoint
   int64_t local_inter = 0;
 };
 
@@ -146,13 +144,6 @@ class LlamaLayerStream : public ResidentLayerStream<LlamaLoaderFamily> {
   // family's); the resident image format bumps so a mode switch rebuilds.
   static void set_dense_weights_fp8(bool on);
   static bool dense_weights_fp8();
-
-  // A ModelOpt weight-only NVFP4 checkpoint (quantization_config quant_algo
-  // W4A16_NVFP4): every projection loads the e2m1/e4m3/fp32-global triple.
-  // Checkpoint-driven, not a knob — the static mirrors it for the resident
-  // image format (3) beside the fp8 knob's (2).
-  static void set_weights_nvfp4(bool on);
-  static bool weights_nvfp4();
 
  protected:
   const std::string& image_dir() const override { return resident_image_dir(); }

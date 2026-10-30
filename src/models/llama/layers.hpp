@@ -70,7 +70,7 @@ class LlamaAttentionLayer {
                uint16_t* out, cudaStream_t stream);
 
   static size_t scratch_bytes(const LlamaTextConfig& cfg, int local_heads, int local_kv_heads, int max_tokens,
-                              int decode_rows, int n_split_decode, bool fp4_weights = false);
+                              int decode_rows, int n_split_decode);
   // The default decode split count (DGPP_LLAMA_ATTN_SPLITS overrides).
   static int default_decode_splits();
   int local_heads() const { return lh_; }
@@ -92,11 +92,6 @@ class LlamaAttentionLayer {
   float* l_ws_ = nullptr;
   float* c_ws_ = nullptr;        // [part_rows, lh, D]
   uint16_t* o_ = nullptr;        // [M, lh * D] bf16
-  // The NVFP4 prefill's bf16 GEMM outs for k/v (the fp4 tile kernel has no
-  // fp32 epilogue; q reuses q_ as its scratch — the projections run before
-  // the RoPE overwrites it), widened to fp32 by cast_bf16_to_f32_rows.
-  uint16_t* k4b_ = nullptr;
-  uint16_t* v4b_ = nullptr;
 };
 
 class LlamaDenseMlp {

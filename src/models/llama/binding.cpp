@@ -18,17 +18,6 @@ void add_bf16(TensorList& out, const std::string& name, std::vector<int64_t> sha
   add(out, name, DType::BF16, std::move(shape), cls, layer);
 }
 
-// The ModelOpt NVFP4 triple for one projection `name` (the MODULE path,
-// e.g. model.layers.0.self_attn.q_proj): `name.weight` (e2m1 pairs, two
-// per byte — [N, K/2] U8), `name.weight_scale` (one e4m3 per 16 elements —
-// [N, K/16]) and `name.weight_scale_2` (the fp32 global, raw amax/(6*448)).
-void add_fp4(TensorList& out, const std::string& name, int64_t rows, int64_t cols,
-             LlamaWeightClass cls, int layer) {
-  add(out, name + ".weight", DType::U8, {rows, cols / 2}, cls, layer);
-  add(out, name + ".weight_scale", DType::F8_E4M3, {rows, cols / 16}, cls, layer);
-  add(out, name + ".weight_scale_2", DType::F32, {}, cls, layer);  // ModelOpt exports the global as a scalar
-}
-
 }  // namespace
 
 std::vector<LlamaExpectedTensor> llama_expected_layer_tensors(const LlamaTextConfig& cfg, int layer) {
@@ -39,17 +28,6 @@ std::vector<LlamaExpectedTensor> llama_expected_layer_tensors(const LlamaTextCon
   const int64_t qh = cfg.num_attention_heads, kvh = cfg.num_key_value_heads;
   TensorList out;
   add_bf16(out, p + "input_layernorm.weight", {H}, LlamaWeightClass::LayerNorm, layer);
-  if (cfg.weights_nvfp4) {
-    add_fp4(out, p + "self_attn.q_proj", qh * d, H, LlamaWeightClass::Attention, layer);
-    add_fp4(out, p + "self_attn.k_proj", kvh * d, H, LlamaWeightClass::Attention, layer);
-    add_fp4(out, p + "self_attn.v_proj", kvh * d, H, LlamaWeightClass::Attention, layer);
-    add_fp4(out, p + "self_attn.o_proj", H, qh * d, LlamaWeightClass::Attention, layer);
-    add_bf16(out, p + "post_attention_layernorm.weight", {H}, LlamaWeightClass::LayerNorm, layer);
-    add_fp4(out, p + "mlp.gate_proj", I, H, LlamaWeightClass::DenseMlp, layer);
-    add_fp4(out, p + "mlp.up_proj", I, H, LlamaWeightClass::DenseMlp, layer);
-    add_fp4(out, p + "mlp.down_proj", H, I, LlamaWeightClass::DenseMlp, layer);
-    return out;
-  }
   add_bf16(out, p + "self_attn.q_proj.weight", {qh * d, H}, LlamaWeightClass::Attention, layer);
   add_bf16(out, p + "self_attn.k_proj.weight", {kvh * d, H}, LlamaWeightClass::Attention, layer);
   add_bf16(out, p + "self_attn.v_proj.weight", {kvh * d, H}, LlamaWeightClass::Attention, layer);

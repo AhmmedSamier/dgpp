@@ -738,7 +738,6 @@ __host__ inline void dispatch_k(int k, F&& f) {
     case 7168: f(std::integral_constant<int, 7168>{}); return;
     case 12288: f(std::integral_constant<int, 12288>{}); return;
     case 14336: f(std::integral_constant<int, 14336>{}); return;
-    case 7168: f(std::integral_constant<int, 7168>{}); return;
     case 3584: f(std::integral_constant<int, 3584>{}); return;
     case 1792: f(std::integral_constant<int, 1792>{}); return;
     default:

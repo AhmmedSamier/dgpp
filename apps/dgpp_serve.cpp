@@ -689,6 +689,12 @@ struct LlamaFamily final : ServeFamily {
   size_t lat_slot_bytes(int decode_rows) const override {
     return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.hidden_size) * 2;
   }
+  size_t cache_block_bytes(int world_, bool) const override {
+    const int kv_heads = cfg.num_key_value_heads / world_;
+    return static_cast<size_t>(cfg.num_hidden_layers) * 2 *
+           static_cast<size_t>(dgpp::LlamaModel::kv_block_tokens_static()) *
+           static_cast<size_t>(kv_heads) * static_cast<size_t>(cfg.head_dim) * 2;
+  }
   dgpp::MemoryPlan plan(int forward_rows, int64_t context, int rank, int world_, bool fabric, int slots,
                         bool mtp, int decode_rows) const override {
     return dgpp::LlamaModel::plan_memory(
