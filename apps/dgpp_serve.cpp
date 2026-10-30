@@ -1301,6 +1301,24 @@ struct QwenAsrFamily final : ServeFamily {
   size_t snapshot_bytes(int, bool) const override {
     return dgpp::QwenAsrModel::session_snapshot_bytes(cfg);
   }
+  size_t cache_block_bytes(int, bool) const override {
+    // One block's planes in the pool (the NVMe cold tier's record): the
+    // Glm4Model::kv_block_bytes_static arithmetic with this family's own
+    // shape — world 1, and the checkpoint ships no draft layer.
+    const int64_t bt = dgpp::QwenAsrModel::kv_block_tokens_static();
+    const auto bytes = [&](int64_t tokens) {
+      dgpp::Glm4KvPoolShape shape;
+      shape.layers = cfg.lm.num_hidden_layers;
+      shape.kv_heads = cfg.lm.num_key_value_heads;
+      shape.dim = dgpp::QwenAsrLmConfig::kHeadDim;
+      shape.block_tokens = static_cast<int>(bt);
+      shape.max_requests = 1;
+      shape.token_slots = tokens;
+      return dgpp::Glm4KvPool::cache_bytes(shape) -
+             dgpp::PagedBlockTable::table_bytes(1, tokens / bt);
+    };
+    return bytes(2 * bt) - bytes(bt);
+  }
   void build_model(dgpp::BoundaryReducer*, int, int, bool, int forward_rows, int64_t pool_tokens,
                    int slots, bool, int decode_rows) override {
     model = std::make_unique<dgpp::QwenAsrModel>(cfg, ckpt, forward_rows, pool_tokens, slots,
