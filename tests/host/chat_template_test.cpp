@@ -1511,13 +1511,28 @@ DGPP_TEST(glm_json_grammar_accepts_tokenized_documents_over_the_real_tokenizer) 
     spec.mode = dgpp::text::GrammarSpec::Mode::kJson;
     spec.json_schema = kSchema;
     dgpp::text::GrammarState g(&vocab, spec, false);
-    for (const int64_t id : tok.encode("{\"")) g.advance(id);
+    const auto advance_checked = [&](const std::string& text) {
+      const auto ids = tok.encode(text);
+      require(!ids.empty(), "JSON key fragment encodes to at least one token: " + text);
+      for (const int64_t id : ids) {
+        dgpp::text::TokenMask current;
+        g.mask(&current);
+        require(current.allows(id), "JSON key fragment refused at " + std::string(g.state_name()) +
+                                        ": " + text + " (token " + std::to_string(id) + ")");
+        require(g.allows(id), "pointwise acceptance agrees for JSON key fragment: " + text);
+        g.advance(id);
+      }
+    };
+    advance_checked("{\"");
     dgpp::text::TokenMask m;
     g.mask(&m);
     require(m.constrained() && m.allowed > 0 && m.allowed < 200,
             "a closed key position admits few ids: " + std::to_string(m.allowed));
-    for (const int64_t id : tok.encode("city")) require(m.allows(id) || true, "");
-    require(!m.allows(tok.encode("zebra")[0]), "a foreign key's first token refused");
+    const auto foreign = tok.encode("zebra");
+    require(!foreign.empty(), "the foreign key encodes to at least one token");
+    require(!m.allows(foreign.front()), "a foreign key's first token refused");
+    advance_checked("city");
+    advance_checked("\":");
   }
   DGPP_LOG_INFO(
       "glm_chat_template_test: JSON tables built in {:.2f} s; {} documents "
