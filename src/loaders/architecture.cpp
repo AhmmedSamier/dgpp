@@ -62,7 +62,7 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
     return ModelArchitecture::Llama;
   throw std::runtime_error(
       "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5*, Flint* and Llama*");
+      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5*, Flint*, Dory* and Llama*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {

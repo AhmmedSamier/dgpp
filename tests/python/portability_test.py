@@ -88,8 +88,6 @@ class PortabilityTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "nvme_cache.reuse_binding"):
                     site_env.resolve_config(self.config, self.values)
 
-=======
->>>>>>> afa45b18 (Zeta-2.1 slice 4: serve wiring, tokenizer pattern, template, docs)
     def test_http_types_and_ports_rejected(self):
         for http in ({"bind_host": 0}, {"bind_host": "localhost"}, {"port": True}, {"port": 0}, {"host": "a"}):
             with self.subTest(http=http):
@@ -304,11 +302,15 @@ class PortabilityTest(unittest.TestCase):
             "local-inference-lab/Qwen3.8-Flash-Next-NVFP4": "qwen-3.8-flash-next_nvfp4-qad",
             "kaushikvira/Qwen3.8-Flash-Next-swift15-nvfp4-dgpp": "qwen-3.8-flash-next_nvfp4-swift15",
             "HawkBearPig/flint-FP8-NVFP4": "flint_fp8-nvfp4",
+            "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4": "dory1.0-4b_nvfp4",
             "zed-industries/zeta-2.1": "zeta-2.1_bf16",
         }
-        # The families without a draft head (2026-10-22): their templates
-        # keep MTP off — the plain world is the only one.
-        no_draft = {"HawkBearPig/flint-FP8-NVFP4", "zed-industries/zeta-2.1"}
+        # The families without a draft head: their templates keep MTP off —
+        # the plain world is the only one (docs/dory_plan.md D4 for
+        # Dory1.0-4B, flint since 2026-10-22, zeta-2.1's checkpoint ships
+        # no draft block).
+        no_draft = {"HawkBearPig/flint-FP8-NVFP4", "nvidia/NVIDIA-Nemotron-Labs-Dory1.0-4B-NVFP4",
+                    "zed-industries/zeta-2.1"}
         values = {**site_env.DEFAULTS, "DGPP_NODES": "head peer1 peer2 peer3", "DGPP_SSH_USER": "ops"}
         templates = list((ROOT / "deploy").glob("*.example.json"))
         self.assertTrue(templates)
@@ -330,7 +332,7 @@ class PortabilityTest(unittest.TestCase):
                     self.assertFalse(engine["mtp"], "a drafter template replaces MTP, not both")
                     self.assertTrue(engine["decode_graph"], "the drafter's block proposal is recorded in the graph step")
                 elif cfg["model"] in no_draft:
-                    # The draft-less families (zeta-2.1 and flint: the
+                    # The draft-less families (zeta-2.1, flint and dory: the
                     # checkpoint ships no draft block, so plain decode is the
                     # only world) keep MTP off; the graph still records it.
                     self.assertFalse(engine["mtp"], "a family without a draft head keeps MTP off")
