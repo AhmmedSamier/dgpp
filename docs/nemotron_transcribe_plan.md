@@ -259,4 +259,13 @@ Still open:
 - 2026-10-30: checkpoint surveyed (BF16 67.5 GB single shard +
   DFlash2, cached); census and slot geometry above; audio transport
   stack landed on this branch in `ebfd0065`; plan written.
-  Implementation not started.
+- 2026-10-30: milestone 1a — `NemotronTranscribe` architecture
+  detection (`Nemotron3_5TranscribeForConditionalGeneration` /
+  `nemo_speechlm`), the host config parser
+  (`src/models/nemotron_transcribe/config.{hpp,cpp}`: the Nemotron-H
+  slot list, the Mamba/Attention/MoE geometry, the perception contract
+  with the thresholded 0.5 fusion, the Sortformer window, and the
+  audio-token estimator), and `nemotron_transcribe_config_*` unit
+  tests (fixture values transcribed from the release, plus the
+  landed-checkpoint case) pass against the cached BF16 config.
+  Next: the binding table + the torch oracle walk (milestones 1b/2).

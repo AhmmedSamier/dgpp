@@ -525,6 +525,14 @@ target_include_directories(dgpp_models_dflash2 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(dgpp_models_dflash2 PUBLIC dgpp_kernels dgpp_loaders dgpp_common CUDA::cudart)
 dgpp_set_common(dgpp_models_dflash2)
 
+# Nemotron-3.5-Transcribe (2026-10-30, docs/nemotron_transcribe_plan.md):
+# the host-side config description (root NeMo cfg + the HF nemotron_h LLM).
+add_library(dgpp_models_nemotron_transcribe STATIC
+  src/models/nemotron_transcribe/config.cpp)
+target_include_directories(dgpp_models_nemotron_transcribe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_nemotron_transcribe PUBLIC dgpp_loaders dgpp_common)
+dgpp_set_common(dgpp_models_nemotron_transcribe)
+
 # Qwen3.8-Flash-Next: the host-side model description.
 add_library(dgpp_models_qwen STATIC
   src/models/qwen/config.cpp
@@ -1040,6 +1048,7 @@ add_executable(unit_tests
   tests/unit/dory_binding_test.cpp
   tests/unit/dory_reference_test.cpp
   tests/unit/flint_config_test.cpp
+  tests/unit/nemotron_transcribe_config_test.cpp
   tests/unit/flint_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   tests/unit/verify_schedule_test.cpp
@@ -1051,6 +1060,7 @@ target_link_libraries(unit_tests PRIVATE CUDA::cudart dgpp_loaders
                                         dgpp_models_glm4
                                         dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo
                                         dgpp_models_dory
+                                        dgpp_models_nemotron_transcribe
                                         dgpp_models_glm_dsa dgpp_models_dsv41 dgpp_models_dsv4 dgpp_models_mimo dgpp_models_flint
                                         dgpp_rope_scaling
                                         dgpp_net dgpp_serve Threads::Threads)

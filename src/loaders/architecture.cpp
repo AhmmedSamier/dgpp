@@ -56,9 +56,13 @@ ModelArchitecture detect_architecture(const minijson::Value& root) {
   // Flint (2026-10-22, docs/flint_plan.md): `FlintForCausalLM` / `flint`.
   if (arch.rfind("Flint", 0) == 0 || (arch.empty() && type == "flint"))
     return ModelArchitecture::Flint;
+  // Nemotron-3.5-Transcribe (docs/nemotron_transcribe_plan.md):
+  // `Nemotron3_5TranscribeForConditionalGeneration` / `nemo_speechlm`.
+  if (arch.rfind("Nemotron3_5Transcribe", 0) == 0 || (arch.empty() && type == "nemo_speechlm"))
+    return ModelArchitecture::NemotronTranscribe;
   throw std::runtime_error(
       "config.json: unsupported architecture '" + arch + "' (model_type '" +
-      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5*, Flint* and Dory*");
+      type + "'); the engine implements Glm5*, Qwen4Exp*, Glm4Moe*, GlmMoeDsa*, DeepseekV41*, DeepseekV4*, MiMoV2*, Qwen3_5*, Flint*, Dory* and Nemotron3_5Transcribe*");
 }
 
 ModelArchitecture detect_architecture_file(const std::string& path) {
