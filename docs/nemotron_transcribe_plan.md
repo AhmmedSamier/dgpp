@@ -1,0 +1,236 @@
+# NVIDIA Nemotron-3.5-Transcribe-30B-A4B — port plan
+
+The second audio family on the transcription stack (the transport,
+admission, endpoint and chain machinery landed in `ebfd0065`; see
+[audio.md](audio.md)). Nemotron 3.5 Transcribe is an offline
+speech-and-audio language model: a Parallel Expert Encoder (a 32-layer
+Transformer ASR encoder plus a ~99 M Sortformer speaker branch, joined by
+an identity connector and a learned projection) feeding a
+**Nemotron-H hybrid Mamba-2/Transformer MoE** decoder
+(`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B` backbone), with an MTP
+head and an optional DFlash2 block drafter. Model card:
+[huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Transcribe-30B-A4B);
+tech report:
+[PDF](https://research.nvidia.com/labs/nemotron/files/NVIDIA-Nemotron-3.5-Transcribe-Technical-Report.pdf).
+License OpenMDW-1.1.
+
+Reference behaviour comes from NeMo Speech's `speechlm2`
+(`nemo.collections.speechlm2.modules.perception.AudioPerceptionModule`,
+`nemo.collections.asr.modules.parallel_expert_encoder.ParallelExpertEncoderPT`,
+`nemo.collections.asr.modules.transformer_encoder.TransformerEncoder`,
+`nemo.collections.asr.modules.AudioToMelSpectrogramPreprocessor`) and
+HF `transformers` ≥ 5.5 `nemotron_h`. The vLLM plugin
+`nemo_speechlm` is the serving reference for prompt shape.
+
+## Checkpoint census (BF16 release, snapshot `9d8cd6b7`, 2026-10-30)
+
+One `model.safetensors` (67.5 GB), 1435 tensors: 1261 BF16, 132 F32
+(the Mamba `A_log`/`D`/`dt_bias`/router `e_score_correction_bias` and
+norms), 1 I64, 1 U8 (CTC tokenizer blobs). Root files: `config.json`
+(NeMo hydra-style), `llm_backbone/config.json` (HF `nemotron_h`),
+`tokenizer.json` + `tokenizer_config.json` (fast tokenizer with the full
+chat template embedded — no slow-file fallback needed),
+`generation_config.json`. The cache also holds
+`...-DFlash2` (1.1 GB drafter). FP8 and NVFP4 sibling repos exist
+(NVFP4 is the single-Spark target).
+
+| Prefix | Tensors | What |
+|---|---|---|
+| `llm.model.layers.N.*` | 476 | 52 block slots (below) |
+| `llm.mtp.layers.0.*` | 24 | one MTP layer: attention + MoE + `eh_proj`, `enorm`, `hnorm`, `final_layernorm` |
+| `llm.model.embed_tokens.weight` | 1 | BF16 [131072, 2688] |
+| `llm.lm_head.weight` | 1 | BF16 [131072, 2688] (untied) |
+| `llm.model.norm.weight` | 1 | final RMSNorm [2688] |
+| `perception.preprocessor.*` | 2 | mel filterbank F32-valued BF16 [1, 128, 257] + Hann window [400] |
+| `perception.encoder.asr_encoder.*` | ~420 | 32-layer Transformer encoder, 631 M params |
+| `perception.encoder.diarization_model.*` | ~380 | Sortformer speaker branch, 99 M params |
+| `perception.encoder.asr_norm` / `.diar_norm` | 4 | LayerNorm(1280) after each expert |
+| `perception.proj.{weight,bias}` | 2 | connector linear 1280 → 2688 |
+| `ctc_timestamp.decoder.*` | 40 | CTC alignment head (23862 classes) — **deferred** |
+
+LLM total 32.91 B params (incl. MTP); ~4.3 B active including the
+encoder, per the card.
+
+### The LM: Nemotron-H slots
+
+`layers_block_type` (52 entries): 23 `mamba`, 6 `attention`, 23 `moe`.
+Slots are *not* full transformer layers: a `[mamba]` slot is the Mamba-2
+mixer alone, `[moe]` is the MoE MLP alone, and the repeating
+`mamba mamba mamba attention moe` groups make attention layers the
+(mamba, mamba, attention, moe) quartet. Every slot carries its own
+pre-norm (`layers.N.norm.weight`, 52 total), RMSNorm eps 1e-5.
+
+Mamba-2 mixer (23 slots), from weight shapes:
+- `mixer.in_proj.weight` [10304, 2688] = x 4096 + z 4096 + B 1024 + C 1024 + dt 64
+  → `d_inner` = 4096 = n_heads 64 × head_dim 64 (the config's
+  `expand: 2` is not the in_proj split; trust the shapes);
+  n_groups 8, d_state 128 (`ssm_state_size`), conv_kernel 4 with bias,
+  silu activation, `A_log`/`D`/`dt_bias` F32 [64],
+  `time_step_limit` [0.001, 0.1], no projection bias.
+- `mixer.norm.weight` [4096]: the pre-out_proj gated norm (causal-conv1d
+  → SSM → SiLU(z)·norm → out_proj walk; exact order per
+  `mamba_ssm`/NeMo Automodel `hybrid` — pin against the oracle).
+- `mixer.out_proj.weight` [2688, 4096].
+
+Attention mixer (6 slots: block indices 5, 12, 19, 26, 33, 42):
+`q_proj` [4096, 2688] (32 heads × 128), `k_proj`/`v_proj` [256, 2688]
+(2 kv heads), `o_proj` [2688, 4096]; no biases, **no q/k norm** (the LM
+attention is plain — unlike the perception encoder), full rotary
+(`partial_rotary_factor` 1.0, `rope_theta` 10000), positions to 262144
+(the 65 536 training context is the contract; the pool may sit lower).
+
+MoE MLP (23 slots): router `mixer.gate.weight` [128, 2688] plus F32
+`e_score_correction_bias` [128] — sigmoid scores with a learned
+correction bias, top-6 of 128, `norm_topk_prob` true, `n_groups` 8 with
+`topk_group` 1 (DeepSeek-V3-style group-limited no-aux routing;
+`n_group: 1` in the HF config vs `n_groups: 8` — resolve against the
+NeMo/Automodel router in the oracle step), `routed_scaling_factor` 2.5,
+one shared expert (up [3712, 2688], down [2688, 3712]). Routed experts
+ship **stacked**: `experts.gate_and_up_projs` [128, 2688, 1856] and
+`experts.down_projs` [128, 1856, 2688] — one fused matrix per expert,
+relu² activation (`mlp_hidden_act: relu2`), moe_intermediate 1856.
+The dense `intermediate_size` 1856 applies only to slots with a dense
+MLP — there are none: all 23 MLP slots are MoE, so the LM has no dense
+layers.
+
+MTP: one trained layer (`attention` + `moe`, `mtp_layers_block_type`)
+with `eh_proj` (2·2688 → 2688), `enorm`, `hnorm`, `final_layernorm` —
+Megatron-style: the draft step consumes the last token's embedding and
+hidden state. The card: two next-token prediction depths via the
+repeated layer, up to 8 speculative tokens; the existing MTP/drafter
+framework already carries depth-scheduled verify. The DFlash2 draft repo
+(`num_hidden_layers: 6`, `block_size: 16`, `num_target_layers: 52`,
+non-causal attention) is a block drafter over the same 2688 hidden —
+the `dflash2` path of the Qwen3.8-27B templates is the template.
+
+### The perception module
+
+- **Preprocessor** (`AudioToMelSpectrogramPreprocessor`, weights frozen
+  and shipped): 16 kHz, window 0.025 s (400), stride 0.01 s (160),
+  `n_fft` 512 → 257 bins, hann, center pad 256, 128 mel from the shipped
+  filterbank `featurizer.fb` (use the tensor, do not regenerate Slaney —
+  it need not match librosa), `log: true` (NeMo's
+  `log(clamp(S, eps) + 1e-10)`), `dither: 1e-05` — random noise: the
+  oracle path must pin dither-off (NeMo applies dither only in training
+  mode — verify), `frame_splicing` 1, `pad_to` 0.
+- **ASR branch**: `pre_encode.proj` stacks 8 frames (128 × 8 → 1280;
+  `subsampling_factor` 8 ⇒ 12.5 encoder tokens/s, matching the card's
+  ~80 ms/token), 32 × pre-norm Transformer blocks: `w_qkv` [3840, 1280],
+  10 heads × 128, **q/k LayerNorms after the split** (qk_norm true),
+  RoPE on half the head dims (rotary_fraction 0.5, base 10000), GELU FF
+  5120, `embed_norm` + per-block norms + `final_norm` — the NeMo
+  `TransformerEncoder` (attn_mode full, no conv subsampling). Bidirectional.
+- **Speaker branch**: Nemotron-3-Diarization / Sortformer (~99 M): a
+  streaming transformer with 2×16-head blocks (`ff_expansion` 0.5),
+  RoPE half, upsampling conv_transpose ×2, `residual_scale` 0.1 — a
+  34 M-frame-window model. **This branch is not optional**: the parallel
+  expert encoder normalizes each branch (`asr_norm`, `diar_norm`) and
+  the LM is trained on their join through the connector.
+- **Connector**: IdentityConnector(d_model 1280) then
+  `perception.proj` [2688, 1280] — how the two branches combine into the
+  LM rows (concat-in-time with speaker windows, interleave, or sum) is
+  decided in `ParallelExpertEncoderPT.forward`; read it from the NeMo
+  source and pin it in the oracle before any kernel work.
+- Encoder chunking: 30 s post-feature chunks
+  (`encoder_chunk_size_seconds`), full attention inside a chunk;
+  `packed_encoder_sequences` is a training detail.
+- `audio_token_estimator`: hop 160, `stft_pad_amount` 256, stack 8 ⇒
+  n_tokens = ceil(frames/8) — the admission-span row count formula.
+
+### Prompt contract
+
+`prompt_format: nemotron3p5`, `audio_locator_tag: <|audio|>`: the chat
+template (embedded in `tokenizer_config.json`, complete with the tools
+and thinking macros) places **one `<|audio|>` locator per clip after the
+text** — the vLLM comment in the template even documents the reorder.
+The frontend's job (the `audio_frontend.cpp` pattern): let the template
+emit the locator, then expand it to the clip's encoder rows + the pad
+row the model expects — exact marker/pad semantics come from the NeMo
+`speechlm2` processor; the Qwen3-ASR `...`/pad/`...` triple is NOT
+reused (this is one locator token, not a delimiter pair).
+`<asr_text>`/speaker/event tags: `<spk:N>` tags are plain vocabulary
+(the card's prompt guide asks for them); the reasoning macros honour
+`enable_thinking` (transcription runs it off; the repo template
+interpreter already handles both shapes).
+
+## Memory plan (one Spark, world 1)
+
+NVFP4 target: experts+MLP ≈ 32.9 B → ~17 GB codes+scales, BF16
+embeddings/head 1.4 GB, norms/state ≈ negligible; perception BF16
+(631 M + 99 M + connector) ≈ 1.5 GB; SSM state per request:
+23 layers × (dstate 128 × nheads 64 + conv 4096×3) fp32 ≈ 23 × 0.35 MB
+≈ 8 MB; KV: 6 attention layers × 2 kv × 128 × 2 B ≈ 3 KiB/token.
+A 262 K pool ≈ 0.8 GB — everything but the weights is small; a 65 536
+pool + a 4 GiB prefix arena + headroom fits one 121.6 GiB Spark with
+room for the BF16 image cache of the resident loader. The BF16 release
+(63 GB weights) also fits world 1 resident but leaves little for
+concurrency; ship NVFP4 (or FP8) templates first, BF16 as the exact
+fallback.
+
+## Milestones
+
+1. **Detection + config + binding** (host): `NemotronTranscribe`
+   architecture, `config.json` parsers for both the NeMo root config and
+   `llm_backbone`, the binding table (slot kinds, stacked experts, the
+   MTP layer, the frozen preprocessor buffers, connector/diar names).
+   Host tests against the landed checkpoint.
+2. **Text oracle**: a host fp32 walk of embed → 52 slots → norm → head
+   (Mamba-2 naive recurrence is fine at oracle sizes), pinned to a torch
+   fp32/BF16 dump (`tools/` golden builder, the ASR tower-goldens
+   pattern). Quality check: greedy prompts from the README's own
+   examples reproduce.
+3. **Mamba-2 kernels**: chunked-scan prefill + single-row decode device
+   paths in `src/kernels/`, gated against the oracle within BF16
+   tolerance; SSM state carried beside the linear-attention state
+   machinery (`dsa_state`/`csa2_state` precedent) with snapshot/resume
+   semantics.
+4. **MoE + full-text serve**: wire the slot walk over the existing
+   MoE executor + graph decode; register the family; text-only serving
+   passes the chat/eval gates (the PII/text subsets are out of scope —
+   plain instruction following suffices).
+5. **Perception oracle**: frontend (pinned to the shipped
+   fb/window tensors, dither off) + ASR transformer + Sortformer +
+   connector, host fp32, pinned to a NeMo dump of the full
+   `AudioPerceptionModule` on a test clip. This milestone answers the
+   open questions (dither at eval, expert join geometry, row counts).
+6. **Device encoder + splice**: BF16 kernels for both branches gated on
+   the oracle; `session_prefill_audios` splices rows at the admission
+   span (the seam exists from the audio-stack commit); the frontend
+   rewrites the `<|audio|>` locator; `prefill_audio_token_limit()` from
+   the prefill window.
+7. **Deploy + spec**: `cluster_nemotron-3.5-transcribe-30b-a4b_nvfp4_w1`
+   template (portability/README/catalogue registrations), MTP depth-8
+   verify (the repeated layer) with DFlash2 as the template drafter
+   (the existing dflash2 path, 6 layers, block 16), then the
+   `/v1/audio/transcriptions` gates (chains, refusals) and a LibriSpeech
+   test-clean WER tool mirroring `tools/qwen_asr_wer.py` from the ASR
+   branch — target the card's 1.09/2.60 test-clean/other.
+8. **Measured rows** per [benchmarks.md](benchmarks.md) on an idle
+   fabric, revision + binary hash recorded, production restored.
+
+## Open questions (resolve in milestone 5, from NeMo Speech source)
+
+- How `ParallelExpertEncoderPT` joins the asr/diar streams into rows,
+  and the diar branch's exact windowing (Sortformer is streaming with
+  34 k-frame chunks; the paper's "104-packed-row" analogue).
+- MTP inference mechanics: how the repeated layer consumes
+  (embedding, hidden), and the depth-2 training → 8-token drafting
+  mapping (the card's wording) — mirror the vLLM plugin's implementation.
+- Whether NeMo applies `dither` at eval (must be off for determinism;
+  verify against `test_mode`).
+- Router group policy under `n_group: 1` vs `n_groups: 8`
+  (no-aux vs group-limited), and the `e_score_correction_bias`
+  application point.
+- The `<|audio|>` id and whether the LM input inserts pad rows around
+  the locator (the HF processor's `apply_transcription_request` is the
+  ground truth).
+- NVFP4 export layout for the stacked expert tensors (`.../NVFP4`
+  sibling repo): confirm the packed pairs + block scales are per-expert
+  in the stacked [E] tensors, like the dflash2 draft planes precedent.
+
+## Status
+
+- 2026-10-30: checkpoint surveyed (BF16 67.5 GB single shard +
+  DFlash2, cached); census and slot geometry above; audio transport
+  stack landed on this branch in `ebfd0065`; plan written.
+  Implementation not started.
