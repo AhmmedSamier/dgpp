@@ -20,10 +20,9 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
 
 - Model names are `glm-5.3-flash`, `glm-5.3` (the full model), `glm-4.7`,
   `qwen-3.8-flash-next`, `qwen3.8-27b`, `deepseek-v4-flash`,
-  `deepseek-v4.1-flash`, `mimo-v2.6-flash` and `dory1.0-4b`.
   `deepseek-v4.1-flash`, `deepseek-v4.1-flash-1017` (the 2026-10-17
   refinement of V4.1-Flash: the same architecture and config, re-trained
-  weights), `mimo-v2.6-flash` and `flint`.
+  weights), `mimo-v2.6-flash`, `flint` and `dory1.0-4b`.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`,
   `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, `int4-int8` for the full
   GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8

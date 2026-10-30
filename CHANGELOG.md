@@ -15,6 +15,7 @@ project procedures and design guidance live in `docs/`.
   See [reuse across upgrades](docs/nvme-cache.md#across-restarts).
 
 ## v0.1.0 — 2026-10-28, the first published release (0.1.0+g11fe1807d63d)
+
 - **The README and the repository scaffolding** (2026-10-28): the README
   restructured around what the engine is (Why DGPP, a headline table sourced
   from `docs/benchmarks.md`, the architecture diagram, capability columns in
@@ -1562,6 +1563,119 @@ project procedures and design guidance live in `docs/`.
   image-input and shared-prefill interfaces are retained.
   Serving throughput remains unmeasured under the current benchmark
   protocol; no performance comparison is claimed for these templates.
+
+- **Raw slow-tokenizer snapshots serve directly**:
+  `Tokenizer::load` reads `vocab.json` + `merges.txt` +
+  `tokenizer_config.json` directly when `tokenizer.json` is absent
+  (gated on the `Qwen2Tokenizer` class; added tokens registered special
+  exactly as the reference builder does — its `add_special_tokens`
+  forces `special=True` over upstream's `False` on 14 control markers,
+  and the slow path replicates that rather than the config), and
+  `ChatTemplate::load` reads the `chat_template.json` envelope when the
+  `.jinja` is absent. No generated files, no network at boot, peers
+  serve the raw synced snapshot. Pinned byte-identical to the
+  reference-built files by `tests/unit/tokenizer_load_test.cpp`
+  (including a decode-with-skip assertion over a control marker, the
+  case that caught the `special` divergence live).
+- **Transcription language tag on its own line**: the checkpoint glues
+  `language <NAME>` onto every transcript with no separator; the server
+  now splits it above the body (`split_language_tag`, camelCase boundary
+  measured over 2620 test-clean outputs — anything else passes through
+  verbatim rather than risk eating speech), for single and chained
+  responses alike.
+- **Long-form transcription chains**: clips past one engine forward (~2.5
+  minutes at the default window) split into whole-chunk segment bodies
+  (`transcription_segment_bodies`, token-exact) transcribed strictly in
+  order through a `TranscriptionChain` — one scheduler request per
+  segment, each with its own duration cap, answered once with the joined
+  transcripts. Single clips ride today's path byte-identically; a window
+  too small for one chunk refuses loudly. Pinned by splitter unit tests
+  and a chained serve test.
+- **Audio tail-piece merge**: clips staged for the tower in 30 s windows
+  died on a sub-8000-sample tail (a 30.04 s clip failed the service —
+  first at the frontend floor, then at the tower's 3000-frame window).
+  `audio_piece_takes()` lends a short tail one chunk from its
+  predecessor, satisfying the frontend floor, the tower window, and the
+  admission token accounting at once. Found by the LibriSpeech WER gate
+  below.
+- **Audio stage-bound admission**: admission accepted 16384 audio tokens
+  per request while the engine stage holds only its prefill window (2048
+  rows ≈ 2.5 minutes at the default window), so a long clip reached the
+  engine and failed the whole service. The engine now advertises
+  `prefill_audio_token_limit()` (both adapters, from the model's forward
+  bound) and the serve layer refuses overlong clips at admission with a
+  400 naming the audio (`context_length_exceeded`) — never engine work.
+  `tests/host/serve_test.cpp` pins the refusal; `docs/audio.md` records
+  the bound and the supervisor note (`deploy/dgpp-serve.example.service`).
+- **Audio FLAC + Ogg Vorbis uploads**: `src/audio/compressed_decode.*`
+  decodes FLAC (vendored dr_flac) and Ogg Vorbis (vendored stb_vorbis)
+  through the same sniff-and-admit path as WAV/MP3
+  (`input_audio.format` accepts `flac`/`ogg`); Ogg Opus is refused by
+  name. Lossless-exact and tone-correlation gates pin both, with fixtures.
+- **Audio gapless trim**: MP3s carrying a LAME/Xing tag drop their
+  encoder delay/padding (`gapless_trim`, structurally located — never
+  substring-searched); untagged streams keep the delay. Verified against
+  a real LAME-tagged file; synthetic frames pin the parser and its
+  refusals.
+- **Log-mel FFT frontend**: the quadratic host DFT is a mixed-radix 16x25
+  FFT in double precision (`src/audio/fft400.{hpp,cpp}`) — golden worst
+  |delta| unchanged at 9.6e-05, ~2.3x faster (5.6 → 2.4 ms per audio
+  second). The 201x128 mel projection is now the frontend's cost.
+- **HTTP chunked request bodies decoded**: `Transfer-Encoding: chunked`
+  uploads (how OpenWebUI's STT path and the OpenAI SDKs stream multipart -
+  aiohttp never sends a Content-Length for them) were a 501, so every
+  OpenWebUI transcription failed even with a supported codec. The server
+  now de-chunks incrementally (`HttpServer::dechunk_step`) under the same
+  body cap, keeps the connection alive, and still refuses loudly: unknown
+  codings stay 501, Content-Length beside Transfer-Encoding (the smuggling
+  shape) is a 400. `tests/host/http_server_test.cpp` pins verbatim decode,
+  split arrivals, extensions/trailers, and each refusal. Verified against
+  the live path with a byte-identical replay of OpenWebUI's request.
+- **Audio MP3 uploads (`input_audio` format mp3, transcription `file` mp3)**:
+  the OpenWebUI failure (`Error transcribing chunk: External: 400`) was a
+  format refusal - OpenWebUI converts every upload to mp3 chunks while the
+  server decoded WAV only. MP3 (MPEG-1/2/2.5, layers 1-3, 8-48 kHz
+  mono/stereo) now decodes through the vendored single-header minimp3
+  (`third_party/minimp3/`, `docs/licenses/minimp3.md`, no new build or
+  runtime dependency) in `src/audio/mp3_decode.{hpp,cpp}`, into the same
+  native-rate PCM the WAV path feeds to the shared mono/16 kHz aligner.
+  The container is sniffed from the bytes (RIFF/WAVE vs MP3 sync/ID3), so a
+  mislabeled file still decodes and undecodable bytes stay a 400 naming the
+  field; `input_audio.format` accepts `wav`/`mp3`, corrupt mid-stream
+  changes and pure-tag inputs are refused, and the transcription
+  `max_tokens` duration rule falls back to the decoded probe for MP3.
+  `tests/data/mp3_tone_1s_*.mp3` fixtures pin decode geometry, tone
+  correlation and admission, and `tests/host/serve_test.cpp` pins an mp3
+  multipart upload reaching the engine prefill.
+- **Audio transcription endpoint (`POST /v1/audio/transcriptions`)**:
+  the OpenAI transcription API over the chat engine - a strict
+  line-scanning multipart parser (no payload substring search, so WAV
+  bytes may contain the boundary), field validation with 400s naming the
+  multipart field, then a synthesized chat-completions body (prompt as the
+  system message, base64 WAV as one `input_audio` part, duration-sniffed
+  `max_tokens`) served through the normal admission/scheduling path with
+  the response shaped afterwards (`{"text"}` for `json`, raw transcript
+  for `text`). `language` is validated but not rendered: the checkpoint
+  auto-detects and prefixes `language <NAME>` itself, and its template
+  drops assistant prefill. `tests/host/serve_test.cpp` pins json/text
+  parity plus every refusal; a served demo clip transcribes identically
+  through both shapes.
+- **Audio admission (phase 1)**: chat content parts
+  `input_audio`/`audio_url` decode inline base64 WAV (PCM 8/16/24/32-bit,
+  IEEE float, stereo, any rate) to 16 kHz hop-aligned mono at admission
+  (`src/audio/`, `src/serve/audio_inputs.cpp`), and the frontend rewrites
+  each clip to the trained `...`+pad*N+`...` span before the
+  template renders (`src/serve/audio_frontend.cpp`, docs/audio.md) - the
+  `VisionFrontend` pattern with the reference processor's exact geometry
+  (13 tokens per 100-frame chunk — the constants the first served family
+  must re-pin). The host log-mel frontend (400/160 center
+  STFT with torch's reflect edge, 201x128 Slaney bank, per-clip max-8 dB
+  floor, (x+4)/4) is pinned to `Qwen3ASRFeatureExtractor` by
+  `tools/qwen3_asr_feature_goldens.py` within 1e-4. The scheduler carries
+  `AudioInput` spans end to end (monolithic prefills; no chunked or cached
+  audio yet). No served family has an audio encoder yet, so every
+  frontend still refuses audio parts until the first one lands.
+
 - **Qwen3.8-27B NVFP4: fp4w prefill GEMM** (2026-10-06):
   `launch_fp4w_gemm_*` (new): `fp8w_gemm`'s 128x128x64 tiles and
   three-stage pipeline with an e2m1 W-side (8 payload bytes + the

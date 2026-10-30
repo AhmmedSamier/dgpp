@@ -180,6 +180,36 @@ class PortabilityTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             cluster_doctor.checkpoint_size(snapshot)
 
+    def slow_checkpoint(self):
+        snapshot = self.root / "models--org--model/snapshots/revision"
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text("{}")
+        (snapshot / "vocab.json").write_text('{"a": 0}')
+        (snapshot / "merges.txt").write_text("#version: 0.2\n")
+        (snapshot / "tokenizer_config.json").write_text(json.dumps(
+            {"tokenizer_class": "Qwen2Tokenizer", "added_tokens_decoder": {}}))
+        (snapshot / "chat_template.json").write_text(
+            json.dumps({"chat_template": "{{ messages }}"}))
+        header = json.dumps({"weight": {"data_offsets": [0, 4], "dtype": "F32", "shape": [1]}}).encode()
+        (snapshot / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + bytes(4))
+        return snapshot
+
+    def test_slow_spelling_passes_without_generated_files(self):
+        self.assertGreater(cluster_doctor.checkpoint_size(self.slow_checkpoint()), 4)
+
+    def test_slow_spelling_rejects_foreign_tokenizer_class(self):
+        snapshot = self.slow_checkpoint()
+        (snapshot / "tokenizer_config.json").write_text(json.dumps(
+            {"tokenizer_class": "LlamaTokenizer", "added_tokens_decoder": {}}))
+        with self.assertRaisesRegex(ValueError, "not a Qwen2 tokenizer"):
+            cluster_doctor.checkpoint_size(snapshot)
+
+    def test_slow_spelling_rejects_missing_template_envelope(self):
+        snapshot = self.slow_checkpoint()
+        (snapshot / "chat_template.json").unlink()
+        with self.assertRaisesRegex(ValueError, "missing chat_template.jinja"):
+            cluster_doctor.checkpoint_size(snapshot)
+
     def test_snapshot_ambiguity_and_missing_shard(self):
         snapshot = self.checkpoint()
         (snapshot.parent / "other").mkdir()

@@ -462,6 +462,9 @@ void Scheduler::validate_new(const SchedulerRequest& request) const {
   validate_image_inputs(request.images, request.prompt.size());
   if (!request.images.empty() && !engine_->supports_images())
     throw std::invalid_argument("Scheduler: this engine does not support image inputs");
+  validate_audio_inputs(request.audios, request.prompt.size());
+  if (!request.audios.empty() && !engine_->supports_audios())
+    throw std::invalid_argument("Scheduler: this engine does not support audio inputs");
   if (request.max_steps < 1)
     throw std::invalid_argument("Scheduler: request '" + request.id +
                                 "' must generate at least one token");
@@ -613,7 +616,7 @@ std::vector<int> Scheduler::admissible_group(int first, int64_t budget) {
       : engine_->prefill_group_total_limit();
   if (span_limit <= 0 || total_limit <= 0) return group;
   const auto groupable = [&](const Request& r) {
-    if (r.state != State::kQueued || !r.spec.images.empty() || r.restore_op != 0 || r.restore_blocked)
+    if (r.state != State::kQueued || !r.spec.images.empty() || !r.spec.audios.empty() || r.restore_op != 0 || r.restore_blocked)
       return false;
     const int64_t P = static_cast<int64_t>(r.spec.prompt.size());
     if (P <= 0 || P > span_limit) return false;
@@ -689,8 +692,9 @@ void Scheduler::admit(int arrival) {
   if (!cache_on(r)) {
     // No cache for this request: the pre-cache op, exactly.
     try {
-      token = r.spec.images.empty() ? engine_->prefill(slot, r.spec.prompt)
-                                    : engine_->prefill_images(slot, r.spec.prompt, r.spec.images);
+      token = !r.spec.audios.empty()   ? engine_->prefill_audios(slot, r.spec.prompt, r.spec.audios)
+              : r.spec.images.empty() ? engine_->prefill(slot, r.spec.prompt)
+                                      : engine_->prefill_images(slot, r.spec.prompt, r.spec.images);
     } catch (...) {
       engine_->prefill_monitor()->finish(slot);
       slots_[static_cast<size_t>(slot)] = -1;
@@ -779,6 +783,10 @@ void Scheduler::admit(int arrival) {
 
 void Scheduler::begin_prefill(int arrival, int64_t budget) {
   Request& r = requests_[static_cast<size_t>(arrival)];
+  // Chunked audio would drop its spans (the cursor API carries images
+  // only); admission never routes an audio request here.
+  if (!r.spec.audios.empty())
+    throw std::logic_error("Scheduler: audio prefills are never chunked");
   const int slot = admit_prepare(arrival);
   const std::vector<int64_t> cuts = cut_boundaries(r);
   SchedulerEngine::PrefixPrefill pp;
@@ -996,6 +1004,7 @@ bool Scheduler::needs_chunked_prefill(int arrival, int64_t budget) const {
       ? std::min<int64_t>(budget, engine_->prefill_chunk_alignment()) : budget;
   return budget > 0 &&
          (r.spec.images.empty() || engine_->supports_image_chunked_prefill()) &&
+         r.spec.audios.empty() &&
          static_cast<int64_t>(r.spec.prompt.size()) > over;
 }
 
@@ -1442,6 +1451,7 @@ void Scheduler::release_retired(Request& r, Result& res) {
   // size. Every read of a retired record elsewhere is of the tombstone.
   std::vector<int64_t>().swap(r.spec.prompt);
   std::vector<ImageInput>().swap(r.spec.images);
+  std::vector<AudioInput>().swap(r.spec.audios);
   PrefixCache::Images().swap(r.cache_images);
   std::vector<int64_t>().swap(r.spec.boundaries);
   std::vector<LogitBias>().swap(r.spec.logit_bias);

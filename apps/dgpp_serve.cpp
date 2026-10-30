@@ -114,6 +114,7 @@
 #include "serve/generation_service.hpp"
 #include "serve/frontend.hpp"
 #include "serve/glm_vision_frontend.hpp"
+#include "serve/audio_frontend.hpp"
 #include "serve/qwen_vision_frontend.hpp"
 #include "serve/http_server.hpp"
 #include "serve/prefill_policy.hpp"
@@ -3275,6 +3276,11 @@ int main(int argc, char** argv) {
       DGPP_LOG_WARN("engine.embed_sharding = vocab applies to the full GLM-5.3 and the DeepSeek families; {} keeps its "
                     "embedding replicated", family->name());
     DGPP_LOG_INFO("serve: model family {} ({})", family->name(), ckpt);
+    if (prefill_budget_tokens > 0 && (!decode_graph ||
+        (std::string(family->name()) != "qwen4_exp" && std::string(family->name()) != "glm5"))) {
+      DGPP_LOG_ERROR("--prefill-budget-tokens requires a Qwen or GLM-5.3-Flash graph engine");
+      return 1;
+    }
     // The decode rows (2026-09-10, engine/decode_outputs.hpp): the fixed
     // batch holds every slot's verify rows — max_concurrency x (1 + the
     // MTP depth) — floored at kDecodeRows so every existing recipe keeps

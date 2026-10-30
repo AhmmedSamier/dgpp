@@ -34,6 +34,7 @@
 #include "sched/prefix_cache.hpp"
 #include "sched/prefill_latency.hpp"
 #include "common/prefill_progress.hpp"
+#include "common/audio_input.hpp"
 #include "common/image_input.hpp"
 #include "sample/sampler.hpp"
 #include "text/tool_grammar.hpp"
@@ -89,6 +90,20 @@ class SchedulerEngine {
   virtual bool supports_image_prefix_cache() const { return false; }
   virtual int32_t prefill_images(int, const std::vector<int64_t>&, const std::vector<ImageInput>&) {
     throw std::invalid_argument("this engine does not support image inputs");
+  }
+  // The ASR family's audio surface (docs/audio.md), mirroring the image one:
+  // the same span-validated inputs, the same prefill-time embedding splice.
+  virtual bool supports_audios() const { return false; }
+  virtual AudioTokens audio_token_ids() const { return {}; }
+  // Until an engine snapshots KV across an audio span, audio requests skip
+  // the prefix cache (their cold prefill is the whole prompt).
+  virtual bool supports_audio_prefix_cache() const { return false; }
+  // The rows one request's audio spans may total: tower staging and the
+  // forward share this bound, so admission refuses longer clips before
+  // they can fail the service. 0 = the admission bound governs.
+  virtual int64_t prefill_audio_token_limit() const { return 0; }
+  virtual int32_t prefill_audios(int, const std::vector<int64_t>&, const std::vector<AudioInput>&) {
+    throw std::invalid_argument("this engine does not support audio inputs");
   }
 
   // Opt-in continuation support. One advance executes at most the aligned
@@ -606,6 +621,7 @@ struct SchedulerRequest {
   // engine on every rank; rides the journal.
   std::vector<LogitBias> logit_bias;
   std::vector<ImageInput> images;
+  std::vector<AudioInput> audios;
 };
 
 // The bounded admission queue at capacity (submit() only). A load-shed
@@ -975,7 +991,8 @@ class Scheduler {
   };
   bool cache_on(const Request& r) const {
     return cache_.enabled() && !r.spec.no_cache && !r.cache_off &&
-           (r.spec.images.empty() || engine_->supports_image_prefix_cache());
+           (r.spec.images.empty() || engine_->supports_image_prefix_cache()) &&
+           (r.spec.audios.empty() || engine_->supports_audio_prefix_cache());
   }
   PrefixPlan plan_prefix(const Request& r) const;
   // The structural boundaries the engine's cold prefill cuts at (2026-09-28):

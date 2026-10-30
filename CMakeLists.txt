@@ -271,6 +271,19 @@ add_library(dgpp_text STATIC
 target_link_libraries(dgpp_text PUBLIC dgpp_loaders dgpp_pcre2)
 dgpp_set_common(dgpp_text)
 
+# Audio admission DSP (docs/audio.md): container decode and the host log-mel
+# frontend, deterministic and CUDA-free so the frontend that admits a request
+# and the tower's oracle compute identical features.
+add_library(dgpp_audio STATIC
+  src/audio/wav_decode.cpp
+  src/audio/mp3_decode.cpp
+  src/audio/compressed_decode.cpp
+  src/audio/fft400.cpp
+  src/audio/mel_frontend.cpp)
+target_include_directories(dgpp_audio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_audio PUBLIC dgpp_common)
+dgpp_set_common(dgpp_audio)
+
 add_library(dgpp_sched STATIC
   src/sched/disk_cache.cpp
   src/sched/prefix_cache.cpp
@@ -963,12 +976,14 @@ if(DGPP_ENABLE_IBV)
   install(FILES docs/dependencies.md docs/networking.md docs/vision.md DESTINATION docs)
   install(FILES docs/nvme-cache.md docs/configuration.md docs/prefix-cache.md DESTINATION docs)
   install(FILES docs/licenses/PCRE2.md docs/licenses/stb_image.md docs/licenses/simplewebp.md
+                docs/licenses/minimp3.md docs/licenses/dr_flac.md docs/licenses/stb_vorbis.md
                 docs/licenses/pytorch.md DESTINATION docs/licenses)
   install(FILES deploy/nginx.example.conf DESTINATION deploy)
 endif()
 
 enable_testing()
 add_executable(unit_tests
+  tests/unit/audio_frontend_test.cpp
   tests/unit/disk_cache_test.cpp
   tests/unit/image_inputs_test.cpp
   tests/unit/file_inputs_test.cpp
@@ -999,6 +1014,7 @@ add_executable(unit_tests
   tests/unit/json_grammar_test.cpp
   tests/unit/net_test.cpp
   tests/unit/cluster_config_test.cpp
+  tests/unit/tokenizer_load_test.cpp
   tests/unit/qwen_config_test.cpp
   tests/unit/qwen_csf_test.cpp
   tests/unit/qwen_image_stage_test.cpp
@@ -1178,6 +1194,9 @@ set_tests_properties(flint_chat_template_test PROPERTIES SKIP_RETURN_CODE 2)
 # engine and frontend, no model cache). Stage 4b adds the admission
 # journal (fabric_serve.cpp over the host-only dgpp_net TCP primitives).
 add_library(dgpp_serve STATIC
+  src/serve/audio_inputs.cpp
+  src/serve/audio_transcriptions.cpp
+  src/serve/audio_frontend.cpp
   src/serve/image_inputs.cpp
   src/serve/vision_frontend.cpp
   src/serve/glm_vision_frontend.cpp
@@ -1192,7 +1211,7 @@ add_library(dgpp_serve STATIC
   src/serve/prometheus.cpp
   src/serve/rank_metrics.cpp)
 target_link_libraries(dgpp_serve
-  PUBLIC dgpp_core dgpp_models_glm dgpp_loaders dgpp_net Threads::Threads)
+  PUBLIC dgpp_core dgpp_audio dgpp_models_glm dgpp_loaders dgpp_net Threads::Threads)
 dgpp_set_common(dgpp_serve)
 
 add_executable(http_server_test tests/host/http_server_test.cpp)
@@ -1209,6 +1228,7 @@ add_test(NAME nvme_cache_test COMMAND nvme_cache_test)
 # + fake frontend — the OpenAI surface, host-only, always runs.
 add_executable(serve_test tests/host/serve_test.cpp)
 target_link_libraries(serve_test PRIVATE dgpp_serve Threads::Threads)
+target_compile_definitions(serve_test PRIVATE DGPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 dgpp_set_common(serve_test)
 add_test(NAME serve_test COMMAND serve_test)
 add_test(NAME serve_test_wake COMMAND serve_test)
