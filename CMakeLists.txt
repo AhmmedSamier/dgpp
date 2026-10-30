@@ -528,7 +528,8 @@ dgpp_set_common(dgpp_models_dflash2)
 # Nemotron-3.5-Transcribe (2026-10-30, docs/nemotron_transcribe_plan.md):
 # the host-side config description (root NeMo cfg + the HF nemotron_h LLM).
 add_library(dgpp_models_nemotron_transcribe STATIC
-  src/models/nemotron_transcribe/config.cpp)
+  src/models/nemotron_transcribe/config.cpp
+  src/models/nemotron_transcribe/binding.cpp)
 target_include_directories(dgpp_models_nemotron_transcribe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_nemotron_transcribe PUBLIC dgpp_loaders dgpp_common)
 dgpp_set_common(dgpp_models_nemotron_transcribe)
@@ -1049,6 +1050,7 @@ add_executable(unit_tests
   tests/unit/dory_reference_test.cpp
   tests/unit/flint_config_test.cpp
   tests/unit/nemotron_transcribe_config_test.cpp
+  tests/unit/nemotron_transcribe_binding_test.cpp
   tests/unit/flint_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   tests/unit/verify_schedule_test.cpp
