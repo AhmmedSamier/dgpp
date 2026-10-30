@@ -210,23 +210,49 @@ fallback.
 
 ## Open questions (resolve in milestone 5, from NeMo Speech source)
 
-- How `ParallelExpertEncoderPT` joins the asr/diar streams into rows,
-  and the diar branch's exact windowing (Sortformer is streaming with
-  34 k-frame chunks; the paper's "104-packed-row" analogue).
+Resolved 2026-10-30 from `nemo/collections/asr/modules/parallel_expert_encoder.py`
+(main):
+
+- **Expert join** — `ParallelExpertEncoder._fuse_diar_and_asr`:
+  `fused(T,D) = asr_norm(states) + spk_kernel_scale *
+  matmul(diar_norm(speaker_features), diar_kernel)`, all before the
+  `perception.proj` 1280→2688 connector. `speaker_features` is the
+  per-frame speaker activity aligned/pad-repeated to the ASR grid,
+  mode-gated by `speaker_feature_mode` (continuous sigmoid vs
+  thresholded — read the value from `config.json`
+  `pe_encoder_config`; `spk_kernel_scale` is 1.0), `diar_norm` is a
+  LayerNorm(n_spk) over the activity vector, and `diar_kernel` is a
+  **built-in** sinusoidal (n_spk × 1280) table (not a checkpoint
+  tensor). The diarization branch runs Sortformer streaming windows
+  (fifo 40, spkcache 188, update period 300, chunk 128 ±50 context at
+  the encoder grid); both branches consume the same mels and each
+  reapplies `normalize_batch` internally (asr/diar normalize types from
+  the bundle cfg). Subsampling factor must match (8).
+- Frame grid: input 10 ms frames, feature stacking ×8 after the mel
+  (pre_encode = FeatureStacking, one Linear 1024→1280 in
+  `pre_encode.proj.weight`), so encoder tokens are 80 ms — the card's
+  ~80 ms/token holds and the `audio_token_estimator` formula is
+  ceil(frames/8) with hop 160, center pad 256.
+- Chunking: `chunk_size_seconds` 30 → the ASR branch runs full
+  attention over independent 375-token chunks (post-stacking split,
+  `packed_encoder_sequences` a training detail).
+
+Still open:
+
 - MTP inference mechanics: how the repeated layer consumes
   (embedding, hidden), and the depth-2 training → 8-token drafting
-  mapping (the card's wording) — mirror the vLLM plugin's implementation.
-- Whether NeMo applies `dither` at eval (must be off for determinism;
-  verify against `test_mode`).
+  mapping — mirror the vLLM plugin (`nemo_speechlm`).
+- Whether NeMo applies `dither` (1e-5) at eval (must be off for
+  determinism; verify `AudioToMelSpectrogramPreprocessor.forward`
+  gating).
 - Router group policy under `n_group: 1` vs `n_groups: 8`
   (no-aux vs group-limited), and the `e_score_correction_bias`
-  application point.
+  application point (Automodel `nemotron_h` MoE source settles it).
 - The `<|audio|>` id and whether the LM input inserts pad rows around
   the locator (the HF processor's `apply_transcription_request` is the
   ground truth).
-- NVFP4 export layout for the stacked expert tensors (`.../NVFP4`
-  sibling repo): confirm the packed pairs + block scales are per-expert
-  in the stacked [E] tensors, like the dflash2 draft planes precedent.
+- NVFP4 export layout for the stacked expert tensors: confirm packed
+  pairs + block scales per expert in the stacked [E] tensors.
 
 ## Status
 
