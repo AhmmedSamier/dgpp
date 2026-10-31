@@ -98,6 +98,7 @@
 #include "text/dsv41_prompt.hpp"
 #include "text/dsv4_prompt.hpp"
 #include "models/glm_dsa/model.hpp"
+#include "models/nemotron_transcribe/model.hpp"
 #include "models/mimo/config.hpp"
 #include "models/mimo/forward.hpp"
 #include "models/dory/binding.hpp"
@@ -1270,6 +1271,68 @@ struct Qwen35Family final : ServeFamily {
   }
 };
 
+// Nemotron-3.5-Transcribe-30B-A4B (docs/nemotron_transcribe_plan.md):
+// world 1 only for now, BF16 pool, no block drafter, no MTP yet.
+struct NemotronTranscribeFamily final : ServeFamily {
+  dgpp::NemotronTranscribeConfig cfg;
+  std::string ckpt;
+  std::unique_ptr<dgpp::NemotronModel> model;
+
+  NemotronTranscribeFamily(const std::string& checkpoint)
+      : cfg(dgpp::NemotronTranscribeConfig::from_json_file(
+            (fs::path(checkpoint) / "config.json").string())),
+        ckpt(checkpoint) {}
+
+  const char* name() const override { return "nemotron_transcribe"; }
+  int64_t vocab_size() const override { return cfg.lm.vocab_size; }
+  const std::vector<int64_t>& eos_token_ids() const override { return cfg.lm.eos_token_ids; }
+  int64_t block_tokens() const override { return 128; }
+  int prefill_chunk_tokens() const override { return dgpp::NemotronModel::prefill_chunk_tokens(); }
+  std::string pool_check(int64_t) const override { return ""; }
+  const char* kv_format_name() const override { return "bf16"; }
+  int decode_rows_cap() const override { return dgpp::NemotronModel::decode_rows_cap(); }
+  size_t lat_slot_bytes(int decode_rows) const override {
+    return static_cast<size_t>(decode_rows) * static_cast<size_t>(cfg.lm.hidden_size) * 2;
+  }
+  dgpp::MemoryPlan plan(int forward_rows, int64_t context, int, int, bool, int slots, bool,
+                        int decode_rows) const override {
+    return dgpp::NemotronModel::plan_memory(cfg, forward_rows, context, 0, 1,
+                                            dgpp::NemotronResidency::Streaming, slots, false,
+                                            decode_rows);
+  }
+  size_t snapshot_bytes(int, bool) const override { return 16; }  // zero-byte stamp placeholder
+  size_t cache_block_bytes(int, bool) const override {
+    return static_cast<size_t>(128) * static_cast<size_t>(cfg.lm.hidden_size) * 2;
+  }
+  void build_model(dgpp::BoundaryReducer* reducer, int rank, int world, bool fabric,
+                   int forward_rows, int64_t pool_tokens, int slots, bool /*mtp*/,
+                   int decode_rows) override {
+    model = std::make_unique<dgpp::NemotronModel>(
+        cfg, ckpt, forward_rows, pool_tokens, dgpp::NemotronResidency::Streaming,
+        reducer, rank, world, slots, false, decode_rows);
+  }
+  void destroy_model() override { model.reset(); }
+  size_t model_snapshot_bytes() const override { return 0; }
+  std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
+                                                      int, uint16_t* pick_scratch,
+                                                      int batch_min_live, uint16_t* prefix_scratch,
+                                                      uint16_t* gather_scratch, int candidates,
+                                                      const dgpp::text::GrammarVocab* grammar,
+                                                      int prefix_slots, int mtp_depth,
+                                                      bool compact_batches, int lookup_tail = 0) override {
+    return std::make_unique<ServeGraphEngineOf<dgpp::NemotronModel>>(
+        model.get(), bus, rank, 1, pick_scratch, cfg.lm.vocab_size, /*pick_timeout_ms=*/60000,
+        batch_min_live, prefix_scratch, gather_scratch, candidates, grammar, prefix_slots,
+        mtp_depth, compact_batches, lookup_tail);
+  }
+  std::unique_ptr<dgpp::sched::SchedulerEngine> make_eager_engine(
+      int slots, dgpp::DecodePick pick, dgpp::DecodeSample sample, const dgpp::text::GrammarVocab* grammar,
+      int prefix_slots) override {
+    return std::make_unique<dgpp::EagerEngineAdapter<dgpp::NemotronModel>>(
+        model.get(), slots, std::move(pick), std::move(sample), grammar, prefix_slots);
+  }
+};
+
 std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
                                          dgpp::LatentFormat kv_format,
                                          const std::optional<dgpp::RopeScaling>& rope_scaling,
@@ -1295,6 +1358,8 @@ std::unique_ptr<ServeFamily> make_family(const std::string& ckpt, int world,
     return std::make_unique<Qwen35Family>(ckpt, rope_scaling, kv_format);
   if (arch == dgpp::ModelArchitecture::Glm4Moe) return std::make_unique<Glm4Family>(ckpt);
   if (arch == dgpp::ModelArchitecture::GlmMoeDsa) return std::make_unique<GlmDsaFamily>(ckpt, world, kv_format);
+  if (arch == dgpp::ModelArchitecture::NemotronTranscribe)
+    return std::make_unique<NemotronTranscribeFamily>(ckpt);
   return std::make_unique<GlmFamily>(ckpt, world, kv_format);
 }
 

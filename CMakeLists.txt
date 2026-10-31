@@ -370,6 +370,26 @@ target_include_directories(dgpp_models_dory_layers PUBLIC ${CMAKE_CURRENT_SOURCE
 target_link_libraries(dgpp_models_dory_layers
   PUBLIC dgpp_models_dory dgpp_models_dory_loader dgpp_kernels CUDA::cudart)
 dgpp_set_common(dgpp_models_dory_layers)
+
+# Nemotron-3.5-Transcribe resident loader (loaders/resident_stream.hpp).
+# The base library (config, binding, reference, perception, state) already
+# exists from milestones 1–3 at line 561.
+add_library(dgpp_models_nemotron_transcribe_loader STATIC
+  src/models/nemotron_transcribe/loader.cpp)
+target_include_directories(dgpp_models_nemotron_transcribe_loader PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_nemotron_transcribe_loader PUBLIC dgpp_models_nemotron_transcribe dgpp_loaders CUDA::cudart dgpp_device_ranges)
+dgpp_set_common(dgpp_models_nemotron_transcribe_loader)
+
+# The Nemotron-Transcribe layer objects and model (the session-core walk,
+# the mamba-2 / attention / Moe device forward).
+add_library(dgpp_models_nemotron_transcribe_layers STATIC
+  src/models/nemotron_transcribe/model.cpp
+  src/models/nemotron_transcribe/forward.cu)
+target_include_directories(dgpp_models_nemotron_transcribe_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(dgpp_models_nemotron_transcribe_layers
+  PUBLIC dgpp_models_nemotron_transcribe dgpp_models_nemotron_transcribe_loader dgpp_kernels CUDA::cudart)
+dgpp_set_common(dgpp_models_nemotron_transcribe_layers)
+
 # Flint (2026-10-22, docs/flint_plan.md): the host-side config, binding
 # table and attention oracle.
 add_library(dgpp_models_flint STATIC
@@ -946,6 +966,7 @@ if(DGPP_ENABLE_IBV)
                                              dgpp_models_dsv41_layers dgpp_models_dsv4_layers dgpp_models_mimo_layers
                                              dgpp_models_dory_layers
                                              dgpp_models_flint_layers
+                                             dgpp_models_nemotron_transcribe_layers
                                              dgpp_loaders dgpp_bus
                                              dgpp_serve CUDA::cudart
                                              Threads::Threads)

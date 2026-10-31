@@ -9,10 +9,12 @@
 // and slot offsets never reach into kernel internals.
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include <cuda_runtime.h>
 
 #include "core/arena.hpp"
+#include "engine/cache_planes.hpp"
 
 namespace dgpp {
 
@@ -51,6 +53,25 @@ class NemotronMambaStatePool {
 
   // Resume/branch: dst becomes a byte copy of src (snapshot semantics).
   void copy_request(int dst_request, int src_request, cudaStream_t stream);
+
+  // Paged block table stub interface (prefix arena / NVMe tier). The
+  // Nemotron-Transcribe pool is a recurrent state pool, not a paged KV
+  // cache; these are no-ops until the family wires prefix caching.
+  const int32_t* request_table_row(int /*req*/) const { return nullptr; }
+  void pin_blocks(const int32_t* /*blocks*/, int /*n*/) {}
+  int32_t acquire_pinned_block() { return -1; }
+  void unpin_blocks(const int32_t* /*blocks*/, int /*n*/) {}
+  void copy_block_contents(int32_t /*dst*/, int32_t /*src*/,
+                           cudaStream_t /*stream*/) {}
+  std::vector<CachePlane> planes() const { return {}; }
+  bool ensure_request_blocks(int /*req*/, int64_t /*tokens*/,
+                             cudaStream_t /*stream*/) { return true; }
+  uint64_t block_identity(int32_t /*block*/) const { return 0; }
+  int64_t total_blocks() const { return 0; }
+  int64_t blocks_in_use() const { return 0; }
+  int64_t block_count_for_tokens(int64_t /*tokens*/) const { return 0; }
+  bool share_blocks_into(int /*req*/, const int32_t* /*blocks*/, int /*n*/,
+                         cudaStream_t /*stream*/) { return false; }
 
  private:
   uint8_t* request_base(int request) const;

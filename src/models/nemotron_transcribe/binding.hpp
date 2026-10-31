@@ -88,6 +88,7 @@ struct NemotronExpectedTensor {
     for (auto d : shape) n *= static_cast<size_t>(d);
     return n;
   }
+  size_t nbytes() const { return numel() * (dtype == DType::F32 ? 4 : 2); }
 };
 
 // One observed tensor, keyed by name, for the validator.
@@ -105,12 +106,12 @@ struct NemotronBindReport {
 // The Mamba-2 derived widths from the config, pinned against the release's
 // shapes: d_inner = heads x head_dim; the in_proj row count is
 // x + z + B + C + dt; the conv runs over x + B + C.
-struct NemotronMambaGeometry {
+struct NemotronMambaWeightGeometry {
   int64_t d_inner = 0;
   int64_t in_proj_rows = 0;
   int64_t conv_channels = 0;
 };
-NemotronMambaGeometry nemotron_mamba_geometry(const NemotronTranscribeLmConfig& lm);
+NemotronMambaWeightGeometry nemotron_mamba_geometry(const NemotronTranscribeLmConfig& lm);
 
 // Tensors for the whole checkpoint (excluding the ignored groups).
 std::vector<NemotronExpectedTensor> nemotron_expected_tensors(

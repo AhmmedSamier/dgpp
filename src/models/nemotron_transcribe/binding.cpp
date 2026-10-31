@@ -188,10 +188,10 @@ void record(NemotronBindReport& rep, const std::string& msg) {
 
 }  // namespace
 
-NemotronMambaGeometry nemotron_mamba_geometry(const NemotronTranscribeLmConfig& lm) {
+NemotronMambaWeightGeometry nemotron_mamba_geometry(const NemotronTranscribeLmConfig& lm) {
   const int64_t nh = lm.mamba_num_heads, hd = lm.mamba_head_dim;
   const int64_t G = lm.mamba_num_groups, S = lm.mamba_state_size;
-  NemotronMambaGeometry g;
+  NemotronMambaWeightGeometry g;
   g.d_inner = nh * hd;
   g.conv_channels = g.d_inner + 2 * G * S;  // the conv runs over x, B and C
   g.in_proj_rows = 2 * g.d_inner + 2 * G * S + nh;  // x + z + B + C + dt
