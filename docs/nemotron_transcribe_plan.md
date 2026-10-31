@@ -122,12 +122,21 @@ the `dflash2` path of the Qwen3.8-27B templates is the template.
 
 - **Preprocessor** (`AudioToMelSpectrogramPreprocessor`, weights frozen
   and shipped): 16 kHz, window 0.025 s (400), stride 0.01 s (160),
-  `n_fft` 512 → 257 bins, hann, center pad 256, 128 mel from the shipped
-  filterbank `featurizer.fb` (use the tensor, do not regenerate Slaney —
-  it need not match librosa), `log: true` (NeMo's
-  `log(clamp(S, eps) + 1e-10)`), `dither: 1e-05` — random noise: the
-  oracle path must pin dither-off (NeMo applies dither only in training
-  mode — verify), `frame_splicing` 1, `pad_to` 0.
+  `n_fft` 512 → 257 bins, hann — the SHIPPED `featurizer.window` [400]
+  is the truth (a symmetric Hann, `periodic_window` default False), and
+  the shipped `featurizer.fb` [1, 128, 257] is the filterbank (use the
+  tensor, do not regenerate Slaney — it need not match librosa). Framing
+  is torch-stft center-padding (`exact_pad` unset): T = (N + 112) / 160
+  + 1 frames. Chain per features.py (2026-10-31 source read): dither is
+  TRAINING-ONLY (the 1e-05 config value never fires at eval — the oracle
+  pins this), then **preemphasis 0.97 on the unpadded signal — the
+  release's config omits `preemph`, so the module default APPLIES it**
+  (this was a census miss: no `preemph` key ≠ no preemphasis);
+  magnitude = sqrt(re² + im²) then pow 2 (`mag_power` 2.0 default — the
+  square of the rounded sqrt); fb matmul; `log: true` with the DEFAULT
+  guard: `log(S + 2^-24)` (log_zero_guard_type 'add', value 2^-24 —
+  NOT clamp+1e-10; the config omits both keys); `frame_splicing` 1,
+  `pad_to` 0, `normalize` null.
 - **ASR branch**: `pre_encode.proj` stacks 8 frames (128 × 8 → 1280;
   `subsampling_factor` 8 ⇒ 12.5 encoder tokens/s, matching the card's
   ~80 ms/token), 32 × pre-norm Transformer blocks: `w_qkv` [3840, 1280],
@@ -257,9 +266,6 @@ Still open:
 - MTP inference mechanics: how the repeated layer consumes
   (embedding, hidden), and the depth-2 training → 8-token drafting
   mapping — mirror the vLLM plugin (`nemo_speechlm`).
-- Whether NeMo applies `dither` (1e-5) at eval (must be off for
-  determinism; verify `AudioToMelSpectrogramPreprocessor.forward`
-  gating).
 - The `<|audio|>` id and whether the LM input inserts pad rows around
   the locator (the HF processor's `apply_transcription_request` is the
   ground truth).
@@ -324,3 +330,31 @@ Still open:
   open until the fabric is idle; the build, registration and the host
   oracle suite are green. The oracle header split (minijson-free
   reference.hpp with the config forward-declared) keeps nvcc TUs compiling.
+- 2026-10-31: milestone 5 (part A — everything but Sortformer's own
+  branch) — the host fp32 perception oracle
+  `src/models/nemotron_transcribe/perception.{hpp,cpp}`: the frozen mel
+  frontend (its own radix-2 rfft512, NeMo's chain order pinned),
+  FeatureStacking + the bias-free pre-encode, embed/final LayerNorms, the
+  pre-norm encoder block (fused w_qkv → per-head q/k LayerNorm → half
+  RoPE → bidirectional softmax → biased out_proj → GELU-erf FFN), the
+  built-in sinusoidal speaker kernel, the thresholded fusion (STRICT >,
+  scale on the infusion only) and the connector — the Sortformer branch
+  itself (5b) enters as the activity tensor, exactly as
+  `ParallelExpertEncoder._fuse_diar_and_asr` accepts external targets.
+  The NeMo toolkit is not installable on this box right now (12 GB disk
+  headroom, multi-GB CUDA wheels), so the gate fixture
+  (`tests/python/nemotron_transcribe_perception_oracle.py` →
+  `tests/data/nemotron_transcribe_perception_oracle.json`) is a
+  CPU-torch MIRROR transcribed from the five NeMo sources at main
+  (fetched 2026-10-31, cited in the plan census); the mirror itself
+  proved worth having — it shipped a rope bug (cos=sin=emb) that the
+  C++ correctly refused to match, and the fixture now regenerates
+  against the real NeMo classes when the toolkit lands, same file
+  shape. The census gained three facts from the source read: preemphasis
+  0.97 DOES apply (the config omits the key, the default fires), the log
+  guard is `log(S + 2^-24)` (not clamp+1e-10), and dither is
+  training-only — eval is deterministic. Frames: T = (N + 112) / 160 + 1
+  (center-stft). `nemotron_perc_oracle_*` unit tests green; the
+  hand-computed corners pin the delta-FFT, the kernel's sin-on-even
+  ladder, the LN, and the strict-> threshold. Still open: the real-NeMo
+  re-emit, and Sortformer's internals (5b).

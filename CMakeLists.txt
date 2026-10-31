@@ -532,6 +532,7 @@ add_library(dgpp_models_nemotron_transcribe STATIC
   src/models/nemotron_transcribe/config.cpp
   src/models/nemotron_transcribe/binding.cpp
   src/models/nemotron_transcribe/reference.cpp
+  src/models/nemotron_transcribe/perception.cpp
   src/models/nemotron_transcribe/state.cpp)
 target_include_directories(dgpp_models_nemotron_transcribe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(dgpp_models_nemotron_transcribe PUBLIC dgpp_loaders dgpp_common CUDA::cudart)
@@ -1055,6 +1056,7 @@ add_executable(unit_tests
   tests/unit/nemotron_transcribe_config_test.cpp
   tests/unit/nemotron_transcribe_binding_test.cpp
   tests/unit/nemotron_transcribe_reference_test.cpp
+  tests/unit/nemotron_transcribe_perception_test.cpp
   tests/unit/flint_binding_test.cpp
   tests/unit/nvfp4_quant_test.cpp
   tests/unit/verify_schedule_test.cpp
