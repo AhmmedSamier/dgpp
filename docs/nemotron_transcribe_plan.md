@@ -200,15 +200,32 @@ the `dflash2` path of the Qwen3.8-27B templates is the template.
 template (embedded in `tokenizer_config.json`, complete with the tools
 and thinking macros) places **one `<|audio|>` locator per clip after the
 text** — the vLLM comment in the template even documents the reorder.
-The frontend's job (the `audio_frontend.cpp` pattern): let the template
-emit the locator, then expand it to the clip's encoder rows + the pad
-row the model expects — exact marker/pad semantics come from the NeMo
-`speechlm2` processor; the Qwen3-ASR `...`/pad/`...` triple is NOT
-reused (this is one locator token, not a delimiter pair).
+Resolved against the shipped artifacts 2026-10-31 (the `tokenizer.json`
+added tokens + the template's `render_content`, since transformers
+5.20.2 has no transcribe processor — the near-name `nemotron3_5_asr`
+module is the streaming RNN-T family, not this model): the locator id
+is **131072 == vocab_size**, i.e. outside the embedding rows, so the
+locator token is NEVER embedding-looked-up — it is a pure splice
+marker, each one replaced in place by the clip's `T_tok` perception
+rows. **No pad rows surround it** (nothing to pad: the id has no row);
+multi-clip is one locator per audio part, single-space separated and
+final in the user turn (the template raises on a misplaced or
+count-mismatched locator; vLLM's leading-`<|audio|>\n` placeholders are
+reordered behind the text before tokenization). The frontend's job (the
+`audio_frontend.cpp` pattern): let the template emit the locators, then
+expand each to its clip's encoder rows; the Qwen3-ASR `...`/pad/`...`
+triple is NOT reused (this is one locator token, not a delimiter pair).
 `<asr_text>`/speaker/event tags: `<spk:N>` tags are plain vocabulary
-(the card's prompt guide asks for them); the reasoning macros honour
-`enable_thinking` (transcription runs it off; the repo template
-interpreter already handles both shapes).
+(the card's prompt guide asks for them). The reasoning macros honour
+`enable_thinking` (defaults True in the template): the generation
+prompt is `<|im_start|>assistant\n` + a literal `<think>`\n opening
+when thinking is ON, and `<|im_start|>assistant\n` + the literal
+`<think></think>` closing pair when OFF (the exact strings from the
+template tail; transcription runs it OFF — the repo template
+interpreter already handles both shapes, emitting the closed-pair form
+so the model answers immediately). Recommended sampling for
+transcription/translation/LID is temperature 0 (greedy — which is also
+what the text goldens pin).
 
 ## Memory plan (one Spark, world 1)
 
@@ -299,14 +316,27 @@ Still open:
 - MTP inference mechanics: how the repeated layer consumes
   (embedding, hidden), and the depth-2 training → 8-token drafting
   mapping — mirror the vLLM plugin (`nemo_speechlm`).
-- The `<|audio|>` id and whether the LM input inserts pad rows around
-  the locator (the HF processor's `apply_transcription_request` is the
-  ground truth).
 - NVFP4 export layout for the stacked expert tensors: confirm packed
   pairs + block scales per expert in the stacked [E] tensors.
 
 ## Status
 
+- 2026-10-31: prompt contract resolved (removes one "Still open"): the
+  `<|audio|>` locator id is 131072 == vocab_size (never embedding-
+  looked-up — a pure splice marker replaced in place by the clip's
+  `T_tok` perception rows, NO pad rows around it), one locator per
+  clip, single-space separated, final in the user turn (the shipped
+  chat template's `render_content` raises on misplaced/mismatched
+  locators; vLLM's leading-locator placeholders are reordered behind
+  the text). `enable_thinking` defaults True in the template: the
+  generation prompt is `<|im_start|>assistant\n` + the literal OPEN
+  think-block tag pair when thinking is on (the HTML-comment-style
+  `<!--think-->\n` opener the template emits verbatim), and +
+  the literal CLOSED think-block tag pair when off; transcription
+  runs it off (greedy, temp 0 — what the text goldens pin). Settled from the shipped `tokenizer.json`/`tokenizer_config.json`
+  artifacts (transformers 5.20.2 has no transcribe processor — its
+  `nemotron3_5_asr` module is the streaming RNN-T family, not this
+  model).
 - 2026-10-30: checkpoint surveyed (BF16 67.5 GB single shard +
   DFlash2, cached); census and slot geometry above; audio transport
   stack landed on this branch in `ebfd0065`; plan written.
