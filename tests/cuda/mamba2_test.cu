@@ -256,10 +256,19 @@ DGPP_TEST(mamba2_scan_resume_and_step_are_the_prefill_bitwise) {
                            c.ss, dt_min, 0);
   }
   dev_sync();
-  require_bitwise("scan resume == prefill", d1.p, dref.p, static_cast<size_t>(c.seq) * d_inner * 2);
-  require_bitwise("scan step == prefill", d2.p, dref.p, static_cast<size_t>(c.seq) * d_inner * 2);
-  require_bitwise("scan resume state", dst1.p, dst0.p, dst1.bytes);
-  require_bitwise("scan step state", dst2.p, dst0.p, dst2.bytes);
+  // require_bitwise is a host memcmp: download every device buffer first.
+  const auto ref_bits = download<uint16_t>(dref, static_cast<size_t>(c.seq) * d_inner);
+  const auto r1 = download<uint16_t>(d1, static_cast<size_t>(c.seq) * d_inner);
+  const auto r2 = download<uint16_t>(d2, static_cast<size_t>(c.seq) * d_inner);
+  const auto s0 = download<float>(dst0, static_cast<size_t>(c.heads) * c.hd * c.ss);
+  const auto s1 = download<float>(dst1, static_cast<size_t>(c.heads) * c.hd * c.ss);
+  const auto s2 = download<float>(dst2, static_cast<size_t>(c.heads) * c.hd * c.ss);
+  require_bitwise("scan resume == prefill", r1.data(), ref_bits.data(),
+                  static_cast<size_t>(c.seq) * d_inner * 2);
+  require_bitwise("scan step == prefill", r2.data(), ref_bits.data(),
+                  static_cast<size_t>(c.seq) * d_inner * 2);
+  require_bitwise("scan resume state", s1.data(), s0.data(), s1.size() * 4);
+  require_bitwise("scan step state", s2.data(), s0.data(), s2.size() * 4);
 }
 
 DGPP_TEST(mamba2_gated_norm_matches_the_oracle) {

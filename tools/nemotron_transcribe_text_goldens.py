@@ -74,9 +74,12 @@ def snapshot_dir(model: str) -> Path:
     home = Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface"))
     repo = "models--" + model.replace("/", "--")
     snaps = sorted((home / "hub" / repo / "snapshots").iterdir())
-    if not snaps:
-        sys.exit(f"no cached snapshot for {model}")
-    return snaps[-1]
+    # Re-uploads leave partial snapshots behind; only one carries the
+    # 67.5 GB shard, and every consumer of this dir wants it.
+    with_weights = [s for s in snaps if (s / "model.safetensors").is_file()]
+    if len(with_weights) != 1:
+        sys.exit(f"expected exactly one weighted snapshot for {model}, got {len(with_weights)}")
+    return with_weights[0]
 
 
 def main() -> int:

@@ -94,7 +94,7 @@ __global__ void conv_silu_step_kernel(const uint16_t* __restrict__ u_row, uint16
 }
 
 // One block per head. Dynamic smem: state[hd*ss], xs[hd], Bs[ss], Cs[ss],
-// red[32+1], scalars at the tail.
+// red[kThreads] (every thread stores its partial sum), scalars at the tail.
 __global__ void scan_kernel(const uint16_t* __restrict__ x, int64_t x_stride,
                             const uint16_t* __restrict__ B, int64_t B_stride,
                             const uint16_t* __restrict__ C, int64_t C_stride,
@@ -112,8 +112,8 @@ __global__ void scan_kernel(const uint16_t* __restrict__ x, int64_t x_stride,
   float* xs = st + total;            // hd
   float* Bs = xs + hd;               // ss
   float* Cs = Bs + ss;               // ss
-  float* red = Cs + ss;              // 33
-  float* scal = red + 33;            // 2: d, dA
+  float* red = Cs + ss;              // kThreads
+  float* scal = red + kThreads;      // 2: d, dA
 
   for (int e = threadIdx.x; e < total; e += blockDim.x)
     st[e] = state_io ? state_io[static_cast<int64_t>(h) * total + e] : 0.f;
@@ -225,7 +225,8 @@ void mamba2_scan(const void* x, int64_t x_stride, const void* B, int64_t B_strid
   const int ept = total / kThreads;
   if (ept > state_size || state_size % ept != 0)
     throw std::invalid_argument("mamba2_scan: state tiling");
-  const size_t smem = static_cast<size_t>(total + head_dim + 2 * state_size + 33 + 2 + head_dim) *
+  const size_t smem = static_cast<size_t>(total + head_dim + 2 * state_size + kThreads + 2 +
+                                          head_dim) *
                       sizeof(float);
   if (smem > 48u * 1024u)
     throw std::invalid_argument("mamba2_scan: state too large for static smem budget");

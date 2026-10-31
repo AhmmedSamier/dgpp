@@ -393,6 +393,24 @@ Still open:
   open until the fabric is idle; the build, registration and the host
   oracle suite are green. The oracle header split (minijson-free
   reference.hpp with the config forward-declared) keeps nvcc TUs compiling.
+- 2026-10-31: milestone 3 DEVICE GATE CLOSED — the serve released the
+  GPU and `./build/mamba2_test` ran for real: 6/6. Two defects surfaced
+  by the first honest run, both fixed: the scan kernel's per-thread
+  reduction array `red[]` was reserved for 33 floats in the dynamic
+  shared-memory layout but written by all 256 threads (`red[threadIdx.x]
+  = part`) — threads 33+ scribbled past the allocation (cuda error 700,
+  illegal memory access; the later tests' `cudaMalloc failed` were the
+  poisoned context cascading, not independent failures — the launcher
+  now reserves `kThreads`); and `mamba2_scan_resume_and_step_...` fed
+  device pointers to `require_bitwise`, a host memcmp (segfault; every
+  buffer is downloaded first now). With those, the gates hold exactly
+  as designed: conv prefill vs oracle (3 geometries incl. the release's
+  ch=6144), conv step chain BITWISE, scan vs the oracle across 4
+  geometries, resume (split 17/41) and row-by-row decode BITWISE equal
+  to the one-shot prefill including the F32 state, gated norm vs
+  oracle (incl. the release geometry), and the state pool
+  snapshot/zero/bounds. Host suite 479 tests, 1 failed (the pre-existing
+  QAD case only).
 - 2026-10-31: milestone 5 (part A — everything but Sortformer's own
   branch) — the host fp32 perception oracle
   `src/models/nemotron_transcribe/perception.{hpp,cpp}`: the frozen mel
