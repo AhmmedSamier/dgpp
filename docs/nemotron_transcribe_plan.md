@@ -109,14 +109,49 @@ MLP — there are none: all 23 MLP slots are MoE, so the LM has no dense
 layers.
 
 MTP: one trained layer (`attention` + `moe`, `mtp_layers_block_type`)
-with `eh_proj` (2·2688 → 2688), `enorm`, `hnorm`, `final_layernorm` —
-Megatron-style: the draft step consumes the last token's embedding and
-hidden state. The card: two next-token prediction depths via the
-repeated layer, up to 8 speculative tokens; the existing MTP/drafter
-framework already carries depth-scheduled verify. The DFlash2 draft repo
-(`num_hidden_layers: 6`, `block_size: 16`, `num_target_layers: 52`,
-non-causal attention) is a block drafter over the same 2688 hidden —
-the `dflash2` path of the Qwen3.8-27B templates is the template.
+with `eh_proj` (2·2688 → 2688), `enorm`, `hnorm`, `final_layernorm`.
+Resolved mechanics (pure-torch replay on the real `llm.mtp.*` tensors,
+tools/nemotron_transcribe_mtp_draft.py):
+
+- Draft step mirrors the vLLM NeMo-SpeechLM plugin
+  (nemo/collections/speechlm2/vllm/salm/; vLLM main `nemotron_h.py` MTP):
+  `fused = eh_proj(cat[enorm(embed(t)) ‖ hnorm(h)])` — cat order is
+  [embedding ‖ hidden], it REPLACES hidden (no pre-leg residual), then
+  attention leg (pre-norm + residual) and MoE leg (pre-norm + residual),
+  `final_layernorm`, logits via the SHARED target `lm_head`/`embed_tokens`.
+  The draft keeps its OWN KV cache; `num_nextn_predict_layers` is asserted
+  == 1 in vLLM and the checkpoint's `hybrid_override_pattern: '*E'` is the
+  repeated layer (num_nextn_predict_layers: 2 in the speechlm config —
+  MTP8 reuses the one layer eight times).
+- Chain riding (GLM-DSA `session_draft_chain`): row c carries the claimed
+  token at position P-1+c (one behind its fill position); row 0 rides slot
+  P-1, ring-overwriting the last warm draft row; warm draft rows q =
+  0..P-2 fuse embed(prompt_ids[q+1]) with the trunk row h_q riding slot
+  q+1 — leg output discarded, only draft KV survives; target cache not
+  visible to the draft. Row c's fed token is gen[c], it predicts gen[c+1]
+  (alignment A beats EAGLE-alignment B where row 0 fuses the prompt's
+  last token: 4/32 vs 1/32 on the four goldens cases after the rmsnorm
+  fix below).
+- Trunk row h_q = the POST-final-norm hidden at position q
+  (`hs[-1][0][q]`, i.e. `final_hidden` at q = P-1) — verified: h_{P-1}
+  through `llm.model.norm`+`lm_head` reproduces the target's greedy
+  logit exactly (top1 logit 216 == fixture top5). The earlier capture
+  `hs[q+1][0][q]` pulled early-layer rows and was wrong.
+- Harness bug found and fixed: `rmsnorm()` emitted `weight*rsqrt(var(x))`
+  dropping `x` itself, so every norm returned a near-constant vector and
+  all chain rows collapsed to one degenerate argmax
+  ([50862, 68502, 130528]...). Fixed to `weight*x*rsqrt(var(x))`; chain
+  accept is now real per-case: 4/32 with the old broken capture,
+  11/32 (2/8+1/8+3/8+5/8, front-loaded as expected) with hs[-1].
+
+Depth-2→8 mapping: `num_nextn_predict_layers: 2` in the speechlm config
+with `use_repeated_layer: true` — MTP8 is the one layer run eight steps;
+the engine's depth-scheduled verify already covers it.
+
+The DFlash2 draft repo (`num_hidden_layers: 6`, `block_size: 16`,
+`num_target_layers: 52`, non-causal attention) is a block drafter over the
+same 2688 hidden — the `dflash2` path of the Qwen3.8-27B templates is the
+template.
 
 ### The perception module
 
@@ -313,9 +348,6 @@ Resolved 2026-10-30 from `nemo/collections/asr/modules/parallel_expert_encoder.p
 
 Still open:
 
-- MTP inference mechanics: how the repeated layer consumes
-  (embedding, hidden), and the depth-2 training → 8-token drafting
-  mapping — mirror the vLLM plugin (`nemo_speechlm`).
 - NVFP4 export layout for the stacked expert tensors: confirm packed
   pairs + block scales per expert in the stacked [E] tensors.
 

@@ -134,6 +134,13 @@ def main() -> int:
             logits = last.logits[0, -1]
             top = torch.topk(logits.float(), 5)
             hidden = last.hidden_states[-1][0, -1]  # the final norm's output
+            # The trunk rows the draft chain fuses: token q's hidden at q is
+            # the post-final-norm row of the whole-prompt state (the stack's
+            # last entry, hs[-1]) sliced at position q. hs[-1][0][q] is what
+            # the MTP draft fuses with embed(prompt_ids[q+1]); hs[q+1] would
+            # be an early block's output, not the trunk row.
+            hs = last.hidden_states
+            T = ids.shape[1]
             cases.append({
                 "prompt": text,
                 "prompt_ids": ids[0].tolist(),
@@ -141,6 +148,8 @@ def main() -> int:
                 "top5_ids": top.indices.tolist(),
                 "top5_logits": [round(v, 5) for v in top.values.tolist()],
                 "final_hidden": [round(v, 6) for v in hidden.float().tolist()],
+                "trunk_hidden": [[round(v, 6) for v in hs[-1][0][q].tolist()]
+                                 for q in range(T)],
             })
             print(f"greedy {len(gen)} tokens for {text[:40]!r}")
 
