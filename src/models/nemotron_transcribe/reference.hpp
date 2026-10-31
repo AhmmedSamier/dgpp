@@ -32,9 +32,15 @@
 #include <vector>
 
 #include "common/dtypes.hpp"
-#include "models/nemotron_transcribe/config.hpp"
 
 namespace dgpp {
+// The slot walk's config type is forward-declared below: the primitives
+// need no config, and keeping minijson out of this header's chain is what
+// lets nvcc TUs include it (minijson's self-referential Member only
+// completes at the end of its header, which nvcc's eager instantiation
+// rejects — the config-using mixer_/walk entry points are declared here
+// against the incomplete type and defined in reference.cpp).
+struct NemotronTranscribeLmConfig;
 namespace nemotron_ref {
 
 // One oracle weight: fp32 values, or the checkpoint's bf16 bits (dequantized
@@ -77,14 +83,16 @@ void causal_conv_silu(const float* u, size_t seq, size_t channels,
 // The selective scan, sequential form (single-chunk-exact against the
 // reference chunk scan): x [seq, heads*head_dim], B/C [seq, groups*state],
 // dt [seq, heads] RAW (bias + softplus + dt clamp applied here), A_log/D/
-// dt_bias [heads] F32. out is pre-gate, pre-norm.
+// dt_bias [heads] F32. out is pre-gate, pre-norm. When `state` is non-null
+// it is the [heads, head_dim, state] fp32 recurrent state, in AND out
+// (zeros on the cold start) — the resume path the device kernels mirror.
 struct MambaGeom {
   size_t heads = 0, head_dim = 0, groups = 0, state = 0;
   float dt_min = 0.001f;
 };
 void mamba2_walk(const MambaGeom& g, const float* x, const float* B, const float* C,
                  const float* dt, const float* A_log, const float* D,
-                 const float* dt_bias, size_t seq, float* out);
+                 const float* dt_bias, size_t seq, float* out, float* state = nullptr);
 
 // The router: fills descending-by-index-sorted top-k. n_group > 1 limits
 // the pool to the topk_group best groups by the sum of their top-2 biased

@@ -24,6 +24,7 @@
 #include "common/dtypes.hpp"
 #include "common/test.hpp"
 #include "loaders/minijson.hpp"
+#include "models/nemotron_transcribe/config.hpp"
 #include "models/nemotron_transcribe/reference.hpp"
 
 namespace {

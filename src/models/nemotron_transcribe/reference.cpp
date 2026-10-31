@@ -5,6 +5,8 @@
 #include <limits>
 #include <stdexcept>
 
+#include "models/nemotron_transcribe/config.hpp"
+
 namespace dgpp {
 namespace nemotron_ref {
 namespace {
@@ -93,15 +95,20 @@ void causal_conv_silu(const float* u, size_t seq, size_t channels, const Tensor&
 
 void mamba2_walk(const MambaGeom& g, const float* x, const float* B, const float* C,
                  const float* dt, const float* A_log, const float* D, const float* dt_bias,
-                 size_t seq, float* out) {
+                 size_t seq, float* out, float* state) {
   if (g.heads == 0 || g.head_dim == 0 || g.state == 0 || g.heads % g.groups != 0)
     throw std::invalid_argument("mamba2_walk: geometry");
   const size_t d_inner = g.heads * g.head_dim;
-  std::vector<float> st(g.head_dim * g.state);
+  std::vector<float> own;
+  float* st = state;
+  if (!st) {
+    own.assign(g.heads * g.head_dim * g.state, 0.f);
+    st = own.data();
+  }
   for (size_t h = 0; h < g.heads; ++h) {
     const size_t grp = h * g.groups / g.heads;
     const float a = -std::exp(A_log[h]);
-    std::fill(st.begin(), st.end(), 0.f);
+    float* sth = st + h * g.head_dim * g.state;
     for (size_t t = 0; t < seq; ++t) {
       const float* Bh = B + t * g.groups * g.state + grp * g.state;
       const float* Ch = C + t * g.groups * g.state + grp * g.state;
@@ -111,7 +118,7 @@ void mamba2_walk(const MambaGeom& g, const float* x, const float* B, const float
       const float dA = std::exp(d * a);
       for (size_t p = 0; p < g.head_dim; ++p) {
         const float xv = x[t * d_inner + h * g.head_dim + p];
-        float* row = st.data() + p * g.state;
+        float* row = sth + p * g.state;
         float o = 0.f;
         for (size_t n = 0; n < g.state; ++n) {
           row[n] = row[n] * dA + d * Bh[n] * xv;

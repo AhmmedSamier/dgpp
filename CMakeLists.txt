@@ -203,6 +203,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dsv41_engram.cu
   src/kernels/dsv41_dspark.cu
   src/kernels/csa2.cu
+  src/kernels/mamba2.cu
   src/kernels/dsv4_attn.cu
   src/kernels/qwen_mtp.cu
   src/kernels/dflash2.cu
@@ -530,9 +531,10 @@ dgpp_set_common(dgpp_models_dflash2)
 add_library(dgpp_models_nemotron_transcribe STATIC
   src/models/nemotron_transcribe/config.cpp
   src/models/nemotron_transcribe/binding.cpp
-  src/models/nemotron_transcribe/reference.cpp)
+  src/models/nemotron_transcribe/reference.cpp
+  src/models/nemotron_transcribe/state.cpp)
 target_include_directories(dgpp_models_nemotron_transcribe PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(dgpp_models_nemotron_transcribe PUBLIC dgpp_loaders dgpp_common)
+target_link_libraries(dgpp_models_nemotron_transcribe PUBLIC dgpp_loaders dgpp_common CUDA::cudart)
 dgpp_set_common(dgpp_models_nemotron_transcribe)
 
 # Qwen3.8-Flash-Next: the host-side model description.
@@ -1427,6 +1429,16 @@ target_include_directories(csa2_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${C
 target_link_libraries(csa2_test PRIVATE dgpp_models_dsa dgpp_kernels CUDA::cudart Threads::Threads)
 dgpp_set_common(csa2_test)
 add_test(NAME csa2_test COMMAND csa2_test)
+
+# The Mamba-2 kernels of the Nemotron-Transcribe port (2026-10-31,
+# docs/nemotron_transcribe_plan.md milestone 3): conv/scan/gated-norm
+# parity against the host fp32 oracle, bitwise resume/step composition,
+# and the state pool's snapshot/zero semantics (tests/cuda/mamba2_test.cu).
+add_executable(mamba2_test tests/cuda/mamba2_test.cu)
+target_include_directories(mamba2_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)
+target_link_libraries(mamba2_test PRIVATE dgpp_models_nemotron_transcribe dgpp_kernels CUDA::cudart Threads::Threads)
+dgpp_set_common(mamba2_test)
+add_test(NAME mamba2_test COMMAND mamba2_test)
 
 add_executable(csa2_layer_test tests/cuda/csa2_layer_test.cu)
 target_include_directories(csa2_layer_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests/cuda)

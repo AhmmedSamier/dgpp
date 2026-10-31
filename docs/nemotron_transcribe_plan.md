@@ -308,3 +308,19 @@ Still open:
   rope keys are vestigial). Text goldens from the real 33 B checkpoint
   (`tools/nemotron_transcribe_text_goldens.py`) still await a free
   device; they replay the same walk at release geometry and dtype.
+- 2026-10-31: milestone 3 (build) — the Mamba-2 device path:
+  `src/kernels/mamba2.{hpp,cu}` (causal depthwise conv + SiLU prefill and
+  the stateful decode step, the selective scan as one block per head with
+  the fp32 state resident in shared memory — dt bias/softplus/clamp inside,
+  the D skip on the pre-dt x, fixed-order reductions — plus the single-row
+  decode form, and the grouped gated norm), and the state pool
+  `src/models/nemotron_transcribe/state.{hpp,cpp}` (per-request contiguous
+  recurrent + conv regions on the arena, KdaStatePool's one-copy
+  snapshot/resume). `tests/cuda/mamba2_test.cu` gates conv/norm/scan
+  against the host oracle (bf16 ulp budgets, rel budgets on the F32 state)
+  and requires the step/resume composition to be BITWISE the fused
+  prefill. Not yet run: the live serve holds the device to OOM (even the
+  pre-existing csa2/arena device tests are starving), so the GPU gate is
+  open until the fabric is idle; the build, registration and the host
+  oracle suite are green. The oracle header split (minijson-free
+  reference.hpp with the config forward-declared) keeps nvcc TUs compiling.
