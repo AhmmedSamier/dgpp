@@ -260,6 +260,52 @@ NemotronTranscribePerceptionConfig NemotronTranscribePerceptionConfig::parse(
     c.diar_pred_score_threshold = optional_double(*sf, "pred_score_threshold", 0.25);
     c.diar_sil_threshold = optional_double(*sf, "sil_threshold", 0.2);
   }
+  // The diarization branch (milestone 5b): a second NeMo TransformerEncoder
+  // with its own dims — and the mask head it actually runs. The release
+  // route is the single-pass forward_infer (no streaming spkcache/fifo);
+  // everything outside it is refused, not silently skipped.
+  if (dia->find("transformer_encoder"))
+    reject("pe_encoder_config.diarization_model_cfg.transformer_encoder",
+           "the Sortformer tf-transformer over the mask head is not the release route");
+  const minijson::Value* denc = dia->find("encoder");
+  if (!denc || !denc->is_object()) reject("pe_encoder_config.diarization_model_cfg.encoder", "missing");
+  c.diar_layers = require_int(*denc, "n_layers");
+  c.diar_d_model = require_int(*denc, "d_model");
+  c.diar_heads = require_int(*denc, "n_heads");
+  c.diar_ff_expansion = static_cast<int>(require_int(*denc, "ff_expansion"));
+  c.diar_qk_norm = optional_bool(*denc, "qk_norm", false);
+  c.diar_rope_base = optional_double(*denc, "rope_base", 10000.0);
+  c.diar_rotary_fraction = optional_double(*denc, "rotary_fraction", 1.0);
+  if (optional_string(*denc, "self_attention_model", "rope") != "rope")
+    reject("diarization_model_cfg.encoder.self_attention_model", "only rope");
+  if (optional_string(*denc, "attn_mode", "full") != "full")
+    reject("diarization_model_cfg.encoder.attn_mode", "only full attention");
+  if (!optional_bool(*denc, "pre_block_norm", true))
+    reject("diarization_model_cfg.encoder.pre_block_norm", "post-norm is not this release");
+  if (optional_bool(*denc, "qkv_bias", false))
+    reject("diarization_model_cfg.encoder.qkv_bias", "biased qkv is not this release");
+  if (require_int(*denc, "subsampling_factor") != c.subsampling_factor)
+    reject("diarization_model_cfg.encoder.subsampling_factor",
+           "the diar grid must match the ASR grid");
+  for (int v : {c.diar_layers, c.diar_d_model, c.diar_heads, c.diar_ff_expansion})
+    check_positive(v, "diarization_model_cfg.encoder sizes");
+  if (c.diar_d_model % c.diar_heads != 0)
+    reject("diarization_model_cfg.encoder.n_heads", "must divide d_model");
+  if (const minijson::Value* md = dia->find("model_defaults")) {
+    c.tf_d_model = optional_int(*md, "tf_d_model", c.diar_d_model);
+  }
+  if (c.tf_d_model <= 0 || c.tf_d_model == c.diar_d_model)
+    reject("diarization_model_cfg.model_defaults.tf_d_model",
+           "fc == tf selects the tf-transformer path, not this release's");
+  // The PEE's branch normalizations: ASR per_feature, diar raw ("NA").
+  const std::string asr_norm = optional_string(*pe, "asr_normalize_type", "per_feature");
+  if (asr_norm != "per_feature" && asr_norm != "NA")
+    reject("pe_encoder_config.asr_normalize_type", "only per_feature is implemented");
+  c.asr_normalize_per_feature = asr_norm == "per_feature";
+  const std::string dia_norm = optional_string(*pe, "diar_normalize_type", "NA");
+  if (dia_norm != "NA")
+    reject("pe_encoder_config.diar_normalize_type",
+           "the diarization branch consumes the raw frontend mel on this route");
   c.speaker_feature_thresholded =
       optional_string(*pe, "speaker_feature_mode", "continuous") == "thresholded";
   if (const minijson::Value* th = pe->find("speaker_activity_threshold"); th && th->is_number())

@@ -391,3 +391,31 @@ Still open:
   hand-computed corners pin the delta-FFT, the kernel's sin-on-even
   ladder, the LN, and the strict-> threshold. Still open: the real-NeMo
   re-emit, and Sortformer's internals (5b).
+- 2026-10-31: milestone 5 (part B — the Sortformer branch) — the diar
+  oracle: `config.{hpp,cpp}` gained the diar encoder fields
+  (`diar_layers/diar_d_model/diar_heads/diar_ff_expansion` from
+  `diarization_model_cfg.encoder`, full rope at 10000 — the block omits
+  `rotary_fraction`, the TransformerEncoder default holds — no q/k
+  norms, `tf_d_model` from `model_defaults`, and the branch normalizers
+  `asr_normalize_type: per_feature` / `diar_normalize_type: NA`, with
+  refusals for the tf-transformer head and any grid/normalization
+  drift); `perception.{hpp,cpp}` gained `EncSpec` (the ASR and diar
+  branches now share `enc_block`/`encoder_run`, differing only in the
+  spec), `normalize_per_feature` (features.py's per-feature batch norm
+  at full length: population mean, UNBIASED std + 1e-5), and
+  `diar_activity` — the SINGLE-PASS route only (eval, T <=
+  chunk_feat_len): encoder on the RAW mel, encoder_proj, the sub-pixel
+  conv1d(TF, TF*8, k3, pad 1) upsample in NeMo's exact channel
+  (p*TF+lane)/position mapping, relu → first_hidden_to_hidden → relu →
+  single_hidden_to_spks → sigmoid, then the masked 8-frame mean back to
+  the ASR grid (full-length windows). `perceive()` with a null activity
+  now runs the whole release chain (diar raw / ASR normalized); the
+  streaming spkcache/fifo, the 384-wide hidden_to_spks and
+  learnable_sil_emb stay off the route (the latter two still bound and
+  refused-by-absence via the table). The binding enumerates all 359
+  `diarization_model` tensors and still matches the cached checkpoint
+  tensor for tensor; the fixture gained the diar branch + normalization
+  (two cases pin `mel_norm`, `diar_preds`, and the full internal-route
+  `rows_pred`), and the config fixture/refusals cover the new contract.
+  `nemotron_perc_oracle_*` green; host suite 479 tests, failures only
+  the pre-existing QAD and the serve-starved arena cases.

@@ -82,6 +82,24 @@ struct NemotronTranscribePerceptionConfig {
   double enc_rope_base = 10000.0, enc_rotary_fraction = 0.5;
   // Independent-branch chunking on the encoder grid (30 s -> 375 tokens).
   double encoder_chunk_size_seconds = 30.0;
+  // Diarization branch (Sortformer, milestone 5b): a second NeMo
+  // TransformerEncoder with its OWN dims and rotary policy — the release's
+  // config block omits `rotary_fraction`/`rope_base`, so the
+  // TransformerEncoder defaults hold: FULL rope at base 10000 — and no
+  // q/k norms (the 11-tensor blocks pin it). The mask head is the
+  // single-head path the ParallelExpertEncoder runs
+  // (frontend_encoder + forward_infer): encoder_proj (d -> tf), the
+  // sub-pixel x-subsampling conv1d (k3 p1), relu -> first_hidden_to_hidden
+  // -> relu -> single_hidden_to_spks -> sigmoid, then the 8-frame
+  // length-masked mean downsample onto the ASR grid.
+  int diar_d_model = 512, diar_heads = 8, diar_layers = 31, diar_ff_expansion = 4;
+  double diar_rope_base = 10000.0, diar_rotary_fraction = 1.0;
+  bool diar_qk_norm = false;
+  int tf_d_model = 192;
+  // The PEE normalizes the ASR branch's mel per feature
+  // (`asr_normalize_type: per_feature`); the diar branch consumes the raw
+  // frontend mel (`diar_normalize_type: "NA"` — normalize_batch's no-op).
+  bool asr_normalize_per_feature = true;
   // Speaker branch (Sortformer): the activity grid the fusion consumes.
   int n_spk = 8;
   int diar_chunk_len = 264, diar_spkcache_len = 264, diar_spkcache_update_period = 264;

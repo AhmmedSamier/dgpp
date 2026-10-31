@@ -15,11 +15,17 @@
 // per-block LayerNorms, `embed_norm`/`final_norm`), the two fusion norms, and
 // the connector `proj`.
 //
-// Two groups are named-but-not-enumerated: the Sortformer branch
-// (`perception.encoder.diarization_model.*`, whose table lands with the
-// perception oracle milestone) and the CTC timestamp head
-// (`ctc_timestamp.*`, deferred with word timestamps). TransformerEngine
-// emits empty `*_extra_state` tensors; they are structural noise and ignored.
+// One group stays named-but-not-enumerated: the CTC timestamp head
+// (`ctc_timestamp.`, deferred with word timestamps). TransformerEngine
+// emits empty `*_extra_state` tensors; they are structural noise and
+// ignored. The Sortformer branch (`perception.encoder.diarization_model.*`)
+// joined the table with the milestone 5b oracle: its 31-block encoder
+// (no q/k norms - the 11-tensor block pins it), pre_encode and norms,
+// the mask head (encoder_proj, the sub-pixel upsample conv, the two
+// speaker heads - the 384-wide hidden_to_spks is declared but unused on
+// the single-pass route - and the learnable silence embedding), and its
+// own frozen preprocessor buffers (unused on this route, shipped all the
+// same).
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -67,6 +73,7 @@ enum class NemotronWeightClass : int {
   EncFfn1,
   EncFfn2,
   Connector,       // perception.proj weight/bias
+  DiarHead,        // the Sortformer mask-head matrices and the silence embedding
 };
 
 struct NemotronExpectedTensor {

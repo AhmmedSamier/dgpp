@@ -55,16 +55,34 @@ namespace nemotron_perc {
 using nemotron_ref::Tensor;
 using nemotron_ref::Weights;
 
+// One NeMo TransformerEncoder branch: the ASR stack (q/k LayerNorms, half
+// rope) and the Sortformer stack (no q/k norms, FULL rope) share every
+// formula and differ only here.
+struct EncSpec {
+  size_t d_model = 0, heads = 0, layers = 0, ff_expansion = 0;
+  double rope_base = 10000.0, rotary_fraction = 1.0;
+  bool qk_norm = true, qkv_bias = false, pre_block_norm = true;
+};
+EncSpec enc_spec_asr(const NemotronTranscribePerceptionConfig& pc);
+EncSpec enc_spec_diar(const NemotronTranscribePerceptionConfig& pc);
+
 // LayerNorm row: y = (x - mean) / sqrt(var + eps) * w + b (var is the
 // biased population variance, torch's convention), sequential sums.
 void layernorm_row(const float* x, const Tensor& w, const Tensor& b, size_t n, float eps,
                    float* y);
 
+// NeMo normalize_batch(mel, length, 'per_feature') at full length: per
+// channel c over the T frames, (x - mean) / (sqrt(var_unbiased) + 1e-5)
+// with the biased-reference mean of features.py (reference = frame 0; at
+// full length the masking is a no-op, and var is the population variance
+// divided by T - 1 — torch.std semantics), computed in fp32.
+void normalize_per_feature(const float* mel, size_t C, size_t T, std::vector<float>& out);
+
 // The frozen frontend: `samples` [n] float in [-1, 1] (the endpoint's PCM
-// contract), `window` [400] and `fb` [128, 257] dequantized from the
+// contract), `window` [400] and `fb` [1, 128, 257] dequantized from the
 // shipped tensors, `preemph` 0.97 from the NeMo default (pass < 0 to
-// disable). Writes mel [128, T] with T = n / 160 + 1 (center-padded
-// framing); returns T.
+// disable). Writes mel [128, T] with T = (n + 112) / 160 + 1 (center-
+// padded framing); returns T.
 size_t mel_frontend(const float* samples, size_t n, const Tensor& window, const Tensor& fb,
                     float preemph, std::vector<float>& mel);
 
@@ -72,44 +90,66 @@ size_t mel_frontend(const float* samples, size_t n, const Tensor& window, const 
 // the kernels' twiddle-free direct form can be pinned element-by-element.
 void rfft512(const float* frame, float* re, float* im);
 
-// FeatureStacking + the bias-free stacking Linear: mel [128, T] ->
-// [T_tok, 1280], T_tok = ceil(T / 8); short tails pad with zero rows.
+// FeatureStacking + the bias-free stacking Linear: mel [C, T] ->
+// [T_tok, d_model] (d_model from the proj [d_model, 8*C] width),
+// T_tok = ceil(T / 8); short tails pad with zero rows.
 void stack_pre_encode(const NemotronTranscribePerceptionConfig& pc, const float* mel, size_t T,
                       const Tensor& proj_w /*[d_model, 8*128]*/, std::vector<float>& out);
 
 // One encoder block on the [T, d_model] stream (bidirectional, full rows):
-//   x += attn(w_qkv -> per-head LN(q,k) -> half RoPE -> softmax -> out_proj+b)
+//   x += attn(w_qkv -> per-head LN(q,k) -> rope -> softmax -> out_proj+b)
 //   x += ffn(Linear+b -> GELU(erf) -> Linear+b)
 // `prefix` names the block ("perception.encoder.asr_encoder.layers.7.").
-void enc_block(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
-               const std::string& prefix, float* x, size_t T);
+void enc_block(const EncSpec& es, const Weights& w, const std::string& prefix, float* x,
+               size_t T);
 
-// The whole ASR branch: stack -> embed_norm -> pc.enc_layers blocks ->
-// final_norm; writes [T_tok, d_model].
+// A whole TransformerEncoder branch: stack -> embed_norm -> spec.layers
+// blocks -> final_norm; writes [T_tok, d_model]. `root` names the encoder
+// ("perception.encoder.asr_encoder." / "…diarization_model.encoder.").
+void encoder_run(const EncSpec& es, const NemotronTranscribePerceptionConfig& pc,
+                 const Weights& w, const std::string& root, const float* mel, size_t T,
+                 std::vector<float>& states);
+
+// The ASR branch exactly as ParallelExpertEncoder._run_asr: the mel is
+// normalized per feature FIRST (pc.asr_normalize_per_feature), then the
+// encoder; writes [T_tok, enc_d_model].
 void asr_encoder(const NemotronTranscribePerceptionConfig& pc, const Weights& w, const float* mel,
                  size_t T, std::vector<float>& states);
+
+// The diarization branch (Sortformer, milestone 5b) on the SINGLE-PASS
+// route (eval, T <= chunk_feat_len): frontend_encoder (the diar encoder
+// over the RAW mel) -> encoder_proj (d_model -> tf_d_model + bias) ->
+// sub-pixel conv1d upsample x subsampling -> relu ->
+// first_hidden_to_hidden + bias -> relu -> single_hidden_to_spks + bias
+// -> sigmoid -> masked length-average downsample back onto the ASR grid.
+// Writes preds [T_tok, n_spk] (the probabilities the thresholded fusion
+// consumes). mask_padding is the full-length no-op; the streaming
+// spkcache/fifo and the tf-transformer head are not on this route.
+void diar_activity(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
+                   const float* mel, size_t T, std::vector<float>& preds);
 
 // The built-in fusion speaker kernel: [n_spk, d_model], sin on even
 // columns, cos on odd (NeMo _build_sinusoid_position_encoding).
 void build_spk_kernel(const NemotronTranscribePerceptionConfig& pc, std::vector<float>& kernel);
 
 // The fusion + connector: `activity` [T_tok, n_spk] (the Sortformer branch's
-// sigmoid scores; the diarization_model tensors are milestone 5b), states
-// [T_tok, d_model] -> rows [T_tok, output_dim] (the LM's audio embeddings).
+// sigmoid scores), states [T_tok, d_model] -> rows [T_tok, output_dim]
+// (the LM's audio embeddings).
 void fuse_and_connect(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
                       const float* states, const float* activity, size_t T_tok,
                       std::vector<float>& rows);
 
-// The whole perception module: samples -> mel -> ASR states -> (fusion with
-// external activity) -> rows. `activity` may be null, in which case only
-// `states` is produced (the 5b gate runs the Sortformer branch into the
-// same fusion entry point).
+// The whole perception module: samples -> mel -> {ASR states (normalized
+// mel), diar activity (raw mel)} -> fusion -> rows. `activity` overrides
+// the diar branch (external scores); with a null activity the module runs
+// Sortformer itself and reports it in PerceptionOutput::activity.
 struct PerceptionOutput {
-  std::vector<float> mel;      // [128, T]
-  size_t frames = 0;           // T
-  std::vector<float> states;   // [T_tok, d_model]
-  std::vector<float> rows;     // [T_tok, output_dim] (empty without activity)
-  size_t tokens = 0;           // T_tok
+  std::vector<float> mel;       // [128, T] (raw frontend output — the diar input)
+  size_t frames = 0;            // T
+  std::vector<float> states;    // [T_tok, d_model]
+  std::vector<float> activity;  // [T_tok, n_spk] (set only for the internal branch)
+  std::vector<float> rows;      // [T_tok, output_dim]
+  size_t tokens = 0;            // T_tok
 };
 PerceptionOutput perceive(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
                           const float* samples, size_t n, const float* activity);

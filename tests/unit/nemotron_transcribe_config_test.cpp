@@ -94,16 +94,24 @@ std::string root_json(const std::string& needle = "", const std::string& repl = 
     },
     "pe_encoder_config": {
       "asr_encoder_type": "transformer",
+      "asr_normalize_type": "per_feature", "diar_normalize_type": "NA",
       "speaker_feature_mode": "thresholded",
       "speaker_activity_threshold": 0.5,
       "chunk_size_seconds": 30.0,
       "frame_shift_seconds": 0.01,
       "diarization_model_cfg": {
         "sample_rate": 16000, "high_resolution": true,
+        "model_defaults": {"fc_d_model": 512, "tf_d_model": 192},
+        "encoder": {
+          "n_layers": 31, "d_model": 512, "n_heads": 8, "ff_expansion": 4.0,
+          "subsampling_factor": 8, "self_attention_model": "rope",
+          "qk_norm": false, "pre_block_norm": true, "qkv_bias": false,
+          "attn_mode": "full"
+        },
         "sortformer_modules": {
           "num_spks": 8, "chunk_len": 264, "spkcache_len": 264,
           "spkcache_update_period": 264, "pred_score_threshold": 0.25,
-          "sil_threshold": 0.2
+          "sil_threshold": 0.2, "tf_d_model": 192
         }
       }
     }
@@ -162,6 +170,12 @@ DGPP_TEST(nemotron_transcribe_config_parses_the_release_shape) {
   require(p.diar_chunk_len == 264 && p.diar_spkcache_len == 264 &&
               p.diar_spkcache_update_period == 264,
           "the Sortformer window");
+  require(p.diar_layers == 31 && p.diar_d_model == 512 && p.diar_heads == 8 &&
+              p.diar_ff_expansion == 4 && !p.diar_qk_norm && p.diar_rotary_fraction == 1.0 &&
+              p.diar_rope_base == 10000.0,
+          "the diarization encoder (full rope, no qk norms)");
+  require(p.tf_d_model == 192 && p.asr_normalize_per_feature,
+          "the mask head width and the per-feature normalization");
   require(p.output_dim == 2688 && p.connector_d_model == 1280, "connector widths");
   require(c.audio_locator_tag == "<|audio|>" && c.prompt_format == "nemotron3p5", "prompt contract");
 
@@ -203,6 +217,15 @@ DGPP_TEST(nemotron_transcribe_config_refuses_unsupported_shapes) {
   refuse("\"prompt_format\": \"nemotron3p5\"", "\"prompt_format\": \"nemotron2\"", "prompt_format");
   refuse("\"mtp_layers_block_type\": [\"attention\", \"moe\"]",
          "\"mtp_layers_block_type\": []", "mtp_layers_block_type");
+  refuse("\"high_resolution\": true,",
+         "\"transformer_encoder\": {\"_target_\": \"x\"}, \"high_resolution\": true,",
+         "transformer_encoder");
+  refuse("\"subsampling_factor\": 8, \"self_attention_model\"",
+         "\"subsampling_factor\": 4, \"self_attention_model\"", "diar grid");
+  refuse("\"asr_normalize_type\": \"per_feature\"", "\"asr_normalize_type\": \"per_seq\"",
+         "asr_normalize_type");
+  refuse("\"diar_normalize_type\": \"NA\"", "\"diar_normalize_type\": \"per_feature\"",
+         "diar_normalize_type");
   // The 52-slot census: an eighth attention slot parses (the field is the
   // release's contract, not a whitelist) — a first-slot mixer change does
   // not, and neither does an unknown kind.

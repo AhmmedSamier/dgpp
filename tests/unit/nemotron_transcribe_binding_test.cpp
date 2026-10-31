@@ -73,8 +73,15 @@ std::string root_json() {
     "audio_token_estimator": {"preprocessor": {"n_fft": 512, "hop_length": 160, "stft_pad_amount": 256},
       "subsampling": {"type": "feature_stacking", "factor": 8}},
     "pe_encoder_config": {"asr_encoder_type": "transformer",
+      "asr_normalize_type": "per_feature", "diar_normalize_type": "NA",
       "speaker_feature_mode": "thresholded", "speaker_activity_threshold": 0.5,
-      "diarization_model_cfg": {"sortformer_modules": {"num_spks": 8, "chunk_len": 264,
+      "diarization_model_cfg": {
+        "high_resolution": true,
+        "model_defaults": {"fc_d_model": 512, "tf_d_model": 192},
+        "encoder": {"n_layers": 31, "d_model": 512, "n_heads": 8, "ff_expansion": 4.0,
+          "subsampling_factor": 8, "self_attention_model": "rope", "qk_norm": false,
+          "pre_block_norm": true, "qkv_bias": false, "attn_mode": "full"},
+        "sortformer_modules": {"num_spks": 8, "chunk_len": 264,
         "spkcache_len": 264, "spkcache_update_period": 264,
         "pred_score_threshold": 0.25, "sil_threshold": 0.2}}}
   })";
@@ -112,10 +119,12 @@ DGPP_TEST(nemotron_binding_table_has_the_release_shape) {
   // (attention 5, moe 7, four wrapper tensors).
   const auto lm = dgpp::nemotron_expected_lm_tensors(cfg);
   require(lm.size() == 3 + 398 + 12 + 4, "lm tensors " + std::to_string(lm.size()));
-  // Perception: preprocessor 2, stacking linear 1, four encoder globals,
-  // 32 x 15 blocks, four fusion-norm tensors, connector 2.
   const auto per = dgpp::nemotron_expected_perception_tensors(cfg);
-  require(per.size() == 2 + 1 + 4 + 32 * 15 + 4 + 2,
+  // Perception: preprocessor 2, stacking linear 1, four encoder globals,
+  // 32 x 15 blocks, four fusion-norm tensors, connector 2 — plus the
+  // Sortformer branch: own preprocessor 2, stacking 1, four globals,
+  // 31 x 11 blocks (no q/k norms), mask head 11.
+  require(per.size() == 2 + 1 + 4 + 32 * 15 + 4 + 2 + 2 + 1 + 4 + 31 * 11 + 11,
           "perception tensors " + std::to_string(per.size()));
   require(tensors.size() == lm.size() + per.size(), "total table");
 
@@ -145,8 +154,18 @@ DGPP_TEST(nemotron_binding_table_has_the_release_shape) {
   // groups are not part of it.
   const auto rep = dgpp::nemotron_validate_binding(cfg, present_from(tensors));
   require(rep.ok, "table is self-consistent");
-  require(dgpp::nemotron_ignored_tensor("perception.encoder.diarization_model.encoder.x"),
-          "diarization ignored");
+  require(!dgpp::nemotron_ignored_tensor("perception.encoder.diarization_model.encoder.x"),
+          "the diarization branch is enumerated");
+  const auto* sh = find("perception.encoder.diarization_model.sortformer_modules."
+                        "single_hidden_to_spks.weight");
+  require(sh && sh->shape == std::vector<int64_t>({8, 192}), "diar speaker head");
+  const auto* sup = find("perception.encoder.diarization_model.sortformer_modules."
+                         "subpixel_upsample.weight");
+  require(sup && sup->shape == std::vector<int64_t>({1536, 192, 3}), "sub-pixel upsample");
+  const auto* dblk = find("perception.encoder.diarization_model.encoder.layers.30.attn.w_qkv.weight");
+  require(dblk && dblk->shape == std::vector<int64_t>({1536, 512}), "diar block 30");
+  require(!find("perception.encoder.diarization_model.encoder.layers.30.attn.q_norm.weight"),
+          "no q/k norms on the diar blocks (the 11-tensor census)");
   require(dgpp::nemotron_ignored_tensor("ctc_timestamp.decoder.head.weight"), "ctc ignored");
   require(dgpp::nemotron_ignored_tensor("llm.model.layers.5.mixer.q_proj._extra_state"),
           "TE state ignored");

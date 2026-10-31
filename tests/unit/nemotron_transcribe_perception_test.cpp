@@ -115,6 +115,16 @@ DGPP_TEST(nemotron_perc_oracle_matches_the_nemo_mirror) {
   pc.spk_kernel_scale = cfg.at("spk_kernel_scale").as_double();
   pc.output_dim = static_cast<int>(cfg.at("output_dim").as_int());
   pc.connector_d_model = pc.enc_d_model;
+  // The diarization branch (milestone 5b).
+  pc.diar_d_model = static_cast<int>(cfg.at("dd_model").as_int());
+  pc.diar_heads = static_cast<int>(cfg.at("dheads").as_int());
+  pc.diar_layers = static_cast<int>(cfg.at("dlayers").as_int());
+  pc.diar_ff_expansion = static_cast<int>(cfg.at("dff_expansion").as_int());
+  pc.diar_rope_base = cfg.at("rope_base").as_double();
+  pc.diar_rotary_fraction = 1.0;
+  pc.diar_qk_norm = false;
+  pc.tf_d_model = static_cast<int>(cfg.at("tf_d_model").as_int());
+  pc.asr_normalize_per_feature = cfg.at("asr_normalize_per_feature").as_bool();
 
   dgpp::nemotron_ref::Weights w;
   const Value& wj = root.at("weights");
@@ -132,7 +142,22 @@ DGPP_TEST(nemotron_perc_oracle_matches_the_nemo_mirror) {
             tag + ": state rows");
     close(out.mel, vec(c.at("mel")), kRel, kAbs, tag + " mel");
     close(out.states, vec(c.at("states")), kRel, kAbs, tag + " states");
-    close(out.rows, vec(c.at("rows")), kRel, kAbs, tag + " rows");
+    close(out.rows, vec(c.at("rows")), kRel, kAbs, tag + " rows (external activity)");
+
+    // The per-feature normalization on its own.
+    std::vector<float> mel_n;
+    dgpp::nemotron_perc::normalize_per_feature(out.mel.data(), out.mel.size() / out.frames,
+                                               out.frames, mel_n);
+    close(mel_n, vec(c.at("mel_norm")), kRel, kAbs, tag + " mel_norm");
+
+    // The full release route: the internal Sortformer branch feeds the
+    // fusion (perceive with a null activity).
+    const auto out2 = dgpp::nemotron_perc::perceive(pc, w, audio.data(), audio.size(), nullptr);
+    close(out2.activity, vec(c.at("diar_preds")), kRel, kAbs, tag + " diar preds");
+    close(out2.rows, vec(c.at("rows_pred")), kRel, kAbs, tag + " rows (diar preds)");
+    require(out2.activity.size() ==
+                static_cast<size_t>(c.at("states_shape").items()[0].as_int()) * pc.n_spk,
+            tag + ": diar grid");
   }
 }
 

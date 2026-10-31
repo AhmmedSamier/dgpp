@@ -123,6 +123,63 @@ void add_perception(TensorList& out, const NemotronTranscribeConfig& cfg) {
   add_bf16(out, "perception.proj.weight", {p.output_dim, p.connector_d_model},
            NemotronWeightClass::Connector, -1);
   add_bf16(out, "perception.proj.bias", {p.output_dim}, NemotronWeightClass::Connector, -1);
+
+  // The Sortformer branch (milestone 5b): its own frozen preprocessor
+  // (an artifact of the bundled module — the release route feeds it the
+  // ASR-side mel), the 31-block encoder (no q/k norms on the release's
+  // blocks), and the single-pass mask head. hidden_to_spks is shipped
+  // and unused on this route; learnable_sil_emb likewise (the streaming
+  // path's silence row).
+  const std::string dm = "perception.encoder.diarization_model.";
+  const int64_t DD = p.diar_d_model, TF = p.tf_d_model;
+  const int64_t dff = static_cast<int64_t>(p.diar_ff_expansion) * DD;
+  const int64_t dh = DD / p.diar_heads;
+  add_bf16(out, dm + "preprocessor.featurizer.fb", {1, p.mel_features, p.fft_size / 2 + 1},
+           NemotronWeightClass::PreprocFb, -1);
+  add_bf16(out, dm + "preprocessor.featurizer.window", {p.window_size},
+           NemotronWeightClass::PreprocWindow, -1);
+  add_bf16(out, dm + "encoder.pre_encode.proj.weight",
+           {DD, static_cast<int64_t>(p.subsampling_factor) * p.mel_features},
+           NemotronWeightClass::EncPreEncode, -1);
+  add_bf16(out, dm + "encoder.embed_norm.weight", {DD}, NemotronWeightClass::EncNorm, -1);
+  add_bf16(out, dm + "encoder.embed_norm.bias", {DD}, NemotronWeightClass::EncNorm, -1);
+  add_bf16(out, dm + "encoder.final_norm.weight", {DD}, NemotronWeightClass::EncNorm, -1);
+  add_bf16(out, dm + "encoder.final_norm.bias", {DD}, NemotronWeightClass::EncNorm, -1);
+  for (int l = 0; l < p.diar_layers; ++l) {
+    const std::string q = dm + "encoder.layers." + std::to_string(l) + ".";
+    if (p.diar_qk_norm) {
+      add_bf16(out, q + "attn.q_norm.weight", {dh}, NemotronWeightClass::EncQkNorm, l);
+      add_bf16(out, q + "attn.q_norm.bias", {dh}, NemotronWeightClass::EncQkNorm, l);
+      add_bf16(out, q + "attn.k_norm.weight", {dh}, NemotronWeightClass::EncQkNorm, l);
+      add_bf16(out, q + "attn.k_norm.bias", {dh}, NemotronWeightClass::EncQkNorm, l);
+    }
+    add_bf16(out, q + "attn.w_qkv.weight", {3 * DD, DD}, NemotronWeightClass::EncQkv, l);
+    add_bf16(out, q + "attn.out_proj.weight", {DD, DD}, NemotronWeightClass::EncOut, l);
+    add_bf16(out, q + "attn.out_proj.bias", {DD}, NemotronWeightClass::EncOut, l);
+    add_bf16(out, q + "ffn.net.0.weight", {dff, DD}, NemotronWeightClass::EncFfn1, l);
+    add_bf16(out, q + "ffn.net.0.bias", {dff}, NemotronWeightClass::EncFfn1, l);
+    add_bf16(out, q + "ffn.net.3.weight", {DD, dff}, NemotronWeightClass::EncFfn2, l);
+    add_bf16(out, q + "ffn.net.3.bias", {DD}, NemotronWeightClass::EncFfn2, l);
+    add_bf16(out, q + "norm1.weight", {DD}, NemotronWeightClass::EncNorm, l);
+    add_bf16(out, q + "norm1.bias", {DD}, NemotronWeightClass::EncNorm, l);
+    add_bf16(out, q + "norm2.weight", {DD}, NemotronWeightClass::EncNorm, l);
+    add_bf16(out, q + "norm2.bias", {DD}, NemotronWeightClass::EncNorm, l);
+  }
+  const std::string sm = dm + "sortformer_modules.";
+  add_bf16(out, sm + "encoder_proj.weight", {TF, DD}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "encoder_proj.bias", {TF}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "first_hidden_to_hidden.weight", {TF, TF}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "first_hidden_to_hidden.bias", {TF}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "hidden_to_spks.weight", {p.n_spk, 2 * TF}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "hidden_to_spks.bias", {p.n_spk}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "single_hidden_to_spks.weight", {p.n_spk, TF},
+           NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "single_hidden_to_spks.bias", {p.n_spk}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "subpixel_upsample.weight",
+           {TF * p.subsampling_factor, TF, 3}, NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "subpixel_upsample.bias", {TF * p.subsampling_factor},
+           NemotronWeightClass::DiarHead, -1);
+  add_bf16(out, sm + "learnable_sil_emb", {DD}, NemotronWeightClass::DiarHead, -1);
 }
 
 void record(NemotronBindReport& rep, const std::string& msg) {
@@ -172,7 +229,6 @@ std::vector<NemotronExpectedTensor> nemotron_expected_tensors(
 
 bool nemotron_ignored_tensor(const std::string& name) {
   static const std::string_view kPrefixes[] = {
-      "perception.encoder.diarization_model.",  // the oracle milestone enumerates it
       "ctc_timestamp.",                         // word timestamps are deferred
   };
   for (auto pfx : kPrefixes)

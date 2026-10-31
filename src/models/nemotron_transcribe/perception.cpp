@@ -139,9 +139,11 @@ size_t mel_frontend(const float* samples, size_t n, const Tensor& window, const 
 
 void stack_pre_encode(const NemotronTranscribePerceptionConfig& pc, const float* mel, size_t T,
                       const Tensor& proj_w, std::vector<float>& out) {
-  const size_t C = pc.mel_features, sf = pc.subsampling_factor, D = pc.enc_d_model;
+  const size_t C = pc.mel_features, sf = pc.subsampling_factor;
+  if (proj_w.numel() == 0 || proj_w.numel() % (sf * C) != 0)
+    throw std::invalid_argument("stack_pre_encode: proj numel");
+  const size_t D = proj_w.numel() / (sf * C);
   const size_t T_tok = (T + sf - 1) / sf;
-  if (proj_w.numel() != D * sf * C) throw std::invalid_argument("stack_pre_encode: proj numel");
   std::vector<float> row(sf * C);
   out.assign(T_tok * D, 0.f);
   for (size_t tt = 0; tt < T_tok; ++tt) {
@@ -188,17 +190,45 @@ void gelu_erf(float* v, size_t n) {
 
 }  // namespace
 
-void enc_block(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
-               const std::string& prefix, float* x, size_t T) {
-  const size_t D = pc.enc_d_model, H = pc.enc_heads, hd = D / H;
-  if (!pc.enc_qk_norm) throw std::invalid_argument("enc_block: qk_norm is part of the contract");
+EncSpec enc_spec_asr(const NemotronTranscribePerceptionConfig& pc) {
+  EncSpec es;
+  es.d_model = pc.enc_d_model;
+  es.heads = pc.enc_heads;
+  es.layers = pc.enc_layers;
+  es.ff_expansion = pc.enc_ff_expansion;
+  es.rope_base = pc.enc_rope_base;
+  es.rotary_fraction = pc.enc_rotary_fraction;
+  es.qk_norm = pc.enc_qk_norm;
+  es.qkv_bias = pc.enc_qkv_bias;
+  es.pre_block_norm = pc.enc_pre_block_norm;
+  return es;
+}
+
+EncSpec enc_spec_diar(const NemotronTranscribePerceptionConfig& pc) {
+  EncSpec es;
+  es.d_model = pc.diar_d_model;
+  es.heads = pc.diar_heads;
+  es.layers = pc.diar_layers;
+  es.ff_expansion = pc.diar_ff_expansion;
+  es.rope_base = pc.diar_rope_base;
+  es.rotary_fraction = pc.diar_rotary_fraction;
+  es.qk_norm = pc.diar_qk_norm;
+  es.qkv_bias = false;
+  es.pre_block_norm = true;
+  return es;
+}
+
+void enc_block(const EncSpec& es, const Weights& w, const std::string& prefix, float* x,
+               size_t T) {
+  const size_t D = es.d_model, H = es.heads, hd = D / H;
+  if (H == 0 || D % H) throw std::invalid_argument("enc_block: head geometry");
   const Tensor& xw = w.at(prefix + "norm1.weight");
   const Tensor& xb = w.at(prefix + "norm1.bias");
   std::vector<float> normed(T * D);
   for (size_t t = 0; t < T; ++t) layernorm_row(x + t * D, xw, xb, D, kLnEps, normed.data() + t * D);
   // Fused qkv, token-major (3, H, hd) blocks: q rows [0, D), k [D, 2D), v [2D, 3D).
   const Tensor& wqkv = w.at(prefix + "attn.w_qkv.weight");
-  const Tensor* bqkv = pc.enc_qkv_bias ? &w.at(prefix + "attn.w_qkv.bias") : nullptr;
+  const Tensor* bqkv = es.qkv_bias ? &w.at(prefix + "attn.w_qkv.bias") : nullptr;
   std::vector<float> q(T * D), k(T * D), v(T * D);
   for (size_t t = 0; t < T; ++t) {
     for (size_t i = 0; i < D; ++i) {
@@ -219,19 +249,21 @@ void enc_block(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
       v[t * D + i] = static_cast<float>(sv);
     }
   }
-  const Tensor& qw = w.at(prefix + "attn.q_norm.weight");
-  const Tensor& qb = w.at(prefix + "attn.q_norm.bias");
-  const Tensor& kw = w.at(prefix + "attn.k_norm.weight");
-  const Tensor& kb = w.at(prefix + "attn.k_norm.bias");
-  for (size_t t = 0; t < T; ++t) {
-    for (size_t h = 0; h < H; ++h) {
-      layernorm_row(q.data() + t * D + h * hd, qw, qb, hd, kLnEps, q.data() + t * D + h * hd);
-      layernorm_row(k.data() + t * D + h * hd, kw, kb, hd, kLnEps, k.data() + t * D + h * hd);
+  if (es.qk_norm) {
+    const Tensor& qw = w.at(prefix + "attn.q_norm.weight");
+    const Tensor& qb = w.at(prefix + "attn.q_norm.bias");
+    const Tensor& kw = w.at(prefix + "attn.k_norm.weight");
+    const Tensor& kb = w.at(prefix + "attn.k_norm.bias");
+    for (size_t t = 0; t < T; ++t) {
+      for (size_t h = 0; h < H; ++h) {
+        layernorm_row(q.data() + t * D + h * hd, qw, qb, hd, kLnEps, q.data() + t * D + h * hd);
+        layernorm_row(k.data() + t * D + h * hd, kw, kb, hd, kLnEps, k.data() + t * D + h * hd);
+      }
     }
   }
-  const size_t d_rot = static_cast<size_t>(static_cast<double>(hd) * pc.enc_rotary_fraction);
-  rope_half(q.data(), T, H, hd, d_rot, pc.enc_rope_base);
-  rope_half(k.data(), T, H, hd, d_rot, pc.enc_rope_base);
+  const size_t d_rot = static_cast<size_t>(static_cast<double>(hd) * es.rotary_fraction);
+  rope_half(q.data(), T, H, hd, d_rot, es.rope_base);
+  rope_half(k.data(), T, H, hd, d_rot, es.rope_base);
   // Bidirectional attention, scale 1/sqrt(hd), softmax in fp32; out_proj + bias.
   std::vector<float> attn(T * D), scores(T), probs(T);
   const float scale = static_cast<float>(1.0 / std::sqrt(static_cast<double>(hd)));
@@ -274,7 +306,7 @@ void enc_block(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
   const Tensor& f1b = w.at(prefix + "ffn.net.0.bias");
   const Tensor& f2w = w.at(prefix + "ffn.net.3.weight");
   const Tensor& f2b = w.at(prefix + "ffn.net.3.bias");
-  const size_t F = pc.enc_ff_expansion * D;
+  const size_t F = es.ff_expansion * D;
   std::vector<float> normed2(T * D), hid(F);
   const Tensor& x2w = w.at(prefix + "norm2.weight");
   const Tensor& x2b = w.at(prefix + "norm2.bias");
@@ -294,24 +326,125 @@ void enc_block(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
   }
 }
 
-void asr_encoder(const NemotronTranscribePerceptionConfig& pc, const Weights& w, const float* mel,
-                 size_t T, std::vector<float>& states) {
-  const size_t D = pc.enc_d_model;
-  const std::string e = "perception.encoder.asr_encoder.";
-  stack_pre_encode(pc, mel, T, w.at(e + "pre_encode.proj.weight"), states);
+void encoder_run(const EncSpec& es, const NemotronTranscribePerceptionConfig& pc,
+                 const Weights& w, const std::string& root, const float* mel, size_t T,
+                 std::vector<float>& states) {
+  const size_t D = es.d_model;
+  stack_pre_encode(pc, mel, T, w.at(root + "pre_encode.proj.weight"), states);
   const size_t T_tok = states.size() / D;
-  if (pc.enc_pre_block_norm) {
-    const Tensor& ew = w.at(e + "embed_norm.weight");
-    const Tensor& eb = w.at(e + "embed_norm.bias");
+  if (es.pre_block_norm) {
+    const Tensor& ew = w.at(root + "embed_norm.weight");
+    const Tensor& eb = w.at(root + "embed_norm.bias");
     for (size_t t = 0; t < T_tok; ++t)
       layernorm_row(states.data() + t * D, ew, eb, D, kLnEps, states.data() + t * D);
   }
-  for (int l = 0; l < pc.enc_layers; ++l)
-    enc_block(pc, w, e + "layers." + std::to_string(l) + ".", states.data(), T_tok);
-  const Tensor& fw = w.at(e + "final_norm.weight");
-  const Tensor& fb = w.at(e + "final_norm.bias");
+  for (size_t l = 0; l < es.layers; ++l)
+    enc_block(es, w, root + "layers." + std::to_string(l) + ".", states.data(), T_tok);
+  const Tensor& fw = w.at(root + "final_norm.weight");
+  const Tensor& fb = w.at(root + "final_norm.bias");
   for (size_t t = 0; t < T_tok; ++t)
     layernorm_row(states.data() + t * D, fw, fb, D, kLnEps, states.data() + t * D);
+}
+
+void normalize_per_feature(const float* mel, size_t C, size_t T, std::vector<float>& out) {
+  // features.py normalize_batch(mel, length, 'per_feature') at full length:
+  // the reference frame drops out of the mean (all frames valid), var is
+  // the UNBIASED variance (sum of squares over T - 1), std gets +1e-5.
+  if (T < 2) throw std::invalid_argument("normalize_per_feature: T < 2");
+  out.assign(C * T, 0.f);
+  for (size_t c = 0; c < C; ++c) {
+    const float* x = mel + c * T;
+    double sum = 0.0;
+    for (size_t t = 0; t < T; ++t) sum += x[t];
+    const float mean = static_cast<float>(sum / static_cast<double>(T));
+    double vs = 0.0;
+    for (size_t t = 0; t < T; ++t) {
+      const double d = static_cast<double>(x[t]) - mean;
+      vs += d * d;
+    }
+    const float stdv = static_cast<float>(std::sqrt(vs / static_cast<double>(T - 1))) + 1e-5f;
+    for (size_t t = 0; t < T; ++t) out[c * T + t] = (x[t] - mean) / stdv;
+  }
+}
+
+void asr_encoder(const NemotronTranscribePerceptionConfig& pc, const Weights& w, const float* mel,
+                 size_t T, std::vector<float>& states) {
+  std::vector<float> norm_mel;
+  const float* in = mel;
+  if (pc.asr_normalize_per_feature) {
+    normalize_per_feature(mel, pc.mel_features, T, norm_mel);
+    in = norm_mel.data();
+  }
+  encoder_run(enc_spec_asr(pc), pc, w, "perception.encoder.asr_encoder.", in, T, states);
+}
+
+void diar_activity(const NemotronTranscribePerceptionConfig& pc, const Weights& w,
+                   const float* mel, size_t T, std::vector<float>& preds) {
+  const EncSpec es = enc_spec_diar(pc);
+  const std::string root = "perception.encoder.diarization_model.";
+  std::vector<float> emb;
+  encoder_run(es, pc, w, root + "encoder.", mel, T, emb);  // raw mel: diar_norm "NA"
+  const size_t D = es.d_model, TF = pc.tf_d_model, S = pc.n_spk;
+  const size_t T_tok = emb.size() / D;
+  if (TF == D) throw std::invalid_argument("diar_activity: fc == tf selects the tf path");
+  // frontend_encoder's tail: encoder_proj (the SortformerModules' input
+  // projection); mask_padding (length == T_tok here) would zero the rows
+  // past the clip — full-length, a no-op.
+  std::vector<float> hidden(T_tok * TF);
+  const Tensor& epw = w.at(root + "sortformer_modules.encoder_proj.weight");
+  const Tensor& epb = w.at(root + "sortformer_modules.encoder_proj.bias");
+  if (epw.numel() != TF * D) throw std::invalid_argument("diar_activity: encoder_proj numel");
+  for (size_t t = 0; t < T_tok; ++t) {
+    nemotron_ref::gemv(hidden.data() + t * TF, epw, emb.data() + t * D, TF, D);
+    for (size_t o = 0; o < TF; ++o) hidden[t * TF + o] += deq(epb, o);
+  }
+  // upsample_hidden: conv1d(TF, TF * sf, k3, pad 1) over the TF x T_tok
+  // plane, then (T_tok, sf, TF) -> (T_tok * sf, TF). Zero left/right pad.
+  const size_t sf = pc.subsampling_factor;
+  const Tensor& sw = w.at(root + "sortformer_modules.subpixel_upsample.weight");
+  const Tensor& sb = w.at(root + "sortformer_modules.subpixel_upsample.bias");
+  if (sw.numel() != TF * sf * TF * 3 || sb.numel() != TF * sf)
+    throw std::invalid_argument("diar_activity: subpixel numel");
+  std::vector<float> up(T_tok * sf * TF);
+  for (size_t t = 0; t < T_tok; ++t) {
+    for (size_t p = 0; p < sf; ++p) {
+      for (size_t lane = 0; lane < TF; ++lane) {
+        const size_t oc = p * TF + lane;
+        double acc = deq(sb, oc);
+        for (size_t j = 0; j < 3; ++j) {
+          const size_t tt = t + j - 1;  // padding=1, zero outside
+          if (j == 0 && t == 0) continue;
+          if (j == 2 && t + 1 == T_tok) continue;
+          for (size_t c = 0; c < TF; ++c)
+            acc += deq(sw, (oc * TF + c) * 3 + j) * hidden[tt * TF + c];
+        }
+        up[(t * sf + p) * TF + lane] = static_cast<float>(acc);
+      }
+    }
+  }
+  // forward_speaker_logits (dropout is an eval no-op) + sigmoid + the
+  // full-length output_mask, then downsample_preds: masked windows average
+  // to the plain mean of their `sf` frames (all valid at full length).
+  const Tensor& hw = w.at(root + "sortformer_modules.first_hidden_to_hidden.weight");
+  const Tensor& hb = w.at(root + "sortformer_modules.first_hidden_to_hidden.bias");
+  const Tensor& uw = w.at(root + "sortformer_modules.single_hidden_to_spks.weight");
+  const Tensor& ub = w.at(root + "sortformer_modules.single_hidden_to_spks.bias");
+  preds.assign(T_tok * S, 0.f);
+  std::vector<float> relu_up(T_tok * sf * TF), mid(TF), row(S);
+  for (size_t i = 0; i < up.size(); ++i) relu_up[i] = up[i] > 0.f ? up[i] : 0.f;
+  for (size_t t = 0; t < T_tok; ++t) {
+    for (size_t q = 0; q < sf; ++q) {
+      const size_t tu = t * sf + q;
+      nemotron_ref::gemv(mid.data(), hw, relu_up.data() + tu * TF, TF, TF);
+      for (size_t o = 0; o < TF; ++o) mid[o] += deq(hb, o);
+      for (size_t o = 0; o < TF; ++o) if (mid[o] < 0.f) mid[o] = 0.f;
+      nemotron_ref::gemv(row.data(), uw, mid.data(), S, TF);
+      for (size_t k = 0; k < S; ++k) {
+        const float logit = row[k] + deq(ub, k);
+        preds[t * S + k] += 1.f / (1.f + std::exp(-logit)) / static_cast<float>(sf);
+      }
+    }
+  }
 }
 
 void build_spk_kernel(const NemotronTranscribePerceptionConfig& pc, std::vector<float>& kernel) {
@@ -369,7 +502,15 @@ PerceptionOutput perceive(const NemotronTranscribePerceptionConfig& pc, const We
                             w.at("perception.preprocessor.featurizer.fb"), kPreemph, out.mel);
   asr_encoder(pc, w, out.mel.data(), out.frames, out.states);
   out.tokens = out.states.size() / static_cast<size_t>(pc.enc_d_model);
-  if (activity) fuse_and_connect(pc, w, out.states.data(), activity, out.tokens, out.rows);
+  std::vector<float> internal;
+  if (!activity) {
+    // The release route: the Sortformer branch on the RAW frontend mel
+    // (diar_normalize_type "NA"), its preds thresholded inside the fusion.
+    diar_activity(pc, w, out.mel.data(), out.frames, internal);
+    activity = internal.data();
+    out.activity = internal;
+  }
+  fuse_and_connect(pc, w, out.states.data(), activity, out.tokens, out.rows);
   return out;
 }
 
