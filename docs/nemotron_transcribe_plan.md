@@ -144,17 +144,50 @@ the `dflash2` path of the Qwen3.8-27B templates is the template.
   RoPE on half the head dims (rotary_fraction 0.5, base 10000), GELU FF
   5120, `embed_norm` + per-block norms + `final_norm` — the NeMo
   `TransformerEncoder` (attn_mode full, no conv subsampling). Bidirectional.
-- **Speaker branch**: Nemotron-3-Diarization / Sortformer (~99 M): a
-  streaming transformer with 2×16-head blocks (`ff_expansion` 0.5),
-  RoPE half, upsampling conv_transpose ×2, `residual_scale` 0.1 — a
-  34 M-frame-window model. **This branch is not optional**: the parallel
-  expert encoder normalizes each branch (`asr_norm`, `diar_norm`) and
-  the LM is trained on their join through the connector.
+- **Speaker branch** (Sortformer, milestone 5b — tensor census from the
+  landed shard, 2026-10-31, 359 loaded tensors under
+  `perception.encoder.diarization_model.`):
+  - `preprocessor.featurizer.{fb,window}` — the diar branch has its own
+    mel tensors (same [1,128,257]/[400] shapes; its config block says
+    `normalize: "NA"`, which `normalize_batch`'s else-branch no-ops —
+    no feature normalization, unlike a `per_feature` string).
+  - `encoder.*` — a `TransformerEncoder` (the same family as the ASR
+    branch, NOT a conformer): 31 blocks of d_model **512**, **8 heads**
+    (head_dim 64), `attn.w_qkv` [1536,512], **no q/k norms** (11 tensors
+    per block), biased `attn.out_proj`, FFN 512→2048→512
+    (`ff_expansion` 4), `norm1`/`norm2`; `pre_encode.proj` [512,1024] —
+    FeatureStacking(×8) over 128 mels, bias-free; `embed_norm`,
+    `final_norm`. Its config says `self_attention_model: rope` but
+    OMITS `rotary_fraction`/`rope_base` → the TransformerEncoder
+    defaults hold: **FULL rope (fraction 1.0) at base 10000** — unlike
+    the ASR branch's 0.5 (a trap the old conformer bullet tripped on).
+    `attn_mode: full`, streaming `causal_tail_*` are training-only.
+  - `sortformer_modules.*` — the dual-head mask net: `encoder_proj`
+    512→192 (`tf_d_model`), `first_hidden_to_hidden` 192→192,
+    `hidden_to_spks` 384→8 (concat of two 192 contexts),
+    `single_hidden_to_spks` 192→8, `subpixel_upsample` Conv1d
+    [1536,192,3] = 192×8-pixel sub-pixel upsampling (×8 time),
+    `learnable_sil_emb` [512] (the FIFO silence row).
+  - Windowing (from `pe_encoder_config.diarization_model_cfg`):
+    streaming_mode true, `chunk_len`/`spkcache_len`/
+    `spkcache_update_period` 264 (10 ms frames → 2.64 s), `fifo_len` 0,
+    `spkcache_sil_frames_per_spk` 1, `pred_score_threshold` 0.25,
+    `sil_threshold` 0.2, `use_learnable_sil_emb` true, selection-score
+    post-params `scores_boost_latest` 0.05 / `strong_boost_rate` 0.75 /
+    `weak_boost_rate` 1.5 / `min_pos_scores_rate` 0.5, `max_num_of_spks`
+    8, `max_causal_tail_len` 222; the fusion consumes the
+    thresholded-0.5 activity on the ASR grid
+    (`speaker_feature_mode: thresholded`).
+  **This branch is not optional**: the LM is trained on the joined
+  experts. 5b = read `sortformer_modules.py` + the Sortformer model
+  forward (window/FIFO/spkcache mechanics) and extend
+  `perception.{hpp,cpp}` + the fixture.
 - **Connector**: IdentityConnector(d_model 1280) then
-  `perception.proj` [2688, 1280] — how the two branches combine into the
-  LM rows (concat-in-time with speaker windows, interleave, or sum) is
-  decided in `ParallelExpertEncoderPT.forward`; read it from the NeMo
-  source and pin it in the oracle before any kernel work.
+  `perception.proj` [2688, 1280] — the join is decided in
+  `ParallelExpertEncoder._fuse_diar_and_asr` (RESOLVED 2026-10-31, see
+  the fusion section; oracle-pinned 2026-10-31: thresholded activity →
+  `diar_norm` → built-in sinusoidal kernel → + `spk_kernel_scale`·infusion
+  onto `asr_norm(states)` → connector).
 - Encoder chunking: 30 s post-feature chunks
   (`encoder_chunk_size_seconds`), full attention inside a chunk;
   `packed_encoder_sequences` is a training detail.
