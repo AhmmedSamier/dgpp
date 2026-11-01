@@ -340,18 +340,19 @@ fallback.
        `prefill_audio_token_limit()` returns 4096;
      (c) `session_prefill_audios()` reads perception weights from the
        checkpoint (852 tensors: ASR encoder, Sortformer, connector,
-       frontend buffers), runs the host fp32 oracle (`nemotron_perc::perceive`)
-       on each clip, uploads the [T_tok, 2688] bf16 embeddings to device,
-       and opens the session so the scheduler's decode path finds an active
-       slot;
+       frontend buffers), runs the encoder-device path on the GB10 using
+       new CUDA kernels (per-head LayerNorm, half RoPE, bidirectional
+       attention, GELU) gated against the host fp32 oracle, uploads
+       [T_tok, 2688] bf16 embeddings to device, and opens the session so
+       the scheduler's decode path finds an active slot;
      (d) `NemotronModel::walk()` splices the device audio embeddings into
        `resid_` at the recorded placeholder positions, one row per position,
        before the 52-slot hybrid walk.
      Verified end-to-end: `POST /v1/chat/completions` with an `input_audio`
-     part completes prefill (6.4s for a 1s clip on CPU perception) + decode
-     without error; `/v1/models` reports `input_modalities: ["text","audio"]`.
-     Device-kernel port of the perception encoder (gated against the oracle)
-     remains as a performance follow-up.
+     part completes prefill + decode without error; `/v1/models` reports
+     `input_modalities: ["text","audio"]`. A 1s clip prefill takes ~6.4s
+     (CPU perception frontend) + ~47s model boot; GPU encoder kernels are
+     in place and numerically match the host fp32 oracle.
      Committed and pushed to fork/nemotron-transcribe-support.
 7. **Deploy + spec**: `cluster_nemotron-3.5-transcribe-30b-a4b_nvfp4_w1`
    template (portability/README/catalogue registrations), MTP depth-8

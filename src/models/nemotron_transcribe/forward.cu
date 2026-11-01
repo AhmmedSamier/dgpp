@@ -533,4 +533,221 @@ void nemotron_silu(const uint16_t* in, uint16_t* out, int n, cudaStream_t stream
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
+// ---------------------------------------------------------------------------
+// Perception encoder kernels (milestone 6 device port)
+// These mirror nemotron_perc::enc_block on the GPU: per-head LayerNorm,
+// half RoPE, bidirectional full attention, and GELU. GEMM and LayerNorm
+// reuse nemotron_gemm_bf16 / nemotron_rmsnorm.
+// ---------------------------------------------------------------------------
+
+// Per-head LayerNorm: normalize each attention head's head_dim lanes
+// independently. 2D grid (T, heads), one block per (position, head).
+// Shared memory: 2 * blockDim.x floats (sum and sumsq reductions).
+__global__ void nemotron_perc_layernorm_per_head_kernel(
+    const uint16_t* w, const uint16_t* b, const uint16_t* x, uint16_t* out,
+    int T, int heads, int head_dim, float eps) {
+  const int t = blockIdx.x;
+  if (t >= T) return;
+  const int h = blockIdx.y;
+  if (h >= heads) return;
+  const int tid = threadIdx.x;
+  const int dim = head_dim;
+  const size_t row_stride = static_cast<size_t>(heads) * static_cast<size_t>(head_dim);
+  const uint16_t* x_row = x + static_cast<size_t>(t) * row_stride +
+                          static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+  uint16_t* out_row = out + static_cast<size_t>(t) * row_stride +
+                      static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+
+  float sum = 0.0f, ssq = 0.0f;
+  for (int i = tid; i < dim; i += blockDim.x) {
+    float v = bf16_bits_to_float(x_row[i]);
+    sum += v;
+    ssq += v * v;
+  }
+
+  extern __shared__ float sdata[];
+  float* ssum = sdata;
+  float* sssq = sdata + blockDim.x;
+  ssum[tid] = sum;
+  sssq[tid] = ssq;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) {
+      ssum[tid] += ssum[tid + stride];
+      sssq[tid] += sssq[tid + stride];
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    float mean = ssum[0] / static_cast<float>(dim);
+    float var = sssq[0] / static_cast<float>(dim) - mean * mean;
+    ssum[0] = mean;
+    sssq[0] = 1.0f / sqrtf(var + eps);
+  }
+  __syncthreads();
+  float mean = ssum[0];
+  float rstd = sssq[0];
+  const size_t w_row = static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+  for (int i = tid; i < dim; i += blockDim.x) {
+    float xv = bf16_bits_to_float(x_row[i]);
+    float wv = bf16_bits_to_float(w[w_row + i]);
+    float bv = bf16_bits_to_float(b[w_row + i]);
+    out_row[i] = float_to_bf16_bits(wv * (xv - mean) * rstd + bv);
+  }
+}
+
+// Half RoPE: rotate lanes [0, d_rot) in pairs (j, j + d_rot/2) with
+// duplicated cos/sin. Lanes [d_rot, head_dim) pass through.
+// 2D grid (T, heads), one block per (position, head).
+__global__ void nemotron_perc_rope_half_kernel(
+    uint16_t* x, int T, int heads, int head_dim, int d_rot, double base) {
+  const int t = blockIdx.x;
+  if (t >= T) return;
+  const int h = blockIdx.y;
+  if (h >= heads) return;
+  const int tid = threadIdx.x;
+  const int dim = head_dim;
+  const int half = d_rot / 2;
+  const size_t row_stride = static_cast<size_t>(heads) * static_cast<size_t>(head_dim);
+  uint16_t* x_row = x + static_cast<size_t>(t) * row_stride +
+                    static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+
+  for (int j = tid; j < half; j += blockDim.x) {
+    const double invf =
+        pow(base, -2.0 * static_cast<double>(j) / static_cast<double>(d_rot));
+    const float ang = static_cast<float>(static_cast<double>(t) * invf);
+    const float c = cosf(ang);
+    const float s = sinf(ang);
+    const float x1 = bf16_bits_to_float(x_row[j]);
+    const float x2 = bf16_bits_to_float(x_row[j + half]);
+    x_row[j] = float_to_bf16_bits(x1 * c - x2 * s);
+    x_row[j + half] = float_to_bf16_bits(x2 * c + x1 * s);
+  }
+}
+
+// Bidirectional full attention: q [T, heads*hd], k/v [T, heads*hd],
+// out [T, heads*hd]. One block per (query position, head). Full T x T
+// softmax, scale 1/sqrt(head_dim). Not causal.
+// Shared memory: T + blockDim.x floats (scores + reduction buffer).
+__global__ void nemotron_perc_attention_bidirectional_kernel(
+    const uint16_t* q, const uint16_t* k, const uint16_t* v, uint16_t* out,
+    int T, int heads, int head_dim, float scale) {
+  const int t = blockIdx.x;
+  if (t >= T) return;
+  const int h = blockIdx.y;
+  if (h >= heads) return;
+  const int tid = threadIdx.x;
+  const int dim = head_dim;
+  const size_t row_stride = static_cast<size_t>(heads) * static_cast<size_t>(head_dim);
+  const uint16_t* q_row = q + static_cast<size_t>(t) * row_stride +
+                          static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+  uint16_t* out_row = out + static_cast<size_t>(t) * row_stride +
+                      static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+
+  const float qv = (tid < dim) ? bf16_bits_to_float(q_row[tid]) : 0.0f;
+
+  extern __shared__ float smem[];
+  float* scores = smem;            // [T]
+  float* sdata = smem + T;         // [blockDim.x] reduction buffer
+
+  // Compute scores against all T keys.
+  for (int s = 0; s < T; ++s) {
+    float acc = 0.0f;
+    const uint16_t* k_row = k + static_cast<size_t>(s) * row_stride +
+                            static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+    for (int i = tid; i < dim; i += blockDim.x) {
+      acc += qv * bf16_bits_to_float(k_row[i]);
+    }
+    sdata[tid] = acc;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) sdata[tid] += sdata[tid + stride];
+      __syncthreads();
+    }
+    if (tid == 0) scores[s] = sdata[0] * scale;
+    __syncthreads();
+  }
+
+  // Softmax over T scores (thread 0).
+  if (tid == 0) {
+    float mx = -INFINITY;
+    for (int s = 0; s < T; ++s) mx = fmaxf(mx, scores[s]);
+    double den = 0.0;
+    for (int s = 0; s < T; ++s) {
+      scores[s] = expf(scores[s] - mx);
+      den += scores[s];
+    }
+    float inv = 1.0f / static_cast<float>(den);
+    for (int s = 0; s < T; ++s) scores[s] *= inv;
+  }
+  __syncthreads();
+
+  // Weighted sum of value rows, my output lane.
+  if (tid < dim) {
+    float acc = 0.0f;
+    for (int s = 0; s < T; ++s) {
+      const uint16_t* v_row = v + static_cast<size_t>(s) * row_stride +
+                              static_cast<size_t>(h) * static_cast<size_t>(head_dim);
+      acc += scores[s] * bf16_bits_to_float(v_row[tid]);
+    }
+    out_row[tid] = float_to_bf16_bits(acc);
+  }
+}
+
+// GELU (erf): out = 0.5 * x * (1 + erf(x / sqrt(2))). One thread per element.
+__global__ void nemotron_perc_gelu_kernel(const uint16_t* in, uint16_t* out, int n) {
+  const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n) return;
+  float v = bf16_bits_to_float(in[idx]);
+  float gelu = 0.5f * v * (1.0f + erff(v * 0.7071067811865475f));
+  out[idx] = float_to_bf16_bits(gelu);
+}
+
+// Per-head LayerNorm wrapper: 2D grid (T, heads), block = min(1024, head_dim).
+void nemotron_perc_layernorm_per_head(const uint16_t* w, const uint16_t* b,
+                                      const uint16_t* x, uint16_t* out,
+                                      int T, int heads, int head_dim, float eps,
+                                      cudaStream_t stream) {
+  dim3 block(min(1024, head_dim));
+  dim3 grid(T, heads);
+  size_t smem = 2 * static_cast<size_t>(block.x) * sizeof(float);
+  nemotron_perc_layernorm_per_head_kernel<<<grid, block, smem, stream>>>(
+      w, b, x, out, T, heads, head_dim, eps);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+// Half RoPE wrapper: 2D grid (T, heads), block = min(1024, d_rot / 2).
+void nemotron_perc_rope_half(uint16_t* x, int T, int heads, int head_dim,
+                             int d_rot, double base, cudaStream_t stream) {
+  dim3 block(min(1024, d_rot / 2));
+  dim3 grid(T, heads);
+  nemotron_perc_rope_half_kernel<<<grid, block, 0, stream>>>(
+      x, T, heads, head_dim, d_rot, base);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+// Bidirectional attention wrapper: 2D grid (T, heads), block = min(1024, head_dim).
+// Shared memory: T + blockDim.x floats.
+void nemotron_perc_attention_bidirectional(const uint16_t* q, const uint16_t* k,
+                                           const uint16_t* v, uint16_t* out,
+                                           int T, int heads, int head_dim,
+                                           float scale, cudaStream_t stream) {
+  dim3 block(min(1024, head_dim));
+  dim3 grid(T, heads);
+  size_t smem = (static_cast<size_t>(T) + static_cast<size_t>(block.x)) *
+                sizeof(float);
+  nemotron_perc_attention_bidirectional_kernel<<<grid, block, smem, stream>>>(
+      q, k, v, out, T, heads, head_dim, scale);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
+// GELU wrapper.
+void nemotron_perc_gelu(const uint16_t* in, uint16_t* out, int n,
+                        cudaStream_t stream) {
+  const int block = 256;
+  const int grid = (n + block - 1) / block;
+  nemotron_perc_gelu_kernel<<<grid, block, 0, stream>>>(in, out, n);
+  DGPP_CUDA_OK(cudaGetLastError());
+}
+
 }  // namespace dgpp

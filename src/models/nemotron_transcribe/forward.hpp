@@ -75,4 +75,30 @@ void nemotron_gemm_f32(const uint16_t* A, const uint16_t* B, float* C, int M, in
 // Elementwise silu.
 void nemotron_silu(const uint16_t* in, uint16_t* out, int n, cudaStream_t stream);
 
+// Perception encoder device kernels (milestone 6 port). These mirror
+// nemotron_perc::enc_block on the GPU and are gated against the host fp32
+// oracle in src/models/nemotron_transcribe/perception.cpp.
+
+// Per-head LayerNorm: normalize each attention head's head_dim lanes
+// independently. 2D grid (T, heads).
+void nemotron_perc_layernorm_per_head(const uint16_t* w, const uint16_t* b,
+                                      const uint16_t* x, uint16_t* out,
+                                      int T, int heads, int head_dim, float eps,
+                                      cudaStream_t stream);
+
+// Half RoPE: rotate lanes [0, d_rot) in pairs, pass the rest. 2D grid (T, heads).
+void nemotron_perc_rope_half(uint16_t* x, int T, int heads, int head_dim,
+                             int d_rot, double base, cudaStream_t stream);
+
+// Bidirectional full attention: full T x T softmax, scale 1/sqrt(head_dim),
+// not causal. 2D grid (T, heads).
+void nemotron_perc_attention_bidirectional(const uint16_t* q, const uint16_t* k,
+                                           const uint16_t* v, uint16_t* out,
+                                           int T, int heads, int head_dim,
+                                           float scale, cudaStream_t stream);
+
+// Elementwise GELU (erf).
+void nemotron_perc_gelu(const uint16_t* in, uint16_t* out, int n,
+                        cudaStream_t stream);
+
 }  // namespace dgpp

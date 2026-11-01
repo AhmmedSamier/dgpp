@@ -12,7 +12,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
 #include "common/cuda_check.hpp"
 #include "common/dtypes.hpp"
 #include "common/log.hpp"
@@ -507,7 +506,7 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
   if (audios.empty())
     throw std::invalid_argument("NemotronModel::session_prefill_audios: no audios");
 
-  // --- 1. Build perception weights from the checkpoint (CPU side) ---
+  // --- 1. Load perception weights from the checkpoint (CPU) ---
   nemotron_ref::Weights w;
   {
     const std::string safetensors_path = checkpoint_dir_ + "/model.safetensors";
@@ -529,31 +528,270 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
     }
   }
 
-  // --- 2. Run perception on each audio clip ---
+  // --- 2. Perception config geometry ---
   const auto& pc = cfg_.perception;
   const int H = hidden_;
   if (pc.output_dim != H)
     throw std::runtime_error(
         "NemotronModel: perception output_dim != LM hidden");
+  const int D = pc.enc_d_model;
+  const int Hd = pc.enc_heads;
+  const int hd = D / Hd;
+  const int F = pc.enc_ff_expansion * D;
+  const int sf = pc.subsampling_factor;
+  const float eps = 1e-5f;
+  const float scale = 1.0f / sqrtf(static_cast<float>(hd));
+  const int d_rot = static_cast<int>(static_cast<double>(hd) * pc.enc_rotary_fraction);
 
-  std::vector<uint16_t> all_audio_embeds;  // concatenated [sum T_tok, H] bf16
+  // Helper: upload a bf16 tensor to device.
+  auto upload_bf16 = [&](const nemotron_ref::Tensor& t) -> uint16_t* {
+    uint16_t* d_ptr = nullptr;
+    DGPP_CUDA_OK(cudaMalloc(&d_ptr, t.numel() * 2));
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_ptr, t.bf16.data(), t.numel() * 2,
+                                 cudaMemcpyHostToDevice, stream_));
+    DGPP_CUDA_OK(cudaGetLastError());
+    return d_ptr;
+  };
+  // Track device allocations for cleanup.
+  std::vector<uint16_t*> d_allocs;
+  auto track = [&](uint16_t* p) { d_allocs.push_back(p); return p; };
+
+  constexpr float kPreemph = 0.97f;
+
+  // --- 3. Process each audio clip: mel → GPU encoder → fuse → embeddings ---
+  std::vector<uint16_t> all_audio_embeds;  // [sum T_tok, H] bf16
   int64_t embed_row = 0;
-
-  // Resize per-request audio span storage.
-  if (static_cast<size_t>(req) >= audio_spans_.size())
-    audio_spans_.resize(req + 1);
-
   size_t total_rows = 0;
+
+
+  // Per-block device buffers (allocated on first clip).
+  uint16_t* d_x = nullptr, *d_normed1 = nullptr, *d_qkv = nullptr;
+  uint16_t* d_q = nullptr, *d_k = nullptr, *d_v = nullptr, *d_attn_out = nullptr;
+  uint16_t* d_ffn_hidden = nullptr, *d_ffn_out = nullptr;
+
   for (const auto& au : audios) {
-    auto out = nemotron_perc::perceive(pc, w, au.pcm.data(), au.pcm.size(), nullptr);
-    const size_t T_tok = out.tokens;
+    // 3a. Mel frontend (CPU).
+    std::vector<float> mel;
+    nemotron_perc::mel_frontend(
+        au.pcm.data(), au.pcm.size(),
+        w.at("perception.preprocessor.featurizer.window"),
+        w.at("perception.preprocessor.featurizer.fb"), kPreemph, mel);
+    const size_t T = mel.size() / pc.mel_features;
+
+    // 3b. stack_pre_encode (CPU): mel [C, T] → [T_tok, D] fp32.
+    std::vector<float> stacked;
+    nemotron_perc::stack_pre_encode(
+        pc, mel.data(), T,
+        w.at("perception.encoder.asr_encoder.pre_encode.proj.weight"), stacked);
+    const size_t T_tok = stacked.size() / D;
     if (T_tok == 0)
       throw std::runtime_error("NemotronModel: perception produced no tokens");
-    for (size_t r = 0; r < T_tok; ++r) {
-      for (int c = 0; c < H; ++c)
-        all_audio_embeds.push_back(
-            float_to_bf16_bits(out.rows[r * pc.output_dim + c]));
+
+    // Allocate device buffers on first clip.
+    if (!d_x) {
+      const size_t buf_size = static_cast<size_t>(T_tok) * D;
+      const size_t qkv_size = static_cast<size_t>(T_tok) * 3 * D;
+      const size_t ffn_size = static_cast<size_t>(T_tok) * F;
+      DGPP_CUDA_OK(cudaMalloc(&d_x, buf_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_normed1, buf_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_qkv, qkv_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_q, buf_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_k, buf_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_v, buf_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_attn_out, buf_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_ffn_hidden, ffn_size * 2));
+      DGPP_CUDA_OK(cudaMalloc(&d_ffn_out, buf_size * 2));
+      track(d_x); track(d_normed1); track(d_qkv);
+      track(d_q); track(d_k); track(d_v);
+      track(d_attn_out); track(d_ffn_hidden); track(d_ffn_out);
     }
+
+    // 3c. Upload stacked mel to d_x (bf16).
+    {
+      std::vector<uint16_t> x_bf16(T_tok * D);
+      for (size_t i = 0; i < x_bf16.size(); ++i)
+        x_bf16[i] = float_to_bf16_bits(stacked[i]);
+      DGPP_CUDA_OK(cudaMemcpyAsync(d_x, x_bf16.data(), x_bf16.size() * 2,
+                                   cudaMemcpyHostToDevice, stream_));
+      DGPP_CUDA_OK(cudaGetLastError());
+    }
+
+    // 3d. Run encoder blocks on GPU.
+    for (int l = 0; l < pc.enc_layers; ++l) {
+      const std::string prefix =
+          std::format("perception.encoder.asr_encoder.layers.{}.", l);
+      uint16_t* nw = track(upload_bf16(w.at(prefix + "norm1.weight")));
+    uint16_t* nb = track(upload_bf16(w.at(prefix + "norm1.bias")));
+    uint16_t* qk = track(upload_bf16(w.at(prefix + "attn.w_qkv.weight")));
+    uint16_t* wo = track(upload_bf16(w.at(prefix + "attn.out_proj.weight")));
+    uint16_t* n2w = track(upload_bf16(w.at(prefix + "norm2.weight")));
+    uint16_t* n2b = track(upload_bf16(w.at(prefix + "norm2.bias")));
+    uint16_t* f1 = track(upload_bf16(w.at(prefix + "ffn.net.0.weight")));
+    uint16_t* f2 = track(upload_bf16(w.at(prefix + "ffn.net.3.weight")));
+    uint16_t* qnw = track(upload_bf16(w.at(prefix + "attn.q_norm.weight")));
+    uint16_t* qnb = track(upload_bf16(w.at(prefix + "attn.q_norm.bias")));
+    uint16_t* knw = track(upload_bf16(w.at(prefix + "attn.k_norm.weight")));
+    uint16_t* knb = track(upload_bf16(w.at(prefix + "attn.k_norm.bias")));
+
+      if (!nw) {
+        nw = track(upload_bf16(w.at(prefix + "norm1.weight")));
+        nb = track(upload_bf16(w.at(prefix + "norm1.bias")));
+        qk = track(upload_bf16(w.at(prefix + "attn.w_qkv.weight")));
+        wo = track(upload_bf16(w.at(prefix + "attn.out_proj.weight")));
+        n2w = track(upload_bf16(w.at(prefix + "norm2.weight")));
+        n2b = track(upload_bf16(w.at(prefix + "norm2.bias")));
+        f1 = track(upload_bf16(w.at(prefix + "ffn.net.0.weight")));
+        f2 = track(upload_bf16(w.at(prefix + "ffn.net.3.weight")));
+        qnw = track(upload_bf16(w.at(prefix + "attn.q_norm.weight")));
+        qnb = track(upload_bf16(w.at(prefix + "attn.q_norm.bias")));
+        knw = track(upload_bf16(w.at(prefix + "attn.k_norm.weight")));
+        knb = track(upload_bf16(w.at(prefix + "attn.k_norm.bias")));
+      }
+
+      // 1. layernorm1(x) → d_normed1
+      nemotron_rmsnorm(nw, d_x, d_normed1, static_cast<int>(T_tok), D, eps, stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 2. gemv(normed1, W_qkv) → d_qkv [T_tok, 3D]
+      nemotron_gemm_bf16(d_normed1, qk, d_qkv,
+                         static_cast<int>(T_tok), 3 * D, D, stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 3. Split qkv → d_q, d_k, d_v (device-to-device strided copies).
+      {
+        const size_t row_bytes = static_cast<size_t>(D) * 2;
+        cudaMemcpy2D(d_q, row_bytes, d_qkv, 3 * row_bytes, row_bytes,
+                     T_tok, cudaMemcpyDeviceToDevice);
+        cudaMemcpy2D(d_k, row_bytes, d_qkv + D, 3 * row_bytes, row_bytes,
+                     T_tok, cudaMemcpyDeviceToDevice);
+        cudaMemcpy2D(d_v, row_bytes, d_qkv + 2 * D, 3 * row_bytes, row_bytes,
+                     T_tok, cudaMemcpyDeviceToDevice);
+        DGPP_CUDA_OK(cudaGetLastError());
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+      }
+
+      // 4. per-head LayerNorm(q) → d_q, per-head LayerNorm(k) → d_k.
+      {
+        dim3 block(std::min(1024, hd));
+        dim3 grid(static_cast<int>(T_tok), Hd);
+        size_t smem = 2 * static_cast<size_t>(block.x) * sizeof(float);
+        nemotron_perc_layernorm_per_head(qnw, qnb, d_q, d_q,
+                                         static_cast<int>(T_tok), Hd, hd, eps, stream_);
+        nemotron_perc_layernorm_per_head(knw, knb, d_k, d_k,
+                                         static_cast<int>(T_tok), Hd, hd, eps, stream_);
+        DGPP_CUDA_OK(cudaGetLastError());
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+      }
+
+      // 5. Half RoPE on q and k (in-place).
+      {
+        dim3 block(std::min(1024, d_rot / 2));
+        dim3 grid(static_cast<int>(T_tok), Hd);
+        nemotron_perc_rope_half(d_q, static_cast<int>(T_tok), Hd, hd, d_rot,
+                                pc.enc_rope_base, stream_);
+        nemotron_perc_rope_half(d_k, static_cast<int>(T_tok), Hd, hd, d_rot,
+                                pc.enc_rope_base, stream_);
+        DGPP_CUDA_OK(cudaGetLastError());
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+      }
+
+      // 6. Bidirectional attention(q, k, v) → d_attn_out.
+      {
+        dim3 block(std::min(1024, hd));
+        dim3 grid(static_cast<int>(T_tok), Hd);
+        size_t smem = (static_cast<size_t>(T_tok) + block.x) * sizeof(float);
+        nemotron_perc_attention_bidirectional(d_q, d_k, d_v, d_attn_out,
+                                              static_cast<int>(T_tok), Hd, hd, scale, stream_);
+        DGPP_CUDA_OK(cudaGetLastError());
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+      }
+
+      // 7. gemv(attn_out, W_o) → d_ffn_out [T_tok, D].
+      nemotron_gemm_bf16(d_attn_out, wo, d_ffn_out,
+                         static_cast<int>(T_tok), D, D, stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 8. residual: x = x + attn_proj.
+      nemotron_residual_add(d_x, d_x, d_ffn_out,
+                            static_cast<int>(T_tok * D), stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 9. layernorm2(x) → d_normed1.
+      nemotron_rmsnorm(n2w, d_x, d_normed1, static_cast<int>(T_tok), D, eps, stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 10. gemv(normed2, W_f1) → d_ffn_hidden [T_tok, F].
+      nemotron_gemm_bf16(d_normed1, f1, d_ffn_hidden,
+                         static_cast<int>(T_tok), F, D, stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 11. GELU in-place on d_ffn_hidden.
+      nemotron_perc_gelu(d_ffn_hidden, d_ffn_hidden,
+                         static_cast<int>(T_tok * F), stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 12. gemv(ffn_hidden, W_f2) → d_ffn_out [T_tok, D].
+      nemotron_gemm_bf16(d_ffn_hidden, f2, d_ffn_out,
+                         static_cast<int>(T_tok), D, F, stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      // 13. residual: x = x + ffn_out.
+      nemotron_residual_add(d_x, d_x, d_ffn_out,
+                            static_cast<int>(T_tok * D), stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+    }
+
+    // 3f. final_norm → d_x (in-place).
+    {
+      const auto& fw = w.at("perception.encoder.asr_encoder.final_norm.weight");
+      const auto& fb = w.at("perception.encoder.asr_encoder.final_norm.bias");
+      uint16_t* dfw = track(upload_bf16(fw));
+      uint16_t* dfb = track(upload_bf16(fb));
+      nemotron_rmsnorm(dfw, d_x, d_x, static_cast<int>(T_tok), D, eps, stream_);
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+    }
+
+    // 3g. Download encoder states [T_tok, D] bf16 → fp32 for fuse_and_connect.
+    {
+      std::vector<uint16_t> states_bf16(T_tok * D);
+      DGPP_CUDA_OK(cudaMemcpyAsync(states_bf16.data(), d_x, states_bf16.size() * 2,
+                                   cudaMemcpyDeviceToHost, stream_));
+      DGPP_CUDA_OK(cudaGetLastError());
+      DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+      std::vector<float> states(T_tok * D);
+      for (size_t i = 0; i < states.size(); ++i)
+        states[i] = bf16_bits_to_float(states_bf16[i]);
+
+      // 3h. Diar activity (CPU, from mel).
+      std::vector<float> activity;
+      nemotron_perc::diar_activity(pc, w, mel.data(), T, activity);
+
+      // 3i. Fuse and connect → rows [T_tok, H] fp32.
+      std::vector<float> rows;
+      nemotron_perc::fuse_and_connect(pc, w, states.data(), activity.data(),
+                                      T_tok, rows);
+
+      // 3j. Convert rows to bf16 and append.
+      for (size_t r = 0; r < T_tok; ++r) {
+        for (int c = 0; c < H; ++c)
+          all_audio_embeds.push_back(float_to_bf16_bits(rows[r * H + c]));
+      }
+      fflush(stderr);
+    }
+    // Resize per-request audio span storage.
+    if (static_cast<size_t>(req) >= audio_spans_.size())
+      audio_spans_.resize(req + 1);
     audio_spans_[static_cast<size_t>(req)] = AudioSpan{
         .prompt_offset = au.offset,
         .embed_offset = embed_row,
@@ -563,20 +801,27 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
     total_rows += T_tok;
   }
 
-  // --- 3. Upload audio embeddings to device ---
-  const size_t needed_bytes = total_rows * static_cast<size_t>(H) * 2;
-  if (needed_bytes > audio_capacity_ * static_cast<size_t>(H) * 2) {
-    if (d_audio_embeds_) cudaFree(d_audio_embeds_);
-    DGPP_CUDA_OK(cudaMalloc(&d_audio_embeds_, needed_bytes));
-    audio_capacity_ = total_rows;
-  }
-  if (!all_audio_embeds.empty()) {
-    DGPP_CUDA_OK(cudaMemcpy(d_audio_embeds_, all_audio_embeds.data(),
-                            all_audio_embeds.size() * 2, cudaMemcpyHostToDevice));
-    DGPP_CUDA_OK(cudaGetLastError());
+  // --- 4. Upload audio embeddings to device ---
+  {
+    fflush(stderr);
+    const size_t needed_bytes = total_rows * static_cast<size_t>(H) * 2;
+    if (needed_bytes > audio_capacity_ * static_cast<size_t>(H) * 2) {
+      if (d_audio_embeds_) cudaFree(d_audio_embeds_);
+      DGPP_CUDA_OK(cudaMalloc(&d_audio_embeds_, needed_bytes));
+      audio_capacity_ = total_rows;
+    }
+    if (!all_audio_embeds.empty()) {
+      DGPP_CUDA_OK(cudaMemcpy(d_audio_embeds_, all_audio_embeds.data(),
+                              all_audio_embeds.size() * 2, cudaMemcpyHostToDevice));
+      DGPP_CUDA_OK(cudaGetLastError());
+    }
   }
 
-  // --- 4. Run the model forward pass (prompt already has placeholder ids) ---
+  // Free temporary device buffers.
+  for (auto* p : d_allocs)
+    if (p) cudaFree(p);
+
+  // --- 5. Run the model forward pass (prompt already has placeholder ids) ---
   // Open the session so the scheduler's decode path finds an active slot.
   open_slot(req);
   RowRun run;
@@ -594,7 +839,7 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
   session_pos_[static_cast<size_t>(req)] = static_cast<int64_t>(prompt.size());
   push_position(req);
 
-  // --- 5. Clear audio span for this request (one-shot) ---
+  // --- 6. Clear audio span for this request (one-shot) ---
   audio_spans_[static_cast<size_t>(req)] = AudioSpan{-1, 0, 0};
 
   return out;
