@@ -241,9 +241,9 @@ void NemotronLoaderFamily::Builder::build_layer(int layer) {
       out.mamba_conv_weight = load_bf16(p + "conv1d.weight");
       if (cfg.lm.use_conv_bias)
         out.mamba_conv_bias = load_bf16(p + "conv1d.bias");
-      out.mamba_A_log = load_bf16_as_f32(p + "_fp32_params.A_log");
-      out.mamba_D = load_bf16_as_f32(p + "_fp32_params.D");
-      out.mamba_dt_bias = load_bf16_as_f32(p + "_fp32_params.dt_bias");
+      out.mamba_A_log = load_f32(p + "_fp32_params.A_log");
+      out.mamba_D = load_f32(p + "_fp32_params.D");
+      out.mamba_dt_bias = load_f32(p + "_fp32_params.dt_bias");
       out.mamba_norm = load_bf16(p + "norm.weight");
       out.mamba_out_proj = load_bf16(p + "out_proj.weight");
       break;
@@ -257,7 +257,7 @@ void NemotronLoaderFamily::Builder::build_layer(int layer) {
     }
     case NemotronSlot::Moe: {
       out.moe_gate = load_bf16(p + "gate.weight");
-      out.moe_gate_bias = load_bf16_as_f32(p + "gate.e_score_correction_bias");
+      out.moe_gate_bias = load_f32(p + "gate.e_score_correction_bias");
       out.moe_experts_gate_and_up = load_bf16(p + "experts.gate_and_up_projs");
       out.moe_experts_down = load_bf16(p + "experts.down_projs");
       out.moe_shared_up = load_bf16(p + "shared_experts.up_proj.weight");

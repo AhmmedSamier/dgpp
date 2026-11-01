@@ -957,13 +957,20 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
 };
 
 // The world-1 pick: full-vocab argmax over the fp32 logits row. The closure
-// keeps the decode path allocation-free.
+// keeps the decode path allocation-free. prefill yields all T rows (last row
+// predicts the next token), decode yields 1 row — address the final row in
+// both cases.
 inline DecodePick make_w1_pick(int64_t vocab) {
   return [vocab](const DecodeOutputs& out) -> int32_t {
+    const int rows =
+        static_cast<int>(out.logits.size()) / static_cast<int>(out.lm_vocab_count);
+    const float* last_row =
+        out.logits.data() +
+        static_cast<size_t>(rows - 1) * static_cast<size_t>(out.lm_vocab_count);
     const int32_t t =
-        sample::local_max(out.logits.data(),
-                              static_cast<int>(out.lm_vocab_count),
-                              /*vocab_begin=*/0)
+        sample::local_max(last_row,
+                          static_cast<int>(out.lm_vocab_count),
+                          /*vocab_begin=*/0)
             .id;
     if (t < 0 || t >= vocab)
       throw std::runtime_error("w1 pick out of range: " + std::to_string(t));

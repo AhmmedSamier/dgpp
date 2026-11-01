@@ -4,12 +4,14 @@
 #include "models/nemotron_transcribe/model.hpp"
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <format>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "common/cuda_check.hpp"
 #include "common/log.hpp"
@@ -317,32 +319,47 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
       nemotron_gemm_bf16(x_, r.mamba_in_proj, xbc_, T, mg.in_proj_rows, hidden_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
       DGPP_CUDA_OK(cudaDeviceSynchronize());
-      // Split xbc_: x [0:d_inner], z [d_inner:2d_inner], B [2d_inner:2d_inner+bc/2],
-      // C [2d_inner+bc/2:2d_inner+bc], dt [2d_inner+bc:...].
-      const int64_t x_off = 0;
-      const int64_t z_off = d_inner;
+      // Split xbc_: z [0:d_inner] (gate), x_B_C [d_inner : d_inner+conv_channels]
+      // with x [d_inner : 2*d_inner), B [2*d_inner : 2*d_inner+bc/2),
+      // C [2*d_inner+bc/2 : 2*d_inner+bc), dt [2*d_inner+bc : ...].
+      // (HF: gate, hidden_states_B_C, dt = in_proj(h).split([d_inner, conv_dim, nheads]))
+      const int64_t z_off = 0;
+      const int64_t x_off = d_inner;
       const int64_t b_off = 2 * d_inner;
       const int64_t c_off = 2 * d_inner + bc_channels / 2;
       const int64_t dt_off = 2 * d_inner + bc_channels;
 
-      // conv_silu over x, B, C.
-      nemotron_mamba_conv_silu(xbc_ + x_off, mg.in_proj_rows, r.mamba_conv_weight,
-                               r.mamba_conv_bias, x_conv_, d_inner, T, d_inner,
-                               mamba_conv_kernel_, stream_);
-      DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
-      nemotron_mamba_conv_silu(xbc_ + b_off, mg.in_proj_rows,
-                               r.mamba_conv_weight + d_inner * mamba_conv_kernel_,
-                               r.mamba_conv_bias + d_inner, b_conv_, bc_channels / 2, T,
-                               bc_channels / 2, mamba_conv_kernel_, stream_);
-      DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
-      nemotron_mamba_conv_silu(xbc_ + c_off, mg.in_proj_rows,
-                               r.mamba_conv_weight + (d_inner + bc_channels / 2) * mamba_conv_kernel_,
-                               r.mamba_conv_bias + d_inner + bc_channels / 2, c_conv_, bc_channels / 2,
-                               T, bc_channels / 2, mamba_conv_kernel_, stream_);
-      DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
+      // conv state for this request/slot: [conv_dim][hist] uint16, hist = kernel-1,
+      // laid out as [x region][B region][C region] within each time step.
+      const int hist = mamba_conv_kernel_ - 1;
+      uint16_t* conv_state = pool_.conv(0, mamba_slot_idx);
+      for (int t = 0; t < T; ++t) {
+        const uint16_t* xrow = xbc_ + static_cast<size_t>(t) * static_cast<size_t>(mg.in_proj_rows);
+        uint16_t* xout = x_conv_ + static_cast<size_t>(t) * static_cast<size_t>(d_inner);
+        uint16_t* bout = b_conv_ + static_cast<size_t>(t) * static_cast<size_t>(bc_channels / 2);
+        uint16_t* cout = c_conv_ + static_cast<size_t>(t) * static_cast<size_t>(bc_channels / 2);
+        // x region conv step.
+        mamba2_conv_silu_step(xrow + x_off, conv_state,
+                              r.mamba_conv_weight, r.mamba_conv_bias,
+                              xout, d_inner, mamba_conv_kernel_, stream_);
+        DGPP_CUDA_OK(cudaGetLastError());
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        // B region conv step.
+        mamba2_conv_silu_step(xrow + b_off, conv_state + static_cast<size_t>(d_inner) * static_cast<size_t>(hist),
+                              r.mamba_conv_weight + d_inner * static_cast<size_t>(mamba_conv_kernel_),
+                              r.mamba_conv_bias + d_inner,
+                              bout, bc_channels / 2, mamba_conv_kernel_, stream_);
+        DGPP_CUDA_OK(cudaGetLastError());
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+        // C region conv step.
+        mamba2_conv_silu_step(xrow + c_off,
+                              conv_state + (static_cast<size_t>(d_inner) + bc_channels / 2) * static_cast<size_t>(hist),
+                              r.mamba_conv_weight + (d_inner + bc_channels / 2) * static_cast<size_t>(mamba_conv_kernel_),
+                              r.mamba_conv_bias + d_inner + bc_channels / 2,
+                              cout, bc_channels / 2, mamba_conv_kernel_, stream_);
+        DGPP_CUDA_OK(cudaGetLastError());
+        DGPP_CUDA_OK(cudaDeviceSynchronize());
+      }
 
       // Get the recurrent state for this mamba slot from the pool.
       float* state = pool_.recurrent(0, mamba_slot_idx);
@@ -356,14 +373,9 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
                           static_cast<float>(lm.time_step_min), stream_);
       DGPP_CUDA_OK(cudaGetLastError());
       DGPP_CUDA_OK(cudaDeviceSynchronize());
-
-      // gate = silu(z).
-      nemotron_silu(xbc_ + z_off, mamba_normed_, T * d_inner, stream_);
-      DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
-
-      // gated norm: mamba_out_ [T,d_inner] gated by mamba_normed_ [T,d_inner] (silu(z)).
-      nemotron_mamba_gated_norm(mamba_out_, d_inner, mamba_normed_, d_inner, r.mamba_norm,
+      // gate = z (raw); the gated-norm kernel applies silu itself (HF
+      // RMSNormGated: h = silu(z) * x, then group RMS).
+      nemotron_mamba_gated_norm(mamba_out_, d_inner, xbc_ + z_off, mg.in_proj_rows, r.mamba_norm,
                                 mamba_normed_, d_inner, T, d_inner, mg.d_inner / (mamba_groups_state_ / mamba_state_size_),
                                 eps, stream_);
       DGPP_CUDA_OK(cudaGetLastError());

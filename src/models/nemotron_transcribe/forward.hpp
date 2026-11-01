@@ -50,6 +50,11 @@ void nemotron_head(const uint16_t* resid, const uint16_t* norm_w, const uint16_t
 void nemotron_mamba_conv_silu(const uint16_t* u, int64_t u_stride, const uint16_t* weight,
                               const uint16_t* bias, uint16_t* out, int64_t out_stride,
                               int seq, int channels, int kernel, cudaStream_t stream);
+// Single-row conv step with persistent conv state (used for decode steps).
+//   state: [channels][kernel-1] uint16 history, updated in place.
+void mamba2_conv_silu_step(const void* u_row, void* state, const void* weight,
+                           const void* bias, void* out_row, int channels, int kernel,
+                           cudaStream_t stream);
 void nemotron_mamba_scan(const uint16_t* x, int64_t x_stride, const uint16_t* B, int64_t B_stride,
                          const uint16_t* C, int64_t C_stride, const uint16_t* dt, int64_t dt_stride,
                          const float* A_log, const float* D, const float* dt_bias,

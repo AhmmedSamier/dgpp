@@ -119,9 +119,16 @@ inline DecodePick make_fabric_pick(net::CollectiveBus* bus,
                                                int pick_timeout_ms = 60000) {
   return [bus, rank, world, pick_scratch, vocab, pick_timeout_ms](
              const DecodeOutputs& out) -> int32_t {
+    // The prefill's next token is predicted from the LAST prompt position.
+    // out.logits is fp32 [rows, lm_vocab_count]; decode yields 1 row, prefill
+    // yields all T rows, so address the final row explicitly.
+    const int rows =
+        static_cast<int>(out.logits.size()) / static_cast<int>(out.lm_vocab_count);
+    const float* last_row =
+        out.logits.data() +
+        static_cast<size_t>(rows - 1) * static_cast<size_t>(out.lm_vocab_count);
     const sample::Candidate local = sample::local_max(
-        out.logits.data(), static_cast<int>(out.lm_vocab_count),
-        out.lm_vocab_begin);
+        last_row, static_cast<int>(out.lm_vocab_count), out.lm_vocab_begin);
     const int32_t t = bus_greedy_pick(*bus, rank, world, local,
                                       pick_scratch, pick_timeout_ms);
     if (t < 0 || t >= vocab)

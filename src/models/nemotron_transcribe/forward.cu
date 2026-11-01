@@ -47,18 +47,21 @@ __global__ void nemotron_rmsnorm_kernel(const uint16_t* w, const uint16_t* x, ui
     float v = bf16_bits_to_float(x_row[i]);
     ss += v * v;
   }
-  __shared__ float sdata[1024];
-  float v = ss;
-  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1)
-    v += __shfl_down_sync(0xFFFFFFFF, v, stride);
-  if (threadIdx.x == 0) sdata[0] = v;
+  // Block-wide sum reduction in shared memory (warp shfl alone cannot reduce
+  // across warps when blockDim.x > 32).
+  extern __shared__ float sdata[];
+  sdata[threadIdx.x] = ss;
   __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) sdata[threadIdx.x] += sdata[threadIdx.x + stride];
+    __syncthreads();
+  }
   if (threadIdx.x == 0) {
     float mean = sdata[0] / static_cast<float>(H);
-    sdata[1] = 1.0f / sqrtf(mean + eps);
+    sdata[0] = 1.0f / sqrtf(mean + eps);
   }
   __syncthreads();
-  float rstd = sdata[1];
+  float rstd = sdata[0];
   for (int i = threadIdx.x; i < H; i += blockDim.x) {
     float xv = bf16_bits_to_float(x_row[i]);
     float wv = bf16_bits_to_float(w[i]);
@@ -187,14 +190,15 @@ __global__ void nemotron_moe_kernel(const uint16_t* x, const uint16_t* gate,
   uint16_t* out_row = out + static_cast<size_t>(t) * static_cast<size_t>(H);
 
   extern __shared__ float smem[];
-  float* gate_logits = smem;                      // [E]
-  float* scores = smem + E;                       // [E]
-  int* topk_idx = reinterpret_cast<int*>(scores + E);  // [topk]
-  float* topk_val = reinterpret_cast<float*>(topk_idx + topk);  // [topk]
-  bool* taken = reinterpret_cast<bool*>(topk_val + topk);  // [E]
-  float* routed = reinterpret_cast<float*>(taken + E);  // [H]
-  float* up = routed + H;                         // [I]
-  float* shared_up_out = up + I;                  // [SI]
+  char* ptr = reinterpret_cast<char*>(smem);
+  float* gate_logits = reinterpret_cast<float*>(ptr); ptr += E * sizeof(float);                      // [E]
+  float* scores = reinterpret_cast<float*>(ptr); ptr += E * sizeof(float);                           // [E]
+  int* topk_idx = reinterpret_cast<int*>(ptr); ptr += topk * sizeof(int);                            // [topk]
+  float* topk_val = reinterpret_cast<float*>(ptr); ptr += topk * sizeof(float);                      // [topk]
+  bool* taken = reinterpret_cast<bool*>(ptr); ptr += E * sizeof(bool);                               // [E]
+  float* routed = reinterpret_cast<float*>(ptr); ptr += H * sizeof(float);                           // [H]
+  float* up = reinterpret_cast<float*>(ptr); ptr += I * sizeof(float);                               // [I]
+  float* shared_up_out = reinterpret_cast<float*>(ptr); ptr += SI * sizeof(float);                   // [SI]
 
   // Router logits: [E] = x @ gate^T
   for (int e = tid; e < E; e += blockDim.x) {
@@ -204,27 +208,34 @@ __global__ void nemotron_moe_kernel(const uint16_t* x, const uint16_t* gate,
              bf16_bits_to_float(gate[static_cast<size_t>(e) * static_cast<size_t>(H) +
                                      static_cast<size_t>(h)]);
     }
-    gate_logits[e] = acc + gate_bias[e];
+    gate_logits[e] = acc;
   }
   __syncthreads();
 
-  // Scores = sigmoid(logits)
+  // Scores = sigmoid(logits). The selection ranking adds the correction
+  // bias, but the gathered mixture weight is the raw sigmoid score (HF
+  // NemotronHTopkRouter: scores_for_choice = scores + bias, weights =
+  // scores.gather).
   for (int e = tid; e < E; e += blockDim.x) {
     scores[e] = dev_sigmoid(gate_logits[e]);
   }
   __syncthreads();
 
-  // Top-k selection (serial on thread 0, E=128 is small).
+  // Top-k selection (serial on thread 0, E=128 is small). n_group == 1
+  // for this model, so the grouped routing is a plain biased top-k.
   if (tid == 0) {
     for (int e = 0; e < E; ++e) taken[e] = false;
     for (int k = 0; k < topk; ++k) {
       int best_e = -1;
       float best_v = -1e30f;
       for (int e = 0; e < E; ++e) {
-        if (!taken[e] && scores[e] > best_v) { best_v = scores[e]; best_e = e; }
+        if (!taken[e] && scores[e] + gate_bias[e] > best_v) {
+          best_v = scores[e] + gate_bias[e];
+          best_e = e;
+        }
       }
       topk_idx[k] = best_e;
-      topk_val[k] = best_v;
+      topk_val[k] = scores[best_e];  // the weight is the raw sigmoid score
       taken[best_e] = true;
     }
     if (norm_topk) {
@@ -263,8 +274,8 @@ __global__ void nemotron_moe_kernel(const uint16_t* x, const uint16_t* gate,
       for (int i = 0; i < I; ++i) {
         acc += up[i] *
                bf16_bits_to_float(down[((static_cast<size_t>(e) * static_cast<size_t>(I) +
-                                        static_cast<size_t>(i)) * static_cast<size_t>(H) +
-                                        static_cast<size_t>(h))]);
+                                         static_cast<size_t>(i)) * static_cast<size_t>(H) +
+                                         static_cast<size_t>(h))]);
       }
       routed[h] += w * acc;
     }
@@ -299,7 +310,6 @@ __global__ void nemotron_moe_kernel(const uint16_t* x, const uint16_t* gate,
     out_row[h] = float_to_bf16_bits(routed[h]);
   }
 }
-
 // ---------------------------------------------------------------------------
 // norm_f: RMSNorm per row, in place.
 // ---------------------------------------------------------------------------
@@ -403,7 +413,8 @@ void nemotron_embed(const uint16_t* embed, const int64_t* tokens, uint16_t* out,
 void nemotron_rmsnorm(const uint16_t* w, const uint16_t* x, uint16_t* out, int T, int H, float eps,
                       cudaStream_t stream) {
   const int block = min(1024, (H + 31) / 32 * 32);
-  nemotron_rmsnorm_kernel<<<T, block, 0, stream>>>(w, x, out, T, H, eps);
+  const size_t smem = static_cast<size_t>(block) * sizeof(float);
+  nemotron_rmsnorm_kernel<<<T, block, smem, stream>>>(w, x, out, T, H, eps);
   DGPP_CUDA_OK(cudaGetLastError());
 }
 
@@ -437,11 +448,20 @@ void nemotron_moe(const uint16_t* x, const uint16_t* gate, const float* gate_bia
                   const uint16_t* shared_up, const uint16_t* shared_down, uint16_t* out, int T,
                   int H, int E, int I, int SI, int topk, float scale, bool norm_topk,
                   cudaStream_t stream) {
-  const size_t smem_floats = static_cast<size_t>(E) * 2 + static_cast<size_t>(topk) * 2 +
-                             static_cast<size_t>(E) + static_cast<size_t>(H) +
-                             static_cast<size_t>(I) + static_cast<size_t>(SI);
-  const size_t smem_bytes = smem_floats * sizeof(float);
-  const int block = min(128, H > I ? H : I);
+  // Shared memory layout (byte offsets, all 4-byte aligned):
+  //   gate_logits [E floats], scores [E floats], topk_idx [topk ints],
+  //   topk_val [topk floats], taken [E bools], routed [H floats],
+  //   up [I floats], shared_up_out [SI floats].
+  const size_t smem_bytes =
+      E * sizeof(float) +           // gate_logits
+      E * sizeof(float) +           // scores
+      topk * sizeof(int) +          // topk_idx
+      topk * sizeof(float) +        // topk_val
+      E * sizeof(bool) +            // taken
+      H * sizeof(float) +           // routed
+      I * sizeof(float) +           // up
+      SI * sizeof(float);           // shared_up_out
+  const int block = min(256, H > I ? H : I);
   nemotron_moe_kernel<<<T, block, smem_bytes, stream>>>(
       x, gate, gate_bias, gate_and_up, down, shared_up, shared_down, out, T, H, E, I, SI,
       topk, scale, norm_topk);
