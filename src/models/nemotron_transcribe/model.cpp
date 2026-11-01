@@ -14,10 +14,13 @@
 #include <vector>
 
 #include "common/cuda_check.hpp"
+#include "common/dtypes.hpp"
 #include "common/log.hpp"
 #include "engine/boundary_reducer.hpp"
 #include "kernels/kernels.hpp"
+#include "loaders/safetensors.hpp"
 #include "models/nemotron_transcribe/forward.hpp"
+#include "models/nemotron_transcribe/perception.hpp"
 
 namespace dgpp {
 namespace {
@@ -44,7 +47,8 @@ NemotronModel::NemotronModel(const NemotronTranscribeConfig& cfg,
       max_cache_tokens_(max_cache_tokens),
       max_requests_(max_requests),
       hidden_(cfg.lm.hidden_size),
-      vocab_size_(cfg.lm.vocab_size) {
+      vocab_size_(cfg.lm.vocab_size),
+      checkpoint_dir_(checkpoint_dir) {
   // Capture the primary CUDA context on the construction (main) thread so
   // run_rows() — which the engine thread executes — can switch back to it.
   // cudaSetDevice(0) alone does not migrate to the primary context when a
@@ -132,6 +136,7 @@ NemotronModel::NemotronModel(const NemotronTranscribeConfig& cfg,
 
 NemotronModel::~NemotronModel() {
   free_activations();
+  if (d_audio_embeds_) cudaFree(d_audio_embeds_);
   if (stream_) cudaStreamDestroy(stream_);
 }
 
@@ -277,6 +282,26 @@ void NemotronModel::walk(const RowRun& run) {
   nemotron_embed(globals_.embed, d_tokens_, resid_, T, hidden_, stream_);
   DGPP_CUDA_OK(cudaGetLastError());
   DGPP_CUDA_OK(cudaDeviceSynchronize());
+
+  // 3b. Splice audio embeddings at <|audio|> locator positions (milestone 6).
+  // Each locator was expanded to T_tok placeholder tokens (id 0) in the
+  // prompt; the recorded span tells us where to overwrite resid_ with the
+  // clip's perception rows, one row per placeholder position.
+  if (run.req >= 0 && run.req < static_cast<int>(audio_spans_.size()) &&
+      audio_spans_[static_cast<size_t>(run.req)].count > 0) {
+    const auto& span = audio_spans_[static_cast<size_t>(run.req)];
+    for (int64_t i = 0; i < span.count; ++i) {
+      DGPP_CUDA_OK(cudaMemcpy(resid_ + (static_cast<size_t>(span.prompt_offset) + i) *
+                                      static_cast<size_t>(hidden_),
+                              d_audio_embeds_ +
+                                  (static_cast<size_t>(span.embed_offset) + i) *
+                                      static_cast<size_t>(hidden_),
+                              static_cast<size_t>(hidden_) * 2,
+                              cudaMemcpyDeviceToDevice));
+    }
+    DGPP_CUDA_OK(cudaGetLastError());
+    DGPP_CUDA_OK(cudaDeviceSynchronize());
+  }
 
   // 4. Walk the slots.
   for (int slot = 0; slot < lm.num_layers; ++slot) {
@@ -471,6 +496,107 @@ SessionModel<NemotronModel>::Outputs NemotronModel::run_rows(const RowRun& run) 
                           cudaMemcpyDeviceToHost));
 
   if (primary_ctx_ != nullptr) cuCtxPopCurrent(nullptr);
+  return out;
+}
+
+SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
+    int req, const std::vector<int64_t>& prompt,
+    const std::vector<dgpp::AudioInput>& audios) {
+  if (req < 0 || req >= max_requests_)
+    throw std::invalid_argument("NemotronModel::session_prefill_audios: bad req");
+  if (audios.empty())
+    throw std::invalid_argument("NemotronModel::session_prefill_audios: no audios");
+
+  // --- 1. Build perception weights from the checkpoint (CPU side) ---
+  nemotron_ref::Weights w;
+  {
+    const std::string safetensors_path = checkpoint_dir_ + "/model.safetensors";
+    auto sf = SafetensorsFile::open(safetensors_path);
+    auto perc_keys = sf->grep("perception.");
+    for (const auto* ti : perc_keys) {
+      nemotron_ref::Tensor t;
+      if (ti->dtype == DType::BF16) {
+        t.bf16.resize(ti->numel());
+        std::memcpy(t.bf16.data(), ti->data, ti->nbytes());
+      } else if (ti->dtype == DType::F32) {
+        t.f32.resize(ti->numel());
+        std::memcpy(t.f32.data(), ti->data, ti->nbytes());
+      } else {
+        throw std::runtime_error(
+            "NemotronModel: unsupported perception tensor dtype " + ti->name);
+      }
+      w[ti->name] = std::move(t);
+    }
+  }
+
+  // --- 2. Run perception on each audio clip ---
+  const auto& pc = cfg_.perception;
+  const int H = hidden_;
+  if (pc.output_dim != H)
+    throw std::runtime_error(
+        "NemotronModel: perception output_dim != LM hidden");
+
+  std::vector<uint16_t> all_audio_embeds;  // concatenated [sum T_tok, H] bf16
+  int64_t embed_row = 0;
+
+  // Resize per-request audio span storage.
+  if (static_cast<size_t>(req) >= audio_spans_.size())
+    audio_spans_.resize(req + 1);
+
+  size_t total_rows = 0;
+  for (const auto& au : audios) {
+    auto out = nemotron_perc::perceive(pc, w, au.pcm.data(), au.pcm.size(), nullptr);
+    const size_t T_tok = out.tokens;
+    if (T_tok == 0)
+      throw std::runtime_error("NemotronModel: perception produced no tokens");
+    for (size_t r = 0; r < T_tok; ++r) {
+      for (int c = 0; c < H; ++c)
+        all_audio_embeds.push_back(
+            float_to_bf16_bits(out.rows[r * pc.output_dim + c]));
+    }
+    audio_spans_[static_cast<size_t>(req)] = AudioSpan{
+        .prompt_offset = au.offset,
+        .embed_offset = embed_row,
+        .count = static_cast<int>(T_tok),
+    };
+    embed_row += static_cast<int64_t>(T_tok);
+    total_rows += T_tok;
+  }
+
+  // --- 3. Upload audio embeddings to device ---
+  const size_t needed_bytes = total_rows * static_cast<size_t>(H) * 2;
+  if (needed_bytes > audio_capacity_ * static_cast<size_t>(H) * 2) {
+    if (d_audio_embeds_) cudaFree(d_audio_embeds_);
+    DGPP_CUDA_OK(cudaMalloc(&d_audio_embeds_, needed_bytes));
+    audio_capacity_ = total_rows;
+  }
+  if (!all_audio_embeds.empty()) {
+    DGPP_CUDA_OK(cudaMemcpy(d_audio_embeds_, all_audio_embeds.data(),
+                            all_audio_embeds.size() * 2, cudaMemcpyHostToDevice));
+    DGPP_CUDA_OK(cudaGetLastError());
+  }
+
+  // --- 4. Run the model forward pass (prompt already has placeholder ids) ---
+  // Open the session so the scheduler's decode path finds an active slot.
+  open_slot(req);
+  RowRun run;
+  run.req = req;
+  run.ids = prompt.data();
+  run.T = static_cast<int>(prompt.size());
+  run.pos0 = 0;
+  run.decode = false;
+  run.all_rows = false;
+  run.capture_layers = false;
+  run.capture = false;
+  run.first_chunk = true;
+  run.last_chunk = true;
+  Outputs out = run_rows(run);
+  session_pos_[static_cast<size_t>(req)] = static_cast<int64_t>(prompt.size());
+  push_position(req);
+
+  // --- 5. Clear audio span for this request (one-shot) ---
+  audio_spans_[static_cast<size_t>(req)] = AudioSpan{-1, 0, 0};
+
   return out;
 }
 

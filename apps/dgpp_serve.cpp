@@ -1493,14 +1493,19 @@ int serve_openai(dgpp::sched::SchedulerEngine* engine, int64_t vocab_size,
       else if (family_name == "qwen4_exp" || family_name == "qwen3_5")
         vision_frontend = std::make_unique<dgpp::serve::QwenVisionFrontend>(&tok, &*tpl, ids);
     }
-    frontend = vision_frontend ? std::move(vision_frontend)
-                               : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl, model_opens_thinking);
+    if (engine->supports_audios())
+      frontend = std::make_unique<dgpp::serve::NemotronAudioFrontend>(&tok, &*tpl);
+    else
+      frontend = vision_frontend ? std::move(vision_frontend)
+                                 : std::make_unique<dgpp::serve::TextFrontend>(&tok, &*tpl, model_opens_thinking);
     if (model_opens_thinking)
       DGPP_LOG_INFO("serve: the {} template leaves the reasoning block to the model (the family's declaration)",
                     family_name);
     if (engine->supports_images())
       DGPP_LOG_INFO("serve: image inputs enabled ({} visual tokens per image max)",
                     dgpp::kMaxImageTokens);
+    if (engine->supports_audios())
+      DGPP_LOG_INFO("serve: audio inputs enabled (Nemotron <|audio|> locator splice)");
   }
 
   dgpp::serve::ServiceConfig scfg;

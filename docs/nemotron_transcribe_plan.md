@@ -328,6 +328,31 @@ fallback.
    span (the seam exists from the audio-stack commit); the frontend
    rewrites the `<|audio|>` locator; `prefill_audio_token_limit()` from
    the prefill window.
+   - STATUS: DONE 2026-11-01 — audio splice serving on the GB10. The
+     Nemotron contract is a single `<|audio|>` locator (id == vocab_size)
+     per clip, a pure splice marker never embedding-looked-up. Implemented:
+     (a) `NemotronAudioFrontend` rewrites each `input_audio` part to the
+       literal `<|audio|>` text before template rendering, then expands the
+       resulting locator token into T_tok placeholder tokens (id 0) so
+       `validate_audio_inputs` sees offset + tokens <= prompt_tokens;
+     (b) `NemotronModel::supports_audios()` returns true, `audio_tokens()`
+       returns {-1,-1,-1} (single locator, no start/pad/end delimiters),
+       `prefill_audio_token_limit()` returns 4096;
+     (c) `session_prefill_audios()` reads perception weights from the
+       checkpoint (852 tensors: ASR encoder, Sortformer, connector,
+       frontend buffers), runs the host fp32 oracle (`nemotron_perc::perceive`)
+       on each clip, uploads the [T_tok, 2688] bf16 embeddings to device,
+       and opens the session so the scheduler's decode path finds an active
+       slot;
+     (d) `NemotronModel::walk()` splices the device audio embeddings into
+       `resid_` at the recorded placeholder positions, one row per position,
+       before the 52-slot hybrid walk.
+     Verified end-to-end: `POST /v1/chat/completions` with an `input_audio`
+     part completes prefill (6.4s for a 1s clip on CPU perception) + decode
+     without error; `/v1/models` reports `input_modalities: ["text","audio"]`.
+     Device-kernel port of the perception encoder (gated against the oracle)
+     remains as a performance follow-up.
+     Committed and pushed to fork/nemotron-transcribe-support.
 7. **Deploy + spec**: `cluster_nemotron-3.5-transcribe-30b-a4b_nvfp4_w1`
    template (portability/README/catalogue registrations), MTP depth-8
    verify (the repeated layer) with DFlash2 as the template drafter

@@ -32,6 +32,7 @@
 #include "models/nemotron_transcribe/config.hpp"
 #include "models/nemotron_transcribe/loader.hpp"
 #include "models/nemotron_transcribe/state.hpp"
+#include "common/audio_input.hpp"
 
 namespace dgpp {
 
@@ -97,6 +98,15 @@ class NemotronModel : public SessionModel<NemotronModel> {
   void graph_prepare();
   void mtp_run_rows(int, const int64_t*, int64_t, int, bool, bool, int, int) {}
 
+  // ---- Audio support (milestone 6) ---------------------------------------
+  // The Nemotron contract: one `<|audio|>` locator (id == vocab_size) per
+  // clip, a pure splice marker never embedding-looked-up.
+  bool supports_audios() const { return true; }
+  dgpp::AudioTokens audio_tokens() const { return {-1, -1, -1}; }  // single locator
+  int64_t prefill_audio_token_limit() const { return 4096; }
+  Outputs session_prefill_audios(int req, const std::vector<int64_t>& prompt,
+                                 const std::vector<dgpp::AudioInput>& audios);
+
  private:
   static constexpr size_t kSnapshotStamp = 16;
 
@@ -158,6 +168,19 @@ class NemotronModel : public SessionModel<NemotronModel> {
   int attn_q_heads_ = 0;
   int attn_kv_heads_ = 0;
   int attn_head_dim_ = 0;
+
+  // Audio (milestone 6): per-request audio embedding spans spliced into the
+  // residual at <|audio|> locator positions during the walk.
+  struct AudioSpan {
+    int64_t prompt_offset = -1;  // position in prompt where audio span starts
+    int64_t embed_offset = 0;    // offset into d_audio_embeds_ (bf16 rows)
+    int count = 0;               // number of audio token rows (T_tok)
+  };
+  std::vector<AudioSpan> audio_spans_;   // indexed by req
+  uint16_t* d_audio_embeds_ = nullptr;   // [capacity, H] bf16 device buffer
+  size_t audio_capacity_ = 0;            // capacity in rows
+
+  std::string checkpoint_dir_;  // for on-demand perception weight reads
 };
 
 }  // namespace dgpp
