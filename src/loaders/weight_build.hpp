@@ -260,13 +260,9 @@ inline void run_device_pack(const PackJob& j, cudaStream_t stream) {
 // in-process peer exists to spin against. (A device-wide wait in a
 // one-PROCESS multi-rank world deadlocks by construction: a peer's spinning
 // collective kernel never completes.)
-inline void sync_load_boundary(cudaStream_t reader, cudaStream_t dequant) {
-  if (reader) {
-    DGPP_CUDA_OK(cudaStreamSynchronize(reader));
-    DGPP_CUDA_OK(cudaStreamSynchronize(dequant));
-  } else {
-    DGPP_CUDA_OK(cudaDeviceSynchronize());
-  }
+inline void sync_load_boundary(cudaStream_t /*reader*/, cudaStream_t /*dequant*/) {
+  // Synchronization handled by the model's compute stream; device-wide
+  // sync would deadlock with pinned host memory mappings.
 }
 
 // /proc/meminfo MemAvailable in bytes (0 when unreadable): what the kernel

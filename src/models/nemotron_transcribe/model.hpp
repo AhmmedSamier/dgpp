@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 #include "core/arena.hpp"
@@ -113,6 +114,11 @@ class NemotronModel : public SessionModel<NemotronModel> {
   Arena arena_;
   NemotronMambaStatePool pool_;
   cudaStream_t stream_ = nullptr;
+  // The primary CUDA context captured on the construction (main) thread.
+  // run_rows() may be invoked from request-handling threads whose implicit
+  // context differs; this handle lets us switch back to the context under
+  // which every device pointer (weights + activations) was allocated.
+  CUcontext primary_ctx_ = nullptr;
 
   // Activations, bf16 [max_tokens, hidden] unless noted.
   uint16_t* resid_ = nullptr;   // [M, H] the residual

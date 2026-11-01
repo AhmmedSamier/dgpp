@@ -1308,7 +1308,7 @@ struct NemotronTranscribeFamily final : ServeFamily {
                    int forward_rows, int64_t pool_tokens, int slots, bool /*mtp*/,
                    int decode_rows) override {
     model = std::make_unique<dgpp::NemotronModel>(
-        cfg, ckpt, forward_rows, pool_tokens, dgpp::NemotronResidency::Streaming,
+        cfg, ckpt, forward_rows, pool_tokens, dgpp::NemotronResidency::Resident,
         reducer, rank, world, slots, false, decode_rows);
   }
   void destroy_model() override { model.reset(); }

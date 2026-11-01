@@ -139,6 +139,17 @@ bool checked_subtract(int64_t a, int64_t b, int64_t* result) {
   return true;
 }
 
+bool checked_mul(int64_t a, int64_t b, int64_t* result) {
+  if (a == 0 || b == 0) { *result = 0; return true; }
+  if (a == std::numeric_limits<int64_t>::min() || b == std::numeric_limits<int64_t>::min())
+    return false;
+  int64_t abs_a = a < 0 ? -a : a;
+  int64_t abs_b = b < 0 ? -b : b;
+  if (abs_a > std::numeric_limits<int64_t>::max() / abs_b) return false;
+  *result = a * b;
+  return true;
+}
+
 size_t utf8_length(std::string_view s) {
   size_t n = 0;
   for (size_t i = 0; i < s.size();) {
@@ -412,12 +423,17 @@ std::vector<ETok> lex_expr(std::string_view s, size_t line) {
     const bool two_char =
         (c == '=' || c == '!' || c == '<' || c == '>') && i + 1 < s.size() &&
         s[i + 1] == '=';
+    if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') {
+      out.push_back({ETok::T::Sym, "//", 0});
+      i += 2;
+      continue;
+    }
     if (two_char) {
       out.push_back(ETok{ETok::T::Sym, std::string(s.substr(i, 2)), 0});
       i += 2;
       continue;
     }
-    if (std::strchr("()[],.+-~|<>=:", c)) {
+    if (std::strchr("()[],.+-~|<>=:*%/", c)) {
       out.push_back({ETok::T::Sym, std::string(1, c), 0});
       ++i;
       continue;
@@ -578,11 +594,28 @@ class ExprParser {
   }
 
   ExprPtr concat() {
-    ExprPtr a = add();
+    ExprPtr a = mul();
     while (accept_sym("~")) {
-      ExprPtr b = add();
+      ExprPtr b = mul();
       ExprPtr e = make(Expr::Tag::Binary);
       e->name = "~";
+      e->kids.push_back(std::move(a));
+      e->kids.push_back(std::move(b));
+      a = std::move(e);
+    }
+    return a;
+  }
+
+  ExprPtr mul() {
+    ExprPtr a = add();
+    while (peek().t == ETok::T::Sym &&
+           (peek().s == "*" || peek().s == "/" || peek().s == "//" ||
+            peek().s == "%")) {
+      const std::string op = peek().s;
+      ++pos_;
+      ExprPtr b = add();
+      ExprPtr e = make(Expr::Tag::Binary);
+      e->name = op;
       e->kids.push_back(std::move(a));
       e->kids.push_back(std::move(b));
       a = std::move(e);
@@ -617,7 +650,8 @@ class ExprParser {
       if (e->name != "capitalize" && e->name != "tojson" &&
           e->name != "replace" && e->name != "length" && e->name != "trim" &&
           e->name != "default" && e->name != "string" && e->name != "safe" &&
-          e->name != "items")
+          e->name != "items" && e->name != "selectattr" && e->name != "map" &&
+          e->name != "join" && e->name != "list")
         fail(line_, "unsupported filter '" + e->name + "'");
       a = std::move(e);
     }
@@ -1308,11 +1342,12 @@ Value Value::get_attr(std::string_view name) const {
       return Value();
     case Kind::String:
       if (name == "split" || name == "strip" || name == "startswith" ||
-          name == "endswith" || name == "rstrip" || name == "lstrip") {
+          name == "endswith" || name == "rstrip" || name == "lstrip" ||
+          name == "count") {
         Value v;
         v.kind_ = Kind::Method;
         v.method_ = name == "split" ? 2 : name == "strip" ? 3 : name == "startswith" ? 4
-                    : name == "endswith" ? 5 : name == "rstrip" ? 6 : 7;
+                    : name == "endswith" ? 5 : name == "rstrip" ? 6 : name == "lstrip" ? 7 : 8;
         return v;
       }
       return Value();
@@ -1522,6 +1557,21 @@ struct Renderer {
       return Value::boolean(method == 4 ? s.compare(0, p.size(), p) == 0
                                         : s.compare(s.size() - p.size(), p.size(), p) == 0);
     }
+    if (method == 8) {  // count(sub)
+      if (recv.kind() != Value::Kind::String)
+        fail(ctx_.line, "'count' called on a non-string");
+      if (args.size() != 1 || args[0].kind() != Value::Kind::String)
+        fail(ctx_.line, "count() takes one string argument");
+      const std::string& s = recv.as_string();
+      const std::string& sub = args[0].as_string();
+      int64_t cnt = 0;
+      size_t pos = 0;
+      while ((pos = s.find(sub, pos)) != std::string::npos) {
+        ++cnt;
+        pos += sub.size();
+      }
+      return Value::integer(cnt);
+    }
     // strip() / rstrip() / lstrip() — Python's, over ' \t\n\r\x0b\x0c'
     // without an argument, over the argument's characters with one (the
     // GLM-4.7 template's rstrip('\n') / lstrip('\n'), 2026-09-10).
@@ -1656,6 +1706,69 @@ struct Renderer {
         pair.push_back(Value::string_value(m.first));
         pair.push_back(m.second);
         out.push_back(Value::list_value(std::move(pair)));
+      }
+      return Value::list_value(std::move(out));
+    }
+    if (name == "list") {
+      if (v.kind() == Value::Kind::List) return v;
+      return Value::list_value({v});
+    }
+    if (name == "join") {
+      if (v.kind() != Value::Kind::List) fail(ctx_.line, "join: not a list");
+      if (args.size() != 1 || args[0].kind() != Value::Kind::String)
+        fail(ctx_.line, "join: needs one string separator");
+      const std::string& sep = args[0].as_string();
+      std::string out;
+      const auto& items = v.as_list();
+      for (size_t i = 0; i < items.size(); ++i) {
+        if (i) out += sep;
+        out += items[i].to_output_string();
+      }
+      return Value::string_value(std::move(out));
+    }
+    if (name == "selectattr") {
+      if (v.kind() != Value::Kind::List) fail(ctx_.line, "selectattr: not a list");
+      if (args.size() != 3 || args[0].kind() != Value::Kind::String ||
+          args[1].kind() != Value::Kind::String)
+        fail(ctx_.line,
+             "selectattr(attr, test, value): needs attr string, test string, value");
+      const std::string& attr = args[0].as_string();
+      const std::string& test = args[1].as_string();
+      const Value& test_value = args[2];
+      if (test != "in") fail(ctx_.line, "selectattr: only the 'in' test is implemented");
+      if (test_value.kind() != Value::Kind::List)
+        fail(ctx_.line, "selectattr: the 'in' test needs a list value");
+      std::vector<Value> out;
+      const auto& items = v.as_list();
+      for (const auto& item : items) {
+        Value attr_val = item.get_attr(attr);
+        if (!attr_val.is_defined()) continue;
+        bool match = false;
+        for (const auto& tv : test_value.as_list()) {
+          if (attr_val.equals(tv)) { match = true; break; }
+        }
+        if (match) out.push_back(item);
+      }
+      return Value::list_value(std::move(out));
+    }
+    if (name == "map") {
+      if (v.kind() != Value::Kind::List) fail(ctx_.line, "map: not a list");
+      std::string attribute;
+      for (const auto& [k, val] : e.kwargs) {
+        if (k == "attribute") {
+          Value av = eval(*val);
+          if (av.kind() != Value::Kind::String)
+            fail(ctx_.line, "map: attribute must be a string constant");
+          attribute = av.as_string();
+        } else {
+          fail(ctx_.line, "map: unknown keyword argument '" + k + "'");
+        }
+      }
+      if (attribute.empty()) fail(ctx_.line, "map: needs attribute=...");
+      std::vector<Value> out;
+      out.reserve(v.as_list().size());
+      for (const auto& item : v.as_list()) {
+        out.push_back(item.get_attr(attribute));
       }
       return Value::list_value(std::move(out));
     }
@@ -1850,6 +1963,30 @@ struct Renderer {
           const double x = a.as_double(0);
           const double y = b.as_double(0);
           return Value::number(x - y);
+        }
+        if (e.name == "*") {
+          if (a.kind() == Value::Kind::Int && b.kind() == Value::Kind::Int) {
+            int64_t result;
+            if (!checked_mul(a.as_int(), b.as_int(), &result))
+              fail(ctx_.line, "integer multiplication overflow");
+            return Value::integer(result);
+          }
+          const double x = a.as_double(0);
+          const double y = b.as_double(0);
+          return Value::number(x * y);
+        }
+        if (e.name == "/" || e.name == "//") {
+          const double x = a.as_double(0);
+          const double y = b.as_double(0);
+          if (y == 0) fail(ctx_.line, "division by zero");
+          if (e.name == "//") return Value::integer((int64_t)(x / y));
+          return Value::number(x / y);
+        }
+        if (e.name == "%") {
+          if (a.kind() != Value::Kind::Int || b.kind() != Value::Kind::Int)
+            fail(ctx_.line, "%' requires integers");
+          if (b.as_int() == 0) fail(ctx_.line, "division by zero");
+          return Value::integer(a.as_int() % b.as_int());
         }
         fail(ctx_.line, "unsupported operator '" + e.name + "'");
       }

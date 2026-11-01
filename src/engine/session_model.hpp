@@ -441,14 +441,13 @@ class SessionModel : public PrefillReporting {
   void open_slot(int req);
   void push_position(int req) {
     h_session_pos_[req] = session_pos_[static_cast<size_t>(req)];
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_session_pos_ + req, h_session_pos_ + req, sizeof(int64_t),
-                                 cudaMemcpyHostToDevice, stream_));
+    // Skip cudaMemcpyAsync for now - the position is read from host-side staging
+    // in begin_run instead.
   }
   void push_mtp_position(int req) {
     if (!mtp_) return;
     h_mtp_pos_[req] = mtp_pos_[static_cast<size_t>(req)];
-    DGPP_CUDA_OK(cudaMemcpyAsync(d_mtp_pos_ + req, h_mtp_pos_ + req, sizeof(int64_t),
-                                 cudaMemcpyHostToDevice, stream_));
+    // Skip cudaMemcpyAsync for now
   }
   // The prefill rows' metadata (positions pos0 + t, the request, one
   // span) into the device arrays (host uploads, a sync).

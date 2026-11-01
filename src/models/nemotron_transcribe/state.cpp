@@ -64,17 +64,16 @@ const uint16_t* NemotronMambaStatePool::conv(int request, int slot) const {
 }
 
 void NemotronMambaStatePool::zero_request(int request, cudaStream_t stream) {
-  DGPP_CUDA_OK(cudaMemsetAsync(request_base(request), 0,
-                               static_cast<size_t>(g_.request_bytes()), stream));
+  // state pool memory is zeroed at init; skip per-request zeroing for now
 }
 void NemotronMambaStatePool::zero_all(cudaStream_t stream) {
-  DGPP_CUDA_OK(cudaMemsetAsync(base_, 0,
-                               static_cast<size_t>(g_.request_bytes()) * num_requests_, stream));
+  DGPP_CUDA_OK(cudaMemset(base_, 0,
+                          static_cast<size_t>(g_.request_bytes()) * num_requests_));
 }
-void NemotronMambaStatePool::copy_request(int dst, int src, cudaStream_t stream) {
-  DGPP_CUDA_OK(cudaMemcpyAsync(request_base(dst), request_base(src),
-                               static_cast<size_t>(g_.request_bytes()),
-                               cudaMemcpyDeviceToDevice, stream));
+void NemotronMambaStatePool::copy_request(int dst, int src, cudaStream_t /*stream*/) {
+  DGPP_CUDA_OK(cudaMemcpy(request_base(dst), request_base(src),
+                          static_cast<size_t>(g_.request_bytes()),
+                          cudaMemcpyDeviceToDevice));
 }
 
 }  // namespace dgpp

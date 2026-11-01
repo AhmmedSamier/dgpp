@@ -418,8 +418,13 @@ void nemotron_residual_add(uint16_t* out, const uint16_t* a, const uint16_t* b, 
 void nemotron_gqa_attention(const uint16_t* q, const uint16_t* k, const uint16_t* v,
                             uint16_t* out, int T, int q_heads, int kv_heads, int head_dim,
                             float scale, cudaStream_t stream) {
-  // Shared memory: [T + 2] floats per block.
-  const size_t smem_bytes = (static_cast<size_t>(T) + 2) * sizeof(float);
+  // Shared memory layout: scores[head_dim + T + 2] floats.
+  //   [0, head_dim)        : q row copy for the score computation
+  //   [head_dim, head_dim+T): per-position scores
+  //   [head_dim+T]         : max score sentinel
+  //   [head_dim+T+1]       : exp-sum sentinel
+  const size_t smem_bytes =
+      (static_cast<size_t>(head_dim) + static_cast<size_t>(T) + 2) * sizeof(float);
   dim3 block(min(1024, head_dim));
   dim3 grid(T, q_heads);
   nemotron_gqa_attention_kernel<<<grid, block, smem_bytes, stream>>>(
@@ -436,7 +441,7 @@ void nemotron_moe(const uint16_t* x, const uint16_t* gate, const float* gate_bia
                              static_cast<size_t>(E) + static_cast<size_t>(H) +
                              static_cast<size_t>(I) + static_cast<size_t>(SI);
   const size_t smem_bytes = smem_floats * sizeof(float);
-  const int block = min(1024, H > I ? H : I);
+  const int block = min(256, H > I ? H : I);
   nemotron_moe_kernel<<<T, block, smem_bytes, stream>>>(
       x, gate, gate_bias, gate_and_up, down, shared_up, shared_down, out, T, H, E, I, SI,
       topk, scale, norm_topk);

@@ -41,9 +41,10 @@ class ArenaSlab {
     if (cls == MemClass::HostPinned) {
       unsigned int flags = cudaHostAllocMapped | cudaHostAllocPortable;
       DGPP_CUDA_OK(cudaHostAlloc(&base_, bytes, flags));
-    } else if (cls == MemClass::DeviceCold) {
-      DGPP_CUDA_OK(cudaMallocManaged(&base_, bytes));
     } else {
+      // Plain cudaMalloc: context-local, so all access must happen under the
+      // same context that performed the allocation (NemotronModel pushes
+      // primary_ctx_ in run_rows() for this purpose).
       DGPP_CUDA_OK(cudaMalloc(&base_, bytes));
     }
     ++stats_.slab_mallocs;

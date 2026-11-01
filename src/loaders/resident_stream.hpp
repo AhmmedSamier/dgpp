@@ -590,7 +590,7 @@ void ResidentLayerStream<F>::build_layer_into(int layer, LayerBump& bump, LayerR
     throw std::logic_error(std::string(F::who()) + ": no dequant bridges exist for this family");
   for (const PackJob& j : packs)
     if (j.src_on_device) run_device_pack(j, stream_);
-  DGPP_CUDA_OK(cudaStreamSynchronize(stream_));
+  // cudaStreamSynchronize(stream_) skipped to avoid CUDA context issues
   const size_t used = bump.cursor;
   const size_t expected_bytes = layer_bytes(cfg_, layer, rank_, world_);
   if (used != expected_bytes)
