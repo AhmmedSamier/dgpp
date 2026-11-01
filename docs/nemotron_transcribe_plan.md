@@ -297,6 +297,27 @@ fallback.
    MoE executor + graph decode; register the family; text-only serving
    passes the chat/eval gates (the PII/text subsets are out of scope —
    plain instruction following suffices).
+   - STATUS: DONE 2026-11-01 — end-to-end `dgpp-serve` text generation on the
+     GB10. Root-caused the empty-output / cuda error 700 serving bug:
+     (a) Mamba in_proj split had gate(z) and x_B_C swapped (HF: z first);
+     (b) RMSNormGated double-applied silu (kernel applies it; pass raw z);
+     (c) MoE router ranked on sigmoid but gathered sigmoid+bias (HF gathers
+       raw sigmoid; selection adds bias);
+     (d) RMSNorm reduction used warp-only __shfl_down over a 1024-thread block
+       (32 warps — only warp 0's partial sum reduced, garbage scales);
+     (e) Mamba conv state never persisted, so decode steps ignored prefill
+       history (added per-request/slot [conv_dim][kernel-1] state +
+       mamba2_conv_silu_step);
+     (f) loader read _fp32_params.A_log/D/dt_bias and e_score_correction_bias
+       as bf16 (they are F32 -> infs).
+     Engine pick (make_w1_pick / make_fabric_pick) argmaxed logits row 0
+     instead of the last prefill row -> wrong first token; now addresses the
+     final row.
+     Verified: "The capital of France is" -> " Paris." (finish: stop);
+     "The capital of Germany is" -> " Berlin."; "2 + 2 =" -> " 4.".
+     All 52 slot residuals match the HF nemotron_h reference within BF16
+     tolerance; greedy top-1 equals the committed golden (token 6993).
+     Committed 6468ac8a, pushed to fork/nemotron-transcribe-support.
 5. **Perception oracle**: frontend (pinned to the shipped
    fb/window tensors, dither off) + ASR transformer + Sortformer +
    connector, host fp32, pinned to a NeMo dump of the full
