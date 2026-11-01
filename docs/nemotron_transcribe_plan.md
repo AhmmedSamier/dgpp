@@ -361,6 +361,21 @@ fallback.
    `/v1/audio/transcriptions` gates (chains, refusals) and a LibriSpeech
    test-clean WER tool mirroring `tools/qwen_asr_wer.py` from the ASR
    branch — target the card's 1.09/2.60 test-clean/other.
+   - MTP PART: DONE 2026-11-01 — MTP draft block wired for Nemotron.
+     The MTP block has 2 layers (attention + MoE) running as a draft head
+     under the graph engine. MTP weights loaded eagerly from
+     llm.mtp.layers.0.* (attention + enorm/hnorm/eh_proj shared projection)
+     and llm.mtp.layers.1.* (MoE). mtp_run_rows() implements embed→enorm/
+     hnorm→eh_proj→attention layer→MoE layer→final norm→lm_head.
+     `mtp_enabled()` returns true, `mtp_select_block()` returns block 0.
+     SessionParams.mtp and draft_width set in init_session.
+     Graph capture requires kernels-only (removed host memcpy from
+     run_rows during MTP mode). Verified end-to-end with --mtp
+     --decode-graph: 6 completion tokens generated, ~1.35 tok/s
+     (first implementation, unoptimized). Text generation without MTP
+     unchanged (' Paris.').
+     Committed e350084d, pushed to fork/nemotron-transcribe-support.
+     DFlash2 integration and NVFP4 deploy template remain.
 8. **Measured rows** per [benchmarks.md](benchmarks.md) on an idle
    fabric, revision + binary hash recorded, production restored.
 
