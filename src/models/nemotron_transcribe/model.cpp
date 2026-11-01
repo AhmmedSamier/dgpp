@@ -280,7 +280,6 @@ void NemotronModel::walk(const RowRun& run) {
   // 3. Embed lookup: resid_[t] = embed[token[t]].
   nemotron_embed(globals_.embed, d_tokens_, resid_, T, hidden_, stream_);
   DGPP_CUDA_OK(cudaGetLastError());
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
 
   // 3b. Splice audio embeddings at <|audio|> locator positions (milestone 6).
   // Each locator was expanded to T_tok placeholder tokens (id 0) in the
@@ -299,21 +298,18 @@ void NemotronModel::walk(const RowRun& run) {
                               cudaMemcpyDeviceToDevice));
     }
     DGPP_CUDA_OK(cudaGetLastError());
-    DGPP_CUDA_OK(cudaDeviceSynchronize());
   }
 
   // 4. Walk the slots.
   for (int slot = 0; slot < lm.num_layers; ++slot) {
     walk_slot(slot, T, run.pos0);
     DGPP_CUDA_OK(cudaGetLastError());
-    DGPP_CUDA_OK(cudaDeviceSynchronize());
   }
 
   // 5. norm_f + head.
   nemotron_head(resid_, globals_.final_norm, globals_.lm_head, logits_, T, hidden_, vocab_size_,
                 eps, stream_);
   DGPP_CUDA_OK(cudaGetLastError());
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
 }
 
 void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
@@ -334,7 +330,6 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
   // 4a. RMSNorm(resid_) → x_.
   nemotron_rmsnorm(r.input_norm, resid_, x_, T, hidden_, eps, stream_);
   DGPP_CUDA_OK(cudaGetLastError());
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
 
   // 4b. Mixer(x_) → y_.
   switch (kind) {
@@ -342,7 +337,6 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
       // in_proj: x_ [T,H] @ in_proj^T [in_proj_rows,H] → xbc_ [T,in_proj_rows].
       nemotron_gemm_bf16(x_, r.mamba_in_proj, xbc_, T, mg.in_proj_rows, hidden_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       // Split xbc_: z [0:d_inner] (gate), x_B_C [d_inner : d_inner+conv_channels]
       // with x [d_inner : 2*d_inner), B [2*d_inner : 2*d_inner+bc/2),
       // C [2*d_inner+bc/2 : 2*d_inner+bc), dt [2*d_inner+bc : ...].
@@ -367,14 +361,12 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
                               r.mamba_conv_weight, r.mamba_conv_bias,
                               xout, d_inner, mamba_conv_kernel_, stream_);
         DGPP_CUDA_OK(cudaGetLastError());
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
         // B region conv step.
         mamba2_conv_silu_step(xrow + b_off, conv_state + static_cast<size_t>(d_inner) * static_cast<size_t>(hist),
                               r.mamba_conv_weight + d_inner * static_cast<size_t>(mamba_conv_kernel_),
                               r.mamba_conv_bias + d_inner,
                               bout, bc_channels / 2, mamba_conv_kernel_, stream_);
         DGPP_CUDA_OK(cudaGetLastError());
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
         // C region conv step.
         mamba2_conv_silu_step(xrow + c_off,
                               conv_state + (static_cast<size_t>(d_inner) + bc_channels / 2) * static_cast<size_t>(hist),
@@ -382,7 +374,6 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
                               r.mamba_conv_bias + d_inner + bc_channels / 2,
                               cout, bc_channels / 2, mamba_conv_kernel_, stream_);
         DGPP_CUDA_OK(cudaGetLastError());
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
       }
 
       // Get the recurrent state for this mamba slot from the pool.
@@ -396,57 +387,47 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
                           mamba_state_size_,
                           static_cast<float>(lm.time_step_min), stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       // gate = z (raw); the gated-norm kernel applies silu itself (HF
       // RMSNormGated: h = silu(z) * x, then group RMS).
       nemotron_mamba_gated_norm(mamba_out_, d_inner, xbc_ + z_off, mg.in_proj_rows, r.mamba_norm,
                                 mamba_normed_, d_inner, T, d_inner, mg.d_inner / (mamba_groups_state_ / mamba_state_size_),
                                 eps, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // out_proj: mamba_normed_ [T,d_inner] @ out_proj^T [H,d_inner] → y_ [T,H].
       nemotron_gemm_bf16(mamba_normed_, r.mamba_out_proj, y_, T, hidden_, d_inner, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       break;
     }
     case NemotronSlot::Attention: {
       // q/k/v projections.
       nemotron_gemm_bf16(x_, r.attn_q, q_, T, attn_q_rows_, hidden_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       nemotron_gemm_bf16(x_, r.attn_k, k_, T, attn_kv_rows_, hidden_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       nemotron_gemm_bf16(x_, r.attn_v, v_, T, attn_kv_rows_, hidden_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // GQA attention (position-free, causal).
       float scale = 1.0f / sqrtf(static_cast<float>(attn_head_dim_));
       nemotron_gqa_attention(q_, k_, v_, attn_out_, T, attn_q_heads_, attn_kv_heads_,
                              attn_head_dim_, scale, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // o_proj: attn_out_ [T,q_rows] @ o_proj^T [H,q_rows] → y_ [T,H].
       nemotron_gemm_bf16(attn_out_, r.attn_o, y_, T, hidden_, attn_q_rows_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       break;
     }
     case NemotronSlot::Moe: {
       nemotron_gemm_bf16(x_, r.moe_gate, xbc_, T, lm.num_routed_experts, hidden_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       nemotron_moe(x_, r.moe_gate, r.moe_gate_bias, r.moe_experts_gate_and_up,
                    r.moe_experts_down, r.moe_shared_up, r.moe_shared_down, y_, T, hidden_,
                    lm.num_routed_experts, lm.moe_intermediate_size,
                    lm.moe_shared_expert_intermediate_size, lm.num_experts_per_tok,
                    static_cast<float>(lm.routed_scaling_factor), lm.norm_topk_prob, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
       break;
     }
   }
@@ -454,7 +435,6 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
   // 4c. resid_ += y_.
   nemotron_residual_add(resid_, resid_, y_, T * hidden_, stream_);
   DGPP_CUDA_OK(cudaGetLastError());
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
 }
 
 // ---------------------------------------------------------------------------
@@ -651,13 +631,11 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
       // 1. layernorm1(x) → d_normed1
       nemotron_rmsnorm(nw, d_x, d_normed1, static_cast<int>(T_tok), D, eps, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 2. gemv(normed1, W_qkv) → d_qkv [T_tok, 3D]
       nemotron_gemm_bf16(d_normed1, qk, d_qkv,
                          static_cast<int>(T_tok), 3 * D, D, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 3. Split qkv → d_q, d_k, d_v (device-to-device strided copies).
       {
@@ -669,7 +647,6 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
         cudaMemcpy2D(d_v, row_bytes, d_qkv + 2 * D, 3 * row_bytes, row_bytes,
                      T_tok, cudaMemcpyDeviceToDevice);
         DGPP_CUDA_OK(cudaGetLastError());
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
       }
 
       // 4. per-head LayerNorm(q) → d_q, per-head LayerNorm(k) → d_k.
@@ -682,7 +659,6 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
         nemotron_perc_layernorm_per_head(knw, knb, d_k, d_k,
                                          static_cast<int>(T_tok), Hd, hd, eps, stream_);
         DGPP_CUDA_OK(cudaGetLastError());
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
       }
 
       // 5. Half RoPE on q and k (in-place).
@@ -694,7 +670,6 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
         nemotron_perc_rope_half(d_k, static_cast<int>(T_tok), Hd, hd, d_rot,
                                 pc.enc_rope_base, stream_);
         DGPP_CUDA_OK(cudaGetLastError());
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
       }
 
       // 6. Bidirectional attention(q, k, v) → d_attn_out.
@@ -705,49 +680,41 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
         nemotron_perc_attention_bidirectional(d_q, d_k, d_v, d_attn_out,
                                               static_cast<int>(T_tok), Hd, hd, scale, stream_);
         DGPP_CUDA_OK(cudaGetLastError());
-        DGPP_CUDA_OK(cudaDeviceSynchronize());
       }
 
       // 7. gemv(attn_out, W_o) → d_ffn_out [T_tok, D].
       nemotron_gemm_bf16(d_attn_out, wo, d_ffn_out,
                          static_cast<int>(T_tok), D, D, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 8. residual: x = x + attn_proj.
       nemotron_residual_add(d_x, d_x, d_ffn_out,
                             static_cast<int>(T_tok * D), stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 9. layernorm2(x) → d_normed1.
       nemotron_rmsnorm(n2w, d_x, d_normed1, static_cast<int>(T_tok), D, eps, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 10. gemv(normed2, W_f1) → d_ffn_hidden [T_tok, F].
       nemotron_gemm_bf16(d_normed1, f1, d_ffn_hidden,
                          static_cast<int>(T_tok), F, D, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 11. GELU in-place on d_ffn_hidden.
       nemotron_perc_gelu(d_ffn_hidden, d_ffn_hidden,
                          static_cast<int>(T_tok * F), stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 12. gemv(ffn_hidden, W_f2) → d_ffn_out [T_tok, D].
       nemotron_gemm_bf16(d_ffn_hidden, f2, d_ffn_out,
                          static_cast<int>(T_tok), D, F, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       // 13. residual: x = x + ffn_out.
       nemotron_residual_add(d_x, d_x, d_ffn_out,
                             static_cast<int>(T_tok * D), stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
     }
 
     // 3f. final_norm → d_x (in-place).
@@ -758,7 +725,6 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
       uint16_t* dfb = track(upload_bf16(fb));
       nemotron_rmsnorm(dfw, d_x, d_x, static_cast<int>(T_tok), D, eps, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
     }
 
     // 3g. Download encoder states [T_tok, D] bf16 → fp32 for fuse_and_connect.
@@ -767,7 +733,6 @@ SessionModel<NemotronModel>::Outputs NemotronModel::session_prefill_audios(
       DGPP_CUDA_OK(cudaMemcpyAsync(states_bf16.data(), d_x, states_bf16.size() * 2,
                                    cudaMemcpyDeviceToHost, stream_));
       DGPP_CUDA_OK(cudaGetLastError());
-      DGPP_CUDA_OK(cudaDeviceSynchronize());
 
       std::vector<float> states(T_tok * D);
       for (size_t i = 0; i < states.size(); ++i)
