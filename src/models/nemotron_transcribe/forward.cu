@@ -441,7 +441,7 @@ void nemotron_moe(const uint16_t* x, const uint16_t* gate, const float* gate_bia
                              static_cast<size_t>(E) + static_cast<size_t>(H) +
                              static_cast<size_t>(I) + static_cast<size_t>(SI);
   const size_t smem_bytes = smem_floats * sizeof(float);
-  const int block = min(256, H > I ? H : I);
+  const int block = min(128, H > I ? H : I);
   nemotron_moe_kernel<<<T, block, smem_bytes, stream>>>(
       x, gate, gate_bias, gate_and_up, down, shared_up, shared_down, out, T, H, E, I, SI,
       topk, scale, norm_topk);

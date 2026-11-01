@@ -401,14 +401,9 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
       break;
     }
     case NemotronSlot::Moe: {
-      // gate: x_ [T,H] @ gate^T [E,H] → gate_logits [T,E] (bf16).
-      // We need fp32 gate_logits for the bias add. Use a temp buffer.
-      // For simplicity, compute gate_logits in xbc_ (wide enough).
       nemotron_gemm_bf16(x_, r.moe_gate, xbc_, T, lm.num_routed_experts, hidden_, stream_);
       DGPP_CUDA_OK(cudaGetLastError());
       DGPP_CUDA_OK(cudaDeviceSynchronize());
-      // xbc_ now holds gate_logits as bf16. The MoE kernel needs fp32 gate_bias.
-      // The moe kernel reads gate as bf16 and gate_bias as fp32, adding bias internally.
       nemotron_moe(x_, r.moe_gate, r.moe_gate_bias, r.moe_experts_gate_and_up,
                    r.moe_experts_down, r.moe_shared_up, r.moe_shared_down, y_, T, hidden_,
                    lm.num_routed_experts, lm.moe_intermediate_size,
