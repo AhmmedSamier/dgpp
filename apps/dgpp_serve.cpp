@@ -1305,11 +1305,11 @@ struct NemotronTranscribeFamily final : ServeFamily {
     return static_cast<size_t>(128) * static_cast<size_t>(cfg.lm.hidden_size) * 2;
   }
   void build_model(dgpp::BoundaryReducer* reducer, int rank, int world, bool fabric,
-                   int forward_rows, int64_t pool_tokens, int slots, bool /*mtp*/,
+                   int forward_rows, int64_t pool_tokens, int slots, bool mtp,
                    int decode_rows) override {
     model = std::make_unique<dgpp::NemotronModel>(
         cfg, ckpt, forward_rows, pool_tokens, dgpp::NemotronResidency::Resident,
-        reducer, rank, world, slots, false, decode_rows);
+        reducer, rank, world, slots, mtp, decode_rows);
   }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return 0; }

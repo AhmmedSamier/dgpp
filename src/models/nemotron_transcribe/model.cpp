@@ -36,10 +36,10 @@ NemotronModel::NemotronModel(const NemotronTranscribeConfig& cfg,
                              const std::string& checkpoint_dir, int max_tokens,
                              int64_t max_cache_tokens, NemotronResidency residency,
                              BoundaryReducer* boundary, int tp_rank, int tp_world,
-                             int max_requests, bool /*mtp*/, int decode_rows)
+                             int max_requests, bool mtp, int decode_rows)
     : cfg_(cfg),
       loader_(cfg, checkpoint_dir, tp_rank, tp_world, residency,
-              NemotronHeadSharding::Full, false),
+              NemotronHeadSharding::Full, mtp),
       arena_(),
       stream_(nullptr),
       max_tokens_(max_tokens),
@@ -47,6 +47,8 @@ NemotronModel::NemotronModel(const NemotronTranscribeConfig& cfg,
       max_requests_(max_requests),
       hidden_(cfg.lm.hidden_size),
       vocab_size_(cfg.lm.vocab_size),
+      mtp_(mtp),
+      selected_block_(0),
       checkpoint_dir_(checkpoint_dir) {
   // Capture the primary CUDA context on the construction (main) thread so
   // run_rows() — which the engine thread executes — can switch back to it.
@@ -115,6 +117,61 @@ NemotronModel::NemotronModel(const NemotronTranscribeConfig& cfg,
     (void)loader_.load_layer(slot);
   log_memory_ledger("nemotron: all layers loaded");
 
+  // Load MTP draft weights eagerly (milestone 7).
+  if (mtp) {
+    const std::string safetensors_path = checkpoint_dir_ + "/model.safetensors";
+    auto sf = SafetensorsFile::open(safetensors_path);
+    auto load_bf16 = [&](const std::string& name) -> const uint16_t* {
+      const auto* ti = sf->find(name);
+      if (!ti) throw std::runtime_error(
+          "NemotronModel: missing MTP tensor " + name);
+      if (ti->dtype != DType::BF16)
+        throw std::runtime_error("NemotronModel: MTP tensor " + name +
+                                 " is not BF16");
+      uint16_t* d = nullptr;
+      DGPP_CUDA_OK(cudaMalloc(&d, ti->numel() * 2));
+      DGPP_CUDA_OK(cudaMemcpyAsync(d, ti->data, ti->numel() * 2,
+                                   cudaMemcpyHostToDevice, stream_));
+      DGPP_CUDA_OK(cudaGetLastError());
+      return d;
+    };
+    auto load_f32 = [&](const std::string& name) -> const float* {
+      const auto* ti = sf->find(name);
+      if (!ti) throw std::runtime_error(
+          "NemotronModel: missing MTP tensor " + name);
+      if (ti->dtype != DType::F32)
+        throw std::runtime_error("NemotronModel: MTP tensor " + name +
+                                 " is not F32");
+      float* d = nullptr;
+      DGPP_CUDA_OK(cudaMalloc(&d, ti->numel() * 4));
+      DGPP_CUDA_OK(cudaMemcpyAsync(d, ti->data, ti->numel() * 4,
+                                   cudaMemcpyHostToDevice, stream_));
+      DGPP_CUDA_OK(cudaGetLastError());
+      return d;
+    };
+
+    const std::string p0 = "llm.mtp.layers.0.";
+    const std::string p1 = "llm.mtp.layers.1.";
+    mtp_enorm = load_bf16(p0 + "enorm.weight");
+    mtp_hnorm = load_bf16(p0 + "hnorm.weight");
+    mtp_eh_proj = load_bf16(p0 + "eh_proj.weight");
+    mtp_l0_norm = load_bf16(p0 + "norm.weight");
+    mtp_l0_q = load_bf16(p0 + "mixer.q_proj.weight");
+    mtp_l0_k = load_bf16(p0 + "mixer.k_proj.weight");
+    mtp_l0_v = load_bf16(p0 + "mixer.v_proj.weight");
+    mtp_l0_o = load_bf16(p0 + "mixer.o_proj.weight");
+    mtp_l1_norm = load_bf16(p1 + "norm.weight");
+    mtp_l1_gate = load_bf16(p1 + "mixer.gate.weight");
+    mtp_l1_gate_bias = load_f32(p1 + "mixer.gate.e_score_correction_bias");
+    mtp_l1_experts_gate_and_up = load_bf16(p1 + "mixer.experts.gate_and_up_projs");
+    mtp_l1_experts_down = load_bf16(p1 + "mixer.experts.down_projs");
+    mtp_l1_shared_up = load_bf16(p1 + "mixer.shared_experts.up_proj.weight");
+    mtp_l1_shared_down = load_bf16(p1 + "mixer.shared_experts.down_proj.weight");
+    mtp_l1_final_norm = load_bf16(p1 + "final_layernorm.weight");
+    mtp_ = true;
+    log_memory_ledger("nemotron: MTP weights loaded");
+  }
+
   init_session(SessionParams{
       .max_tokens = max_tokens,
       .max_cache_tokens = max_cache_tokens,
@@ -123,11 +180,14 @@ NemotronModel::NemotronModel(const NemotronTranscribeConfig& cfg,
       .boundary = boundary,
       .max_requests = max_requests,
       .decode_rows = decode_rows,
+      .mtp = mtp,
       .vocab_size = vocab_size_,
       .hidden = hidden_,
+      .lm_vocab_count = vocab_size_,
       .max_position_embeddings = cfg_.lm.max_position_embeddings,
       .block_tokens = 128,
       .snapshot_align = 1,
+      .draft_width = mtp ? hidden_ : 0,
       .eos = static_cast<int>(cfg_.lm.eos_token_ids[0]),
   });
   log_memory_ledger("nemotron: session initialized");
@@ -137,6 +197,25 @@ NemotronModel::~NemotronModel() {
   free_activations();
   if (d_audio_embeds_) cudaFree(d_audio_embeds_);
   if (stream_) cudaStreamDestroy(stream_);
+  // MTP weights were allocated with cudaMalloc in the constructor.
+  if (mtp_) {
+    cudaFree(const_cast<uint16_t*>(mtp_enorm));
+    cudaFree(const_cast<uint16_t*>(mtp_hnorm));
+    cudaFree(const_cast<uint16_t*>(mtp_eh_proj));
+    cudaFree(const_cast<uint16_t*>(mtp_l0_norm));
+    cudaFree(const_cast<uint16_t*>(mtp_l0_q));
+    cudaFree(const_cast<uint16_t*>(mtp_l0_k));
+    cudaFree(const_cast<uint16_t*>(mtp_l0_v));
+    cudaFree(const_cast<uint16_t*>(mtp_l0_o));
+    cudaFree(const_cast<uint16_t*>(mtp_l1_norm));
+    cudaFree(const_cast<uint16_t*>(mtp_l1_gate));
+    cudaFree(const_cast<float*>(mtp_l1_gate_bias));
+    cudaFree(const_cast<uint16_t*>(mtp_l1_experts_gate_and_up));
+    cudaFree(const_cast<uint16_t*>(mtp_l1_experts_down));
+    cudaFree(const_cast<uint16_t*>(mtp_l1_shared_up));
+    cudaFree(const_cast<uint16_t*>(mtp_l1_shared_down));
+    cudaFree(const_cast<uint16_t*>(mtp_l1_final_norm));
+  }
 }
 
 MemoryPlan NemotronModel::plan_memory(const NemotronTranscribeConfig& cfg, int max_tokens,
@@ -219,6 +298,34 @@ void NemotronModel::init_activations(int max_tokens) {
   DGPP_CUDA_OK(cudaMemset(y_, 0, rows * H * 2));
   DGPP_CUDA_OK(cudaMemset(logits_, 0, rows * V * 4));
   DGPP_CUDA_OK(cudaMemset(h_, 0, rows * H * 2));
+
+  // MTP activation buffers (milestone 7), allocated only when MTP is enabled.
+  if (mtp_) {
+    const size_t q_rows = static_cast<size_t>(attn_q_rows_);
+    const size_t kv_rows = static_cast<size_t>(attn_kv_rows_);
+    DGPP_CUDA_OK(cudaMalloc(&mtp_e_, rows * H * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_en_, rows * H * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_hn_, rows * H * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_cat_, rows * 2 * H * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_r_, rows * H * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_x_, rows * H * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_y_, rows * H * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_q_, rows * q_rows * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_k_, rows * kv_rows * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_v_, rows * kv_rows * 2));
+    DGPP_CUDA_OK(cudaMalloc(&mtp_attn_out_, rows * q_rows * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_e_, 0, rows * H * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_en_, 0, rows * H * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_hn_, 0, rows * H * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_cat_, 0, rows * 2 * H * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_r_, 0, rows * H * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_x_, 0, rows * H * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_y_, 0, rows * H * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_q_, 0, rows * q_rows * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_k_, 0, rows * kv_rows * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_v_, 0, rows * kv_rows * 2));
+    DGPP_CUDA_OK(cudaMemset(mtp_attn_out_, 0, rows * q_rows * 2));
+  }
 }
 
 void NemotronModel::free_activations() {
@@ -228,6 +335,12 @@ void NemotronModel::free_activations() {
   cudaFree(q_); cudaFree(k_); cudaFree(v_); cudaFree(attn_out_);
   cudaFree(logits_); cudaFree(h_);
   cudaFree(d_tokens_); cudaFree(d_positions_);
+  // MTP activation buffers.
+  cudaFree(mtp_e_); cudaFree(mtp_en_); cudaFree(mtp_hn_);
+  cudaFree(mtp_cat_); cudaFree(mtp_r_);
+  cudaFree(mtp_x_); cudaFree(mtp_y_);
+  cudaFree(mtp_q_); cudaFree(mtp_k_); cudaFree(mtp_v_);
+  cudaFree(mtp_attn_out_);
   resid_ = x_ = y_ = nullptr;
   xbc_ = x_conv_ = b_conv_ = c_conv_ = nullptr;
   mamba_out_ = mamba_normed_ = nullptr;
@@ -235,6 +348,10 @@ void NemotronModel::free_activations() {
   logits_ = nullptr;
   h_ = nullptr;
   d_tokens_ = d_positions_ = nullptr;
+  mtp_e_ = mtp_en_ = mtp_hn_ = nullptr;
+  mtp_cat_ = mtp_r_ = nullptr;
+  mtp_x_ = mtp_y_ = nullptr;
+  mtp_q_ = mtp_k_ = mtp_v_ = mtp_attn_out_ = nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,19 +379,25 @@ void NemotronModel::walk(const RowRun& run) {
   const float eps = static_cast<float>(lm.norm_eps);
 
   // 1. Copy token ids to device.
-  DGPP_CUDA_OK(cudaMemcpy(d_tokens_, run.ids, static_cast<size_t>(T) * sizeof(int64_t),
-                          cudaMemcpyHostToDevice));
-  DGPP_CUDA_OK(cudaGetLastError());
+  // (During MTP graph capture, mtp_prefill_rows already copied the tokens.)
+  if (!mtp_) {
+    DGPP_CUDA_OK(cudaMemcpyAsync(d_tokens_, run.ids, static_cast<size_t>(T) * sizeof(int64_t),
+                                 cudaMemcpyHostToDevice, stream_));
+    DGPP_CUDA_OK(cudaGetLastError());
+  }
 
   // 2. Set up positions on device: pos0, pos0+1, ..., pos0+T-1.
   // (Positions are not used by position-free attention, but we stage them
-  //  for consistency.)
-  {
-    std::vector<int64_t> positions(T);
-    for (int i = 0; i < T; ++i) positions[i] = run.pos0 + i;
-    DGPP_CUDA_OK(cudaMemcpy(d_positions_, positions.data(), static_cast<size_t>(T) * sizeof(int64_t),
-                            cudaMemcpyHostToDevice));
-    DGPP_CUDA_OK(cudaGetLastError());
+  //  for consistency. Skipped during MTP graph capture.)
+  if (!mtp_) {
+    {
+      std::vector<int64_t> positions(T);
+      for (int i = 0; i < T; ++i) positions[i] = run.pos0 + i;
+      DGPP_CUDA_OK(cudaMemcpyAsync(d_positions_, positions.data(),
+                                   static_cast<size_t>(T) * sizeof(int64_t),
+                                   cudaMemcpyHostToDevice, stream_));
+      DGPP_CUDA_OK(cudaGetLastError());
+    }
   }
 
   // 3. Embed lookup: resid_[t] = embed[token[t]].
@@ -438,6 +561,92 @@ void NemotronModel::walk_slot(int slot, int T, int64_t /*pos0*/) {
 }
 
 // ---------------------------------------------------------------------------
+// MTP draft block (milestone 7)
+// ---------------------------------------------------------------------------
+void NemotronModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
+                                 bool decode_row, bool capture, int head_rows, int batch_requests,
+                                 int hidden_row) {
+  if (!mtp_) return;
+  const size_t H = static_cast<size_t>(hidden_);
+  const size_t V = static_cast<size_t>(vocab_size_);
+  const float eps = static_cast<float>(cfg_.lm.norm_eps);
+  const auto& lm = cfg_.lm;
+  const size_t rows = static_cast<size_t>(T);
+  const size_t q_rows = static_cast<size_t>(attn_q_rows_);
+  const size_t kv_rows = static_cast<size_t>(attn_kv_rows_);
+
+  // Hidden states from the main walk are in h_ at offset hidden_row * H.
+  const uint16_t* hin = h_ + static_cast<size_t>(hidden_row) * H;
+
+  // 1. Embed tokens → mtp_e_ [T, H]
+  nemotron_embed(globals_.embed, tokens, mtp_e_, T, static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+
+  // 2. enorm: mtp_en_ = rmsnorm(mtp_e_, mtp_enorm) [T, H]
+  nemotron_rmsnorm(mtp_enorm, mtp_e_, mtp_en_, T, static_cast<int>(H), eps, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+
+  // 3. hnorm: mtp_hn_ = rmsnorm(hin, mtp_hnorm) [T, H]
+  nemotron_rmsnorm(mtp_hnorm, hin, mtp_hn_, T, static_cast<int>(H), eps, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+
+  // 4. eh_proj: mtp_r_ = eh_proj(concat(enorm, hnorm))
+  //    eh_proj.weight is [H, 2H]; split into [H, H] + [H, H]:
+  //    mtp_r_ = mtp_en_ @ W1^T + mtp_hn_ @ W2^T
+  const uint16_t* w1 = mtp_eh_proj;                    // first H columns
+  const uint16_t* w2 = mtp_eh_proj + static_cast<size_t>(H);  // second H columns
+  nemotron_gemm_bf16(mtp_en_, w1, mtp_r_, T, static_cast<int>(H), static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_gemm_bf16(mtp_hn_, w2, mtp_x_, T, static_cast<int>(H), static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_residual_add(mtp_r_, mtp_r_, mtp_x_, T * static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+
+  // 5. MTP layer 0 (attention block): norm → QKV → GQA → O_proj → residual
+  nemotron_rmsnorm(mtp_l0_norm, mtp_r_, mtp_x_, T, static_cast<int>(H), eps, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_gemm_bf16(mtp_x_, mtp_l0_q, mtp_q_, T, attn_q_rows_, static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_gemm_bf16(mtp_x_, mtp_l0_k, mtp_k_, T, attn_kv_rows_, static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_gemm_bf16(mtp_x_, mtp_l0_v, mtp_v_, T, attn_kv_rows_, static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  float scale = 1.0f / sqrtf(static_cast<float>(attn_head_dim_));
+  nemotron_gqa_attention(mtp_q_, mtp_k_, mtp_v_, mtp_attn_out_, T, attn_q_heads_, attn_kv_heads_,
+                         attn_head_dim_, scale, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_gemm_bf16(mtp_attn_out_, mtp_l0_o, mtp_y_, T, static_cast<int>(H), attn_q_rows_, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_residual_add(mtp_r_, mtp_r_, mtp_y_, T * static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+
+  // 6. MTP layer 1 (MoE block): norm → MoE → residual
+  nemotron_rmsnorm(mtp_l1_norm, mtp_r_, mtp_x_, T, static_cast<int>(H), eps, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_moe(mtp_x_, mtp_l1_gate, mtp_l1_gate_bias, mtp_l1_experts_gate_and_up,
+               mtp_l1_experts_down, mtp_l1_shared_up, mtp_l1_shared_down, mtp_y_,
+               T, static_cast<int>(H), lm.num_routed_experts, lm.moe_intermediate_size,
+               lm.moe_shared_expert_intermediate_size, lm.num_experts_per_tok,
+               static_cast<float>(lm.routed_scaling_factor), lm.norm_topk_prob, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+  nemotron_residual_add(mtp_r_, mtp_r_, mtp_y_, T * static_cast<int>(H), stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+
+  // 7. Final norm
+  nemotron_rmsnorm(mtp_l1_final_norm, mtp_r_, mtp_r_, T, static_cast<int>(H), eps, stream_);
+  DGPP_CUDA_OK(cudaGetLastError());
+
+  // 8. Head: logits = mtp_r_ @ lm_head^T → [T, V] fp32 (only last head_rows rows)
+  if (head_rows > 0) {
+    const int64_t start_row = static_cast<int64_t>(T) - static_cast<int64_t>(head_rows);
+    nemotron_gemm_f32(mtp_r_ + start_row * static_cast<size_t>(H), globals_.lm_head,
+                      logits_, static_cast<int>(head_rows), static_cast<int>(V),
+                      static_cast<int>(H), stream_);
+    DGPP_CUDA_OK(cudaGetLastError());
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SessionModel hooks
 // ---------------------------------------------------------------------------
 
@@ -456,23 +665,22 @@ SessionModel<NemotronModel>::Outputs NemotronModel::run_rows(const RowRun& run) 
 
   walk(run);
 
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
-  DGPP_CUDA_OK(cudaGetLastError());
-
   Outputs out;
   out.lm_vocab_begin = 0;
   out.lm_vocab_count = vocab_size_;
   out.final_hidden_bits.resize(static_cast<size_t>(T) * static_cast<size_t>(hidden_));
   out.logits.resize(static_cast<size_t>(T) * static_cast<size_t>(vocab_size_));
 
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
-  DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data(), h_,
-                          static_cast<size_t>(T) * static_cast<size_t>(hidden_) * 2,
-                          cudaMemcpyDeviceToHost));
-  DGPP_CUDA_OK(cudaDeviceSynchronize());
-  DGPP_CUDA_OK(cudaMemcpy(out.logits.data(), logits_,
-                          static_cast<size_t>(T) * static_cast<size_t>(vocab_size_) * 4,
-                          cudaMemcpyDeviceToHost));
+  // Host copies are skipped during graph capture (MTP + decode-graph mode).
+  // The graph engine reads device memory directly after graph execution.
+  if (!mtp_) {
+    DGPP_CUDA_OK(cudaMemcpy(out.final_hidden_bits.data(), h_,
+                            static_cast<size_t>(T) * static_cast<size_t>(hidden_) * 2,
+                            cudaMemcpyDeviceToHost));
+    DGPP_CUDA_OK(cudaMemcpy(out.logits.data(), logits_,
+                            static_cast<size_t>(T) * static_cast<size_t>(vocab_size_) * 4,
+                            cudaMemcpyDeviceToHost));
+  }
 
   if (primary_ctx_ != nullptr) cuCtxPopCurrent(nullptr);
   return out;

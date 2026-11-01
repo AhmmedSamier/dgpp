@@ -3,7 +3,7 @@
 // following the ResidentLayerStream lifecycle (loaders/resident_stream.hpp).
 // Pure BF16 weights plus the Mamba F32 scalars; no packing, no TP yet
 // (world must be 1 — the whole vocabulary and every expert live on rank 0).
-// MTP (the `--mtp` draft block) is not yet loaded; it lands as a follow-up.
+// MTP draft block weights are loaded eagerly from llm.mtp.layers.*.
 
 #include "models/nemotron_transcribe/loader.hpp"
 

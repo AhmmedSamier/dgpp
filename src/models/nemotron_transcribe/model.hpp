@@ -69,7 +69,7 @@ class NemotronModel : public SessionModel<NemotronModel> {
   NemotronMambaStatePool& pool() { return pool_; }
   const NemotronMambaStatePool& pool() const { return pool_; }
   cudaStream_t stream() const { return stream_; }
-  bool mtp_enabled() const { return false; }
+  bool mtp_enabled() const { return mtp_; }
   int max_session_requests() const { return max_requests_; }
   int lm_vocab_begin() const { return 0; }
   int lm_vocab_count() const { return cfg_.lm.vocab_size; }
@@ -83,7 +83,8 @@ class NemotronModel : public SessionModel<NemotronModel> {
   void snapshot_chain_state(int) {}
   void restore_chain_state(int) {}
   const uint16_t* draft_hidden_rows() const { return nullptr; }
-  void mtp_select_block(int) {}
+  void mtp_select_block(int index) { selected_block_ = index; }
+  int mtp_selected_block() const { return selected_block_; }
   void snapshot_draft_state(int) {}
   void restore_draft_state(int) {}
 
@@ -96,7 +97,9 @@ class NemotronModel : public SessionModel<NemotronModel> {
   static constexpr bool kBatchedDraftChain = false;
   size_t draft_state_bytes() const { return 0; }
   void graph_prepare();
-  void mtp_run_rows(int, const int64_t*, int64_t, int, bool, bool, int, int) {}
+  void mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, int T,
+                    bool decode_row, bool capture, int head_rows, int batch_requests,
+                    int hidden_row = 0);
 
   // ---- Audio support (milestone 6) ---------------------------------------
   // The Nemotron contract: one `<|audio|>` locator (id == vocab_size) per
@@ -157,6 +160,8 @@ class NemotronModel : public SessionModel<NemotronModel> {
   int max_requests_ = 1;
   int hidden_ = 0;
   int vocab_size_ = 0;
+  bool mtp_ = false;          // MTP draft enabled
+  int selected_block_ = 0;    // selected MTP draft block (0 = only block)
   int mamba_d_inner_ = 0;
   int mamba_groups_state_ = 0;
   int mamba_heads_ = 0;
@@ -181,6 +186,43 @@ class NemotronModel : public SessionModel<NemotronModel> {
   size_t audio_capacity_ = 0;            // capacity in rows
 
   std::string checkpoint_dir_;  // for on-demand perception weight reads
+
+  // MTP draft weights (milestone 7). The Nemotron MTP block has 2 layers:
+  // layer 0 = attention, layer 1 = MoE. The enorm/hnorm/eh_proj are shared
+  // (stored under layers.0 in the checkpoint) and applied once before the
+  // MTP layers. The final norm and head are shared with the main model.
+  // MTP weights are loaded eagerly from the checkpoint.
+  // MTP shared projection (enorm/hnorm/eh_proj, from layers.0):
+  const uint16_t* mtp_enorm = nullptr;   // [H]
+  const uint16_t* mtp_hnorm = nullptr;   // [H]
+  const uint16_t* mtp_eh_proj = nullptr; // [H, 2H]
+  // MTP layer 0 (attention):
+  const uint16_t* mtp_l0_norm = nullptr;   // [H]
+  const uint16_t* mtp_l0_q = nullptr;      // [q_rows, H]
+  const uint16_t* mtp_l0_k = nullptr;      // [kv_rows, H]
+  const uint16_t* mtp_l0_v = nullptr;      // [kv_rows, H]
+  const uint16_t* mtp_l0_o = nullptr;      // [H, q_rows]
+  // MTP layer 1 (MoE):
+  const uint16_t* mtp_l1_norm = nullptr;    // [H]
+  const uint16_t* mtp_l1_gate = nullptr;    // [E, H]
+  const float*  mtp_l1_gate_bias = nullptr; // [E]
+  const uint16_t* mtp_l1_experts_gate_and_up = nullptr; // [E, H, I]
+  const uint16_t* mtp_l1_experts_down = nullptr;        // [E, I, H]
+  const uint16_t* mtp_l1_shared_up = nullptr;           // [SI, H]
+  const uint16_t* mtp_l1_shared_down = nullptr;         // [H, SI]
+  const uint16_t* mtp_l1_final_norm = nullptr;            // [H] MTP final norm
+  // MTP activation buffers, bf16 [max_tokens, H] unless noted:
+  uint16_t* mtp_e_ = nullptr;   // [M, H] embedded tokens
+  uint16_t* mtp_en_ = nullptr;  // [M, H] enorm(embed)
+  uint16_t* mtp_hn_ = nullptr;  // [M, H] hnorm(hidden)
+  uint16_t* mtp_cat_ = nullptr; // [M, 2H] concat(enorm, hnorm)
+  uint16_t* mtp_r_ = nullptr;   // [M, H] eh_proj(cat)
+  uint16_t* mtp_x_ = nullptr;   // [M, H] normed block input
+  uint16_t* mtp_y_ = nullptr;   // [M, H] block output
+  uint16_t* mtp_q_ = nullptr;   // [M, q_rows] attention q
+  uint16_t* mtp_k_ = nullptr;   // [M, kv_rows] attention k
+  uint16_t* mtp_v_ = nullptr;   // [M, kv_rows] attention v
+  uint16_t* mtp_attn_out_ = nullptr; // [M, q_rows] attention output
 };
 
 }  // namespace dgpp
