@@ -23,6 +23,16 @@
 namespace dgpp {
 
 struct DFlashConfig {
+  // DSpine uses the DFlashDraftModel HF architecture name, but adds a
+  // causal block and a learned selected-prefix bridge. Keep it distinct
+  // from ordinary DFlash v1 when dispatching the checkpoint.
+  bool dspine = false;
+  int code_size = 0;
+  int code_rank = 0;
+  int code_head_topk = 0;
+  float code_refine_weight = 1.0f;
+  float code_eps = 1e-6f;
+  std::vector<int> code_feature_layers;  // one-indexed draft layer ids
   // dflash_config.
   int block_size = 16;  // query rows per draft: 1 anchor + (block_size - 1) mask rows
   int mask_token_id = -1;
@@ -70,6 +80,8 @@ struct DFlashConfig {
   // Cross-checks the draft/target pair (widths, vocab, mask id, tap
   // indices, sliding window vs block). Throws naming the field.
   void validate_against(const Qwen35TextConfig& target) const;
+  void validate_against(int target_hidden, int target_vocab, int target_layers,
+                        int64_t target_context) const;
 };
 
 // One draft layer's device weights (BF16, arena-resident; at world > 1 the
@@ -94,6 +106,16 @@ struct DFlashWeights {
   const uint16_t* fc = nullptr;          // nTaps slices [H, H] (the [H, nTaps*H] split)
   const uint16_t* hidden_norm = nullptr;  // [H]
   const uint16_t* norm = nullptr;        // [H]
+  // DSpine's selected-prefix bridge (all BF16). Null for ordinary DFlash v1.
+  const uint16_t* codebook = nullptr;            // [vocab, code_size]
+  const uint16_t* read_weight = nullptr;         // [code_size, hidden]
+  const uint16_t* early_read_weights = nullptr;  // [layers - 1, code_size, hidden]
+  const uint16_t* feature_write_weights = nullptr;  // [layers, hidden, code_rank]
+  const uint16_t* bridge_gate = nullptr;         // [code_rank, code_size]
+  const uint16_t* predecessor_gate = nullptr;    // [code_rank, code_size]
+  const uint16_t* previous_value = nullptr;      // [code_rank, code_size]
+  const uint16_t* bridge_output = nullptr;        // [code_size, code_rank], zero in v1 DSpine
+  const uint16_t* bridge_gate_bias = nullptr;     // [code_rank]
   void* arena = nullptr;
   size_t bytes = 0;
   ~DFlashWeights();
@@ -102,7 +124,10 @@ struct DFlashWeights {
   DFlashWeights& operator=(const DFlashWeights&) = delete;
   DFlashWeights(DFlashWeights&& o) noexcept
       : layers(std::move(o.layers)), fc(o.fc), hidden_norm(o.hidden_norm), norm(o.norm),
-        arena(o.arena), bytes(o.bytes) {
+        codebook(o.codebook), read_weight(o.read_weight), early_read_weights(o.early_read_weights),
+        feature_write_weights(o.feature_write_weights), bridge_gate(o.bridge_gate),
+        predecessor_gate(o.predecessor_gate), previous_value(o.previous_value),
+        bridge_output(o.bridge_output), bridge_gate_bias(o.bridge_gate_bias), arena(o.arena), bytes(o.bytes) {
     o.arena = nullptr;
     o.bytes = 0;
   }
@@ -113,6 +138,15 @@ struct DFlashWeights {
       fc = o.fc;
       hidden_norm = o.hidden_norm;
       norm = o.norm;
+      codebook = o.codebook;
+      read_weight = o.read_weight;
+      early_read_weights = o.early_read_weights;
+      feature_write_weights = o.feature_write_weights;
+      bridge_gate = o.bridge_gate;
+      predecessor_gate = o.predecessor_gate;
+      previous_value = o.previous_value;
+      bridge_output = o.bridge_output;
+      bridge_gate_bias = o.bridge_gate_bias;
       arena = o.arena;
       bytes = o.bytes;
       o.arena = nullptr;

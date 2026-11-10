@@ -796,7 +796,8 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
   std::vector<std::unique_ptr<DFlash2Speculator<Model>>> spec_;
   // The drafter's per-position acceptance counters, engine-wide: retired
   // drivers fold in here, live ones read on top (the MTP stats group).
-  uint64_t spec_att_[8] = {}, spec_acc_[8] = {};
+  uint64_t spec_att_[sched::SchedulerEngine::MtpAcceptance::kMaxDrafts] = {};
+  uint64_t spec_acc_[sched::SchedulerEngine::MtpAcceptance::kMaxDrafts] = {};
 
   // The eligibility rule of step()'s spec branch, shared with step_batch:
   // the slot's verify-fed rows when it rides speculation this step (plain
@@ -808,7 +809,23 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
   // and context; the drafts are point-mass proposals).
   std::vector<int32_t> dflash_winners(SlotState& s, const DecodeOutputs& out,
                                       const std::vector<int64_t>& fed, int T) {
-    if (s.params.temperature <= 0.0f) return rows_pick()(local_row_maxes(out, T));
+    if (s.params.temperature <= 0.0f) {
+      auto winners = rows_pick()(local_row_maxes(out, T));
+      if (dflash_trace()) {
+        static int traced = 0;
+        if (traced++ < 4 && T > 1) {
+          std::string detail;
+          for (int i = 0; i < std::min(T - 1, 8); ++i) {
+            if (!detail.empty()) detail += ' ';
+            detail += std::to_string(i) + ":draft=" + std::to_string(fed[i + 1]) +
+                      ",target=" + std::to_string(winners[i]) +
+                      (fed[i + 1] == winners[i] ? ",ok" : ",miss");
+          }
+          logf(LogLevel::Info, "dflash trace: greedy DSpine candidates {}", detail);
+        }
+      }
+      return winners;
+    }
     return spec_sampled_winners(out, fed, s.params, s.rng, s.context, sample_);
   }
   std::vector<int64_t> dflash_fed(int req) {
@@ -887,7 +904,7 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
   void retire_spec(S& sp) {
     if constexpr (requires { sp->attempts(0); }) {
       if (sp) {
-        for (int p = 0; p < 8; ++p) {
+        for (int p = 0; p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
           spec_att_[p] += sp->attempts(p);
           spec_acc_[p] += sp->accepts(p);
         }
@@ -900,7 +917,7 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
     sched::SchedulerEngine::MtpAcceptance a;
     if constexpr (requires { model_->dflash2_drafts(); }) {
       if (model_->dflash2_enabled()) a.depth = model_->dflash2_drafts();
-      for (int p = 0; p < 8; ++p) {
+      for (int p = 0; p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
         a.attempts[p] = spec_att_[p];
         a.accepts[p] = spec_acc_[p];
         for (const auto& sp : spec_)
@@ -919,7 +936,7 @@ class EagerEngineAdapter : public sched::SchedulerEngine {
       const auto& sp = spec_.at(static_cast<size_t>(req));
       if (sp) {
         a.depth = model_->dflash2_drafts();
-        for (int p = 0; p < 8; ++p) {
+        for (int p = 0; p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
           a.attempts[p] = sp->attempts(p);
           a.accepts[p] = sp->accepts(p);
         }

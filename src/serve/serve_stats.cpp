@@ -84,7 +84,7 @@ std::string ThroughputLog::format(int rank, double seconds, const Meters& prev,
     // the interval (2026-09-06: the engine counts them; depth 1 has p1).
     out += std::format(" | mtp {:.2f} tok/step/req", tok_per_row);
     std::string accept;
-    for (int p = 0; p < cur.mtp.depth && p < 8; ++p) {
+    for (int p = 0; p < cur.mtp.depth && p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
       const uint64_t attempts = cur.mtp.attempts[p] - prev.mtp.attempts[p];
       const uint64_t accepts = cur.mtp.accepts[p] - prev.mtp.accepts[p];
       if (attempts == 0) continue;

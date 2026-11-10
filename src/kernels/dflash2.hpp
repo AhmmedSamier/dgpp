@@ -89,7 +89,7 @@ void dflash2_block_attn_split(const uint16_t* q, int64_t q_row_stride, const uin
                               int blocks_per_request, int block_rows, int64_t window,
                               const int64_t* pos, int rows, int heads, int kv_heads, int dim,
                               float scale, float* partials, uint16_t* out, cudaStream_t stream,
-                              bool fp32_p = false);
+                              bool fp32_p = false, bool causal_block = false);
 
 // Per-row top-K of fp32 logits (descending by score, ties to the lower id):
 // the candidate sets the selector walks. K <= 32.

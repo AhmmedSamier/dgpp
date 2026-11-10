@@ -526,8 +526,8 @@ class DFlash2Speculator {
     // only verified positions count (a depth-capped fed leaves the tail
     // for the next step).
     for (int p = 0; p < T - 1; ++p) {
-      ++attempts_[p & 7];
-      if (p < v.accepted - 1) ++accepts_[p & 7];
+      ++attempts_[p];
+      if (p < v.accepted - 1) ++accepts_[p];
     }
     next_ = v.next;
     drafts_.clear();
@@ -551,8 +551,8 @@ class DFlash2Speculator {
   std::vector<int32_t> drafts_;
   int steps_ = 0;
   int accepted_drafts_ = 0;
-  uint64_t attempts_[8] = {};
-  uint64_t accepts_[8] = {};
+  uint64_t attempts_[16] = {};
+  uint64_t accepts_[16] = {};
   std::function<int(const std::vector<int32_t>&)> depth_policy_;
   int last_verify_depth_ = 0;
 };

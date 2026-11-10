@@ -1432,7 +1432,7 @@ void Scheduler::retire(int arrival, Result::Status status,
           1000.0 * decode_s / r.decode_passes,
           static_cast<double>(decode_tokens) / r.decode_passes);
     std::string accept;
-    for (int p = 0; p < acceptance.depth && p < 8; ++p)
+    for (int p = 0; p < acceptance.depth && p < SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p)
       if (acceptance.attempts[p] > 0)
         accept += std::format(" p{} {:.0f} %", p + 1,
                               100.0 * static_cast<double>(acceptance.accepts[p]) /

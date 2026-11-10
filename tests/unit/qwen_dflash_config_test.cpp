@@ -3,6 +3,7 @@
 // the MoE target (widths, vocab, taps, block vs window).
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "common/test.hpp"
 #include "loaders/minijson.hpp"
@@ -94,6 +95,43 @@ DGPP_TEST(dflash_config_parses_the_release) {
   require(c.sliding_window == 4096, "window");
   require(c.tp_divisible(1) && c.tp_divisible(2) && c.tp_divisible(4), "tp worlds");
   require(!c.tp_divisible(3), "world 3 must fail (heads 32/8, inter 9216)");
+}
+
+DGPP_TEST(dspine_config_is_distinguished_from_plain_dflash_v1) {
+  const char* json = R"({
+    "architectures":["DFlashDraftModel"], "model_type":"qwen3", "dtype":"bfloat16",
+    "hidden_size":5120, "num_hidden_layers":5, "vocab_size":248320,
+    "num_attention_heads":32, "num_key_value_heads":8, "head_dim":128,
+    "intermediate_size":17408, "rms_norm_eps":1e-6,
+    "rope_parameters":{"rope_type":"default","rope_theta":10000000},
+    "max_position_embeddings":262144, "use_sliding_window":true,
+    "sliding_window":8192, "block_size":16, "is_causal":true,
+    "code_bridge_second_pass":{"mode":"serial_table","first_exact":4,"head_topk":16},
+    "dflash_config":{
+      "draft_block_causal":true,"mask_token_id":248070,
+      "target_layer_ids":[1,16,31,46,61],
+      "selected_prefix_code_bridge":{"code_size":1024,"rank":512,"eps":1e-6},
+      "selected_prefix_feature_write_mode":"independent",
+      "selected_prefix_feature_writes":true,
+      "selected_prefix_feature_layers":[1,2,3,4,5],
+      "selected_prefix_terminal":false,
+      "selected_prefix_last_write_refine":{"kind":"exact_sender","version":1,"head_topk":16,"weight":1.0}
+    }
+  })";
+  const std::string owned = json;
+  const auto c = dgpp::DFlashConfig::parse(dgpp::minijson::parse(owned).root);
+  require(c.dspine && c.block_size == 16 && c.drafts() == 15, "DSpine mode and trained block");
+  require(c.code_size == 1024 && c.code_rank == 512 && c.code_head_topk == 16,
+          "selected-prefix bridge shape");
+  require(c.code_feature_layers == std::vector<int>({1, 2, 3, 4, 5}), "bridge write layers");
+  c.validate_against(5120, 248320, 64, 262144);
+  bool rejected = false;
+  try {
+    c.validate_against(5120, 248320, 48, 262144);
+  } catch (const std::runtime_error&) {
+    rejected = true;
+  }
+  require(rejected, "DSpine taps beyond a shorter target are rejected");
 }
 
 DGPP_TEST(dflash_config_refuses_the_wrong_checkpoints) {

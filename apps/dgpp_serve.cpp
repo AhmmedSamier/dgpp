@@ -467,7 +467,8 @@ struct GlmFamily final : ServeFamily {
 struct QwenFamily final : ServeFamily {
   dgpp::QwenTextConfig cfg;
   std::string ckpt;
-  std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
+  std::string dflash;  // the DFlash2 / DSpine drafter's checkpoint dir (empty: off)
+  bool dspine_draft = false;
   std::unique_ptr<dgpp::QwenModel> model;
   bool fp8_head_mma;
   dgpp::LatentFormat kv_format;
@@ -577,8 +578,11 @@ struct QwenFamily final : ServeFamily {
   // block draft (session_graph_capture_block_draft/_batch, mirrors and the
   // capture-aware folds) re-hosted in commit 40da8852..0fae644e, so the
   // decode graph records it (block_draft_graph_ok).
-  void set_draft_model(const std::string& dir) override { dflash = dir; }
-  bool block_draft_graph_ok() const override { return true; }
+  void set_draft_model(const std::string& dir) override {
+    dflash = dir;
+    dspine_draft = dgpp::drafter_architecture(dir) == "DFlashDraftModel";
+  }
+  bool block_draft_graph_ok() const override { return !dspine_draft; }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
   std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
@@ -1247,6 +1251,7 @@ struct Qwen35Family final : ServeFamily {
   dgpp::Qwen35TextConfig cfg;
   std::string ckpt;
   std::string dflash;  // the DFlash2 drafter's checkpoint dir (empty: off)
+  bool dspine_draft = false;
   std::vector<int64_t> eos_;
   std::unique_ptr<dgpp::Qwen35Model> model;
   // The Full layers' K/V pool format (engine.kv_dtype): bf16, or the fp8
@@ -1333,12 +1338,16 @@ struct Qwen35Family final : ServeFamily {
         reducer, fabric ? rank : 0,
         fabric ? world_ : 1, slots, decode_rows, fabric && mtp, dflash, kv_format);
   }
-  void set_draft_model(const std::string& dir) override { dflash = dir; }
+  void set_draft_model(const std::string& dir) override {
+    dflash = dir;
+    dspine_draft = !dir.empty() && dgpp::drafter_architecture(dir) == "DFlashDraftModel" &&
+                   dgpp::DFlashConfig::from_json_file(dir + "/config.json").dspine;
+  }
   // The block draft records in this family's capture (the
   // session_graph_capture_block_draft pair, the graph worlds since 2026-10-04,
   // for both the DFlash2 and the DFlash v1 drafter), so the decode graph is a
   // legal drafter world here.
-  bool block_draft_graph_ok() const override { return true; }
+  bool block_draft_graph_ok() const override { return !dspine_draft; }
   void destroy_model() override { model.reset(); }
   size_t model_snapshot_bytes() const override { return model ? model->session_snapshot_bytes() : 0; }
   std::unique_ptr<ServeGraphEngine> make_graph_engine(dgpp::net::CollectiveBus* bus, int rank,
@@ -1853,7 +1862,7 @@ int main(int argc, char** argv) {
       "    [--l2-prefetch-boundary-window-mib N] [--l2-prefetch-boundary-rate off|light|full]\n"
       "    [--l2-prefetch-layer-rate off|light|full] [--no-l2-prefetch-merge]  the L2 weight prefetcher (engine.l2_prefetch*)\n"
       "    [--no-dflash-draft-batch]  one block forward per slot (engine.dflash_draft_batch)\n"
-      "    [--dflash-depth N]  verify only the first N drafts per step, 0 = the block (engine.dflash_depth)\n"
+      "    [--dflash-depth N]  verify only the first N drafts per step (1..15), 0 = the block (engine.dflash_depth)\n"
       "    [--mtp-schedule]  the confidence-scheduled verify depth (DeepSeek-V4.1's\n"
       "      DSpark): a step verifies only the drafts whose prefix survival beats\n"
       "      the value of a verify row; exact\n"
@@ -3125,8 +3134,8 @@ int main(int argc, char** argv) {
   }
   dgpp::Qwen35Model::set_dflash2_weights_fp8(dflash_weights == "fp8");
   dgpp::QwenModel::set_dflash2_weights_fp8(dflash_weights == "fp8");
-  if (dflash_depth < 0 || dflash_depth > 7) {
-    DGPP_LOG_ERROR("engine.dflash_depth (--dflash-depth) must be in [0, 7], got {}", dflash_depth);
+  if (dflash_depth < 0 || dflash_depth > 15) {
+    DGPP_LOG_ERROR("engine.dflash_depth (--dflash-depth) must be in [0, 15], got {}", dflash_depth);
     return 2;
   }
   dgpp::Qwen35Model::set_dflash_options(dflash_verify_graph, dflash_draft_batch, dflash_depth);

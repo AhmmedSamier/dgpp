@@ -3876,8 +3876,9 @@ class GraphEngineAdapter final : public sched::SchedulerEngine {
   int max_rows_ = kDecodeRows;      // the model's decode-row ceiling
   bool batch_unavailable_ = false;  // slots * rows past it (or no batched chain): scalar only
   // Per-position draft acceptance: engine-wide and per slot.
-  std::array<uint64_t, 8> mtp_attempts_{}, mtp_accepts_{};
-  std::vector<std::array<uint64_t, 8>> slot_mtp_attempts_, slot_mtp_accepts_;
+  std::array<uint64_t, SchedulerEngine::MtpAcceptance::kMaxDrafts> mtp_attempts_{}, mtp_accepts_{};
+  std::vector<std::array<uint64_t, SchedulerEngine::MtpAcceptance::kMaxDrafts>>
+      slot_mtp_attempts_, slot_mtp_accepts_;
   // Context-lookup drafting (engine.lookup_draft): per-slot token history
   // (the prefill prompt + every decided token, whose last entry is the new
   // pending). Sized on set_lookup_drafts; empty unless on.

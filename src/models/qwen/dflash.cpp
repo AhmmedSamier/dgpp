@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 
@@ -94,7 +95,9 @@ DFlashConfig DFlashConfig::parse(const minijson::Value& root) {
   if (str_at(root, "model_type", "") != "qwen3") reject("model_type", "qwen3 required");
   if (str_at(root, "dtype", "bfloat16") != "bfloat16") reject("dtype", "bfloat16 required");
   const minijson::Value& d = require(root, "dflash_config");
-  c.block_size = int_at(d, "block_size", 16, true);
+  c.dspine = d.find("selected_prefix_code_bridge") != nullptr;
+  c.block_size = c.dspine ? int_at(d, "block_size", int_at(root, "block_size", 16, true))
+                          : int_at(d, "block_size", 16, true);
   c.mask_token_id = int_at(d, "mask_token_id", -1, true);
   const minijson::Value& taps = require(d, "target_layer_ids");
   if (!taps.is_array() || taps.items().empty()) reject("dflash_config.target_layer_ids", "empty");
@@ -143,6 +146,62 @@ DFlashConfig DFlashConfig::parse(const minijson::Value& root) {
       else reject("layer_types", "only full_attention and sliding_attention are supported");
     }
   }
+  if (c.dspine) {
+    const auto* causal = d.find("draft_block_causal");
+    if (!causal || !causal->as_bool(false))
+      reject("dflash_config.draft_block_causal", "DSpine requires causal draft blocks");
+    if (root.find("is_causal") && !root.at("is_causal").as_bool(false))
+      reject("is_causal", "contradicts dflash_config.draft_block_causal");
+    const auto& bridge = require(d, "selected_prefix_code_bridge");
+    c.code_size = int_at(bridge, "code_size", 0, true);
+    c.code_rank = int_at(bridge, "rank", 0, true);
+    if (!bridge.find("eps") || !bridge.at("eps").is_number() ||
+        !std::isfinite(bridge.at("eps").as_double()) || bridge.at("eps").as_double() <= 0)
+      reject("dflash_config.selected_prefix_code_bridge.eps", "must be positive");
+    c.code_eps = static_cast<float>(bridge.at("eps").as_double());
+    if (str_at(d, "selected_prefix_feature_write_mode", "") != "independent")
+      reject("dflash_config.selected_prefix_feature_write_mode", "independent required");
+    if (!d.find("selected_prefix_feature_writes") || !d.at("selected_prefix_feature_writes").as_bool(false))
+      reject("dflash_config.selected_prefix_feature_writes", "true required");
+    if (d.find("selected_prefix_terminal") && d.at("selected_prefix_terminal").as_bool(true))
+      reject("dflash_config.selected_prefix_terminal", "terminal bridge is unsupported");
+    if (d.find("selected_prefix_terminal_residual_rank") &&
+        int_at(d, "selected_prefix_terminal_residual_rank", 0) != 0)
+      reject("dflash_config.selected_prefix_terminal_residual_rank", "nonzero terminal residual is unsupported");
+    const auto& active = require(d, "selected_prefix_feature_layers");
+    if (!active.is_array() || active.items().empty())
+      reject("dflash_config.selected_prefix_feature_layers", "empty");
+    for (const auto& layer : active.items()) {
+      if (!layer.is_number()) reject("dflash_config.selected_prefix_feature_layers", "non-numeric element");
+      c.code_feature_layers.push_back(static_cast<int>(layer.as_int()));
+    }
+    if (!std::is_sorted(c.code_feature_layers.begin(), c.code_feature_layers.end()) ||
+        std::adjacent_find(c.code_feature_layers.begin(), c.code_feature_layers.end()) != c.code_feature_layers.end())
+      reject("dflash_config.selected_prefix_feature_layers", "must be strictly ascending");
+    if (c.code_feature_layers.back() != c.num_hidden_layers)
+      reject("dflash_config.selected_prefix_feature_layers", "the final draft layer must write the bridge");
+    if (c.code_feature_layers.front() < 1 || c.code_feature_layers.back() > c.num_hidden_layers)
+      reject("dflash_config.selected_prefix_feature_layers", "layer ids must be within the draft stack");
+    const auto* refine = d.find("selected_prefix_last_write_refine");
+    if (!refine) reject("dflash_config.selected_prefix_last_write_refine", "missing");
+    if (str_at(*refine, "kind", "") != "exact_sender")
+      reject("dflash_config.selected_prefix_last_write_refine.kind", "exact_sender required");
+    const double refine_weight = double_at(*refine, "weight", 1.0);
+    if (int_at(*refine, "version", 1) != 1 || !std::isfinite(refine_weight) || refine_weight < 0.0)
+      reject("dflash_config.selected_prefix_last_write_refine", "version 1 and nonnegative weight required");
+    c.code_refine_weight = static_cast<float>(refine_weight);
+    c.code_head_topk = int_at(*refine, "head_topk", 0, true);
+    const auto* second = root.find("code_bridge_second_pass");
+    if (!second || str_at(*second, "mode", "") != "serial_table" ||
+        int_at(*second, "first_exact", -1) != c.num_hidden_layers - 1 ||
+        int_at(*second, "head_topk", -1) != c.code_head_topk)
+      reject("code_bridge_second_pass", "matching serial_table final-layer refinement required");
+    if (c.code_size <= 0 || c.code_size > 4096 || (c.code_size & (c.code_size - 1)) != 0 ||
+        c.code_rank <= 0 || c.code_rank > 4096 ||
+        c.code_rank % 128 != 0 || c.code_head_topk < 2 || c.code_head_topk > 64 ||
+        (c.code_head_topk & (c.code_head_topk - 1)) != 0)
+      reject("dflash_config.selected_prefix_code_bridge", "invalid code dimensions or top-k");
+  }
   if (const minijson::Value* tw = root.find("tie_word_embeddings"))
     if (tw->as_bool(false))
       reject("tie_word_embeddings", "the draft shares the target's head; ties are not loaded");
@@ -150,16 +209,22 @@ DFlashConfig DFlashConfig::parse(const minijson::Value& root) {
 }
 
 void DFlashConfig::validate_against(const Qwen35TextConfig& target) const {
-  if (hidden_size != target.hidden_size)
+  validate_against(target.hidden_size, target.vocab_size, target.num_hidden_layers,
+                   target.context_limit());
+}
+
+void DFlashConfig::validate_against(int target_hidden, int target_vocab, int target_layers,
+                                    int64_t target_context) const {
+  if (hidden_size != target_hidden)
     reject("hidden_size", "the draft must share the target's width (fc and the shared head)");
-  if (vocab_size != target.vocab_size)
+  if (vocab_size != target_vocab)
     reject("vocab_size", "the draft must share the target's vocabulary (mask id, shared head)");
-  if (mask_token_id < 0 || mask_token_id >= target.vocab_size)
+  if (mask_token_id < 0 || mask_token_id >= target_vocab)
     reject("dflash_config.mask_token_id", "outside the target vocabulary");
   if (block_size - 1 > 15)
     reject("dflash_config.block_size", "the engine verifies at most 15 drafts per step");
   for (size_t i = 0; i < target_layer_ids.size(); ++i) {
-    if (target_layer_ids[i] < 0 || target_layer_ids[i] >= target.num_hidden_layers)
+    if (target_layer_ids[i] < 0 || target_layer_ids[i] >= target_layers)
       reject("dflash_config.target_layer_ids",
              "layer " + std::to_string(target_layer_ids[i]) + " does not exist in the target");
     if (i && target_layer_ids[i] == target_layer_ids[i - 1])
@@ -167,6 +232,8 @@ void DFlashConfig::validate_against(const Qwen35TextConfig& target) const {
   }
   if (sliding_window <= block_size)
     reject("sliding_window", "the window must cover the draft block");
+  if (max_position_embeddings > target_context)
+    reject("max_position_embeddings", "the draft must not exceed the target's");
 }
 
 size_t dflash_weights_bytes(const DFlashConfig& cfg, int world) {
@@ -180,7 +247,15 @@ size_t dflash_weights_bytes(const DFlashConfig& cfg, int world) {
   const size_t total =
       static_cast<size_t>(cfg.num_hidden_layers) * per_layer +
       static_cast<size_t>(cfg.target_layer_ids.size()) * H * H + 2 * H;
-  return total * 2;
+  size_t elems = total;
+  if (cfg.dspine) {
+    const size_t C = static_cast<size_t>(cfg.code_size);
+    const size_t R = static_cast<size_t>(cfg.code_rank);
+    const size_t V = static_cast<size_t>(cfg.vocab_size);
+    elems += V * C + C * H + static_cast<size_t>(cfg.num_hidden_layers - 1) * C * H +
+             static_cast<size_t>(cfg.num_hidden_layers) * H * R + 3 * R * C + C * R + R;
+  }
+  return elems * 2;
 }
 
 DFlashWeights load_dflash_weights(const DFlashConfig& cfg, const std::string& dir,
@@ -303,6 +378,41 @@ DFlashWeights load_dflash_weights(const DFlashConfig& cfg, const std::string& di
   copy_full("hidden_norm.weight", const_cast<uint16_t*>(w.hidden_norm), {H});
   w.norm = bump(H);
   copy_full("norm.weight", const_cast<uint16_t*>(w.norm), {H});
+  if (cfg.dspine) {
+    const int64_t C = cfg.code_size, R = cfg.code_rank, L = cfg.num_hidden_layers;
+    auto copy_bridge = [&](const std::string& name, const uint16_t*& dst,
+                           std::vector<int64_t> shape) {
+      const size_t n = std::accumulate(shape.begin(), shape.end(), size_t{1},
+                                       [](size_t a, int64_t b) { return a * static_cast<size_t>(b); });
+      dst = bump(n);
+      copy_full(name, const_cast<uint16_t*>(dst), std::move(shape));
+    };
+    copy_bridge("selected_prefix_bridge.codebook", w.codebook, {cfg.vocab_size, C});
+    copy_bridge("selected_prefix_bridge.read_weight", w.read_weight, {C, H});
+    copy_bridge("selected_prefix_bridge.early_read_weights", w.early_read_weights, {L - 1, C, H});
+    copy_bridge("selected_prefix_bridge.feature_write_weights", w.feature_write_weights, {L, H, R});
+    copy_bridge("selected_prefix_bridge.gate.weight", w.bridge_gate, {R, C});
+    copy_bridge("selected_prefix_bridge.predecessor_gate.weight", w.predecessor_gate, {R, C});
+    copy_bridge("selected_prefix_bridge.prev.weight", w.previous_value, {R, C});
+    copy_bridge("selected_prefix_bridge.out.weight", w.bridge_output, {C, R});
+    copy_bridge("selected_prefix_bridge.gate.bias", w.bridge_gate_bias, {R});
+    const auto require_version = [&](const std::string& name) {
+      const TensorInfo* t = need(name);
+      check(t, DType::I64, {});
+      int64_t value = 0;
+      std::memcpy(&value, t->data, sizeof(value));
+      if (value != 1) throw std::runtime_error("load_dflash_weights: unsupported DSpine version tensor " + name);
+    };
+    for (const char* name : {"draft_block_causal_version", "last_write_refine_version",
+                             "selected_prefix_bridge.independent_write_version",
+                             "selected_prefix_bridge.terminal_disabled_version"})
+      require_version(name);
+    const TensorInfo* terminal = find("selected_prefix_bridge.out.weight");
+    const auto* terminal_values = static_cast<const uint16_t*>(terminal->data);
+    if (std::any_of(terminal_values, terminal_values + terminal->numel(),
+                    [](uint16_t x) { return x != 0; }))
+      throw std::runtime_error("load_dflash_weights: terminal-disabled DSpine output weight is nonzero");
+  }
   if (off * 2 != w.bytes)
     throw std::logic_error("load_dflash_weights: arena accounting mismatch");
   DGPP_CUDA_OK(cudaStreamSynchronize(stream));  // host shard and column buffers die on return

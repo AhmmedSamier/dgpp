@@ -60,6 +60,7 @@ inline void qwen35_check_image_pads(const std::vector<int64_t>& ids, int64_t sta
 #include "kernels/sample_pick.hpp"
 #include "models/dflash2/draft_planes.hpp"
 #include "models/dflash2/drafter.hpp"
+#include "models/qwen/dspine_drafter.hpp"
 #include "models/qwen/layers.hpp"
 #include "models/qwen/loader.hpp"
 #include "models/qwen/loader35.hpp"
@@ -367,15 +368,16 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // through the five bidirectional layers over the plane context; each
   // mask rows' top-K go through the reference chained selector walk, which
   // proposes the `drafts()` following tokens.
-  bool dflash2_enabled() const { return dflash2_ || dflash1_; }
+  bool dflash2_enabled() const { return dflash2_ || dflash1_ || dspine_; }
   // The verifiable drafts: v2's block; v1's 15 capped by the verify budget
-  // (dflash_depth, at most 7 — kSpecRows).
+  // (dflash_depth; the engine's per-request row bound is kSpecRows).
   int dflash2_drafts() const {
-    if (dflash1_) return std::min(df1cfg_.drafts(), dflash_depth_ == 0 ? 7 : dflash_depth_);
+    if (dspine_) return std::min(dspine_drafter_.drafts(), dflash_depth_ == 0 ? dspine_drafter_.drafts() : dflash_depth_);
+    if (dflash1_) return std::min(df1cfg_.drafts(), dflash_depth_ == 0 ? df1cfg_.drafts() : dflash_depth_);
     return dflash2_ ? df_.drafts() : 0;
   }
   // Physical rows written by a redraft, independent of the verify cap.
-  int block_draft_rows() const { return dflash1_ ? df1cfg_.query_rows() : df_.query_rows(); }
+  int block_draft_rows() const { return dspine_ ? dspine_drafter_.query_rows() : (dflash1_ ? df1cfg_.query_rows() : df_.query_rows()); }
   bool dflash1_enabled() const { return dflash1_; }
   // False without a draft (pool exhausted / context bound): the caller
   // runs the step without speculation.
@@ -391,7 +393,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
                            std::vector<std::vector<int32_t>>* drafts);
   // The stacked draft batch width (slots per block forward): the verify
   // batch's slot count at the row ceiling.
-  int dflash2_batch_slots() const { return df_.batch_slots(); }
+  int dflash2_batch_slots() const { return dspine_ || dflash1_ ? 1 : df_.batch_slots(); }
   // The captured verify (batched graph capture with a drafter loaded):
   // one static replay per row size — 8 rows for a lone slot, 16 for two,
   // 32 (4 x 8) otherwise. Every slot is padded to a full 8-row block;
@@ -450,7 +452,7 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // ([drafts][block_candidates()] per slot; the engine's acceptance
   // diagnostics rank the verify's correction among them). v1 publishes no
   // candidate tables (top-1 proposals only) — 0 skips the read.
-  int block_candidates() const { return dflash1_ ? 0 : df_.cfg().selector_top_k; }
+  int block_candidates() const { return dspine_ || dflash1_ ? 0 : df_.cfg().selector_top_k; }
   const int32_t* block_candidates_host(int req) const { return df_.candidates_host(req); }
 
  private:
@@ -627,6 +629,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   uint8_t* head_fp8_ = nullptr;  // [V, H] E4M3
   float* head_scales_ = nullptr;  // [ceil(V/128), H/128] F32 (device)
   bool head_fp8_enabled_ = false;
+  // BF16 proposal view for checkpoint-native channel-FP8 heads when DSpine
+  // is active. Target verification keeps using the checkpoint head.
+  uint16_t* dspine_head_bf16_ = nullptr;
   std::vector<int> pt_gdn_ord_;   // per main-layer index, else -1
   std::vector<int> pt_full_ord_;  // per main-layer index, else -1
   // Activation scratch at max_tokens rows.
@@ -665,6 +670,9 @@ class Qwen35Model : public SessionModel<Qwen35Model> {
   // DFlashConfig + weights, tap map, one block of reusable scratch
   // (query_rows = 16 rows; C1 scope — batching and capture stay open).
   bool dflash1_ = false;
+  bool dspine_ = false;
+  DFlashConfig dspine_cfg_;
+  DSpineDrafter dspine_drafter_;
   DFlashConfig df1cfg_;
   DFlashWeights df1w_;
   std::vector<int> df1_tap_;  // per main-layer index: the fc slice, else -1

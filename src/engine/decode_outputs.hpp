@@ -24,6 +24,7 @@
 
 #include "sample/sampler.hpp"
 #include "text/tool_grammar.hpp"
+#include "engine/spec_rows.hpp"
 
 namespace dgpp {
 
@@ -44,7 +45,6 @@ namespace dgpp {
 // it).
 constexpr int kDecodeRows = 8;
 constexpr int kDecodeRowsMax = 96;
-constexpr int kSpecRows = 8;  // 2026-09-30: the DFlash2 block (7 drafts + the pending token)
 
 // One forward's rows as the engines read them.
 struct DecodeOutputs {

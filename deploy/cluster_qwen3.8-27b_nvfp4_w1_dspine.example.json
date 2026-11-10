@@ -1,0 +1,39 @@
+{
+  "model": "unsloth/Qwen3.8-27B-NVFP4",
+  "world_size": 1,
+  "engine": {
+    "max_concurrency": 8,
+    "kv_capacity": 262080,
+    "kv_dtype": "bf16",
+    "default_max_tokens": 32768,
+    "queue_limit": 8,
+    "max_connections": 64,
+    "decode_graph": false,
+    "mtp": false,
+    "dflash_model": "tencent/Qwen3.8-27B-DSpine-b16",
+    "draft_head": "exact",
+    "dflash_weights": "checkpoint",
+    "prefill_activations": "native",
+    "prefill_attention": "bf16",
+    "mtp_schedule": false,
+    "mtp_schedule_row_ms": 2.0,
+    "mtp_schedule_base_ms": 130.0,
+    "mtp_draft_temperature": 0.7,
+    "mtp_verify": "block",
+    "prefix_cache_gib": 16,
+    "admission": "grow",
+    "admission_window": 256,
+    "model_alias": "Qwen3.8-27B-NVFP4-DSpine-test",
+    "sampling_candidates": 128,
+    "stats_interval_s": 10,
+    "bf16_weights": "bf12",
+    "dflash_depth": 8
+  },
+  "paths": {
+    "resident_cache": ""
+  },
+  "http": {
+    "bind_host": "0.0.0.0",
+    "port": 8000
+  }
+}

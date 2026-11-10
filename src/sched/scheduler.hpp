@@ -149,9 +149,10 @@ class SchedulerEngine {
   // the steps that accepted it. Engine-wide since construction, or per
   // slot since it opened (reset at close). A plain engine reports depth 0.
   struct MtpAcceptance {
+    static constexpr int kMaxDrafts = 16;
     int depth = 0;
-    uint64_t attempts[8] = {};
-    uint64_t accepts[8] = {};
+    uint64_t attempts[kMaxDrafts] = {};
+    uint64_t accepts[kMaxDrafts] = {};
     // A block drafter's first rejected draft, ranked among the candidates
     // its walk scored at that position (2026-10-05, the tree-verify
     // sizing): miss_rank[r] counts corrections that were the drafter's

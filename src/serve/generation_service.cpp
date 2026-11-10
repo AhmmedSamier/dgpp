@@ -2759,7 +2759,7 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
     count_live(&m, prefills);
   }
   uint64_t drafted = 0, accepted = 0;
-  for (int p = 0; p < m.mtp.depth && p < 8; ++p) {
+  for (int p = 0; p < m.mtp.depth && p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
     drafted += m.mtp.attempts[p];
     accepted += m.mtp.accepts[p];
   }
@@ -2933,10 +2933,10 @@ void GenerationService::route_metrics_prometheus(HttpResponseWriter& w) {
   out.counter("dgpp_spec_decode_num_lookup_sampled_fused_total",
               "Sampled lookup fusion is disabled; this counter stays zero.",
               m.mtp.lookup_sampled_fused);
-  for (int p = 0; p < m.mtp.depth && p < 8; ++p)
+  for (int p = 0; p < m.mtp.depth && p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p)
     out.counter("dgpp_spec_decode_num_draft_tokens_per_pos_total", "Draft tokens verified at each draft position.",
                 m.mtp.attempts[p], "position=\"" + std::to_string(p) + "\"");
-  for (int p = 0; p < m.mtp.depth && p < 8; ++p)
+  for (int p = 0; p < m.mtp.depth && p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p)
     out.counter("dgpp_spec_decode_num_accepted_tokens_per_pos_total", "Draft tokens accepted at each draft position.",
                 m.mtp.accepts[p], "position=\"" + std::to_string(p) + "\"");
 
@@ -3086,7 +3086,7 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   out.append(",\"num_drafts_total\":");
   append_json_int(&out, m.mtp.attempts[0]);
   uint64_t drafted = 0, accepted = 0;
-  for (int p = 0; p < m.mtp.depth && p < 8; ++p) {
+  for (int p = 0; p < m.mtp.depth && p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
     drafted += m.mtp.attempts[p];
     accepted += m.mtp.accepts[p];
   }
@@ -3095,12 +3095,12 @@ void GenerationService::route_metrics(HttpResponseWriter& w) {  Scheduler::Meter
   out.append(",\"num_accepted_tokens_total\":");
   append_json_int(&out, accepted);
   out.append(",\"num_draft_tokens_per_pos_total\":[");
-  for (int p = 0; p < m.mtp.depth && p < 8; ++p) {
+  for (int p = 0; p < m.mtp.depth && p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
     if (p) out.push_back(',');
     append_json_int(&out, m.mtp.attempts[p]);
   }
   out.append("],\"num_accepted_tokens_per_pos_total\":[");
-  for (int p = 0; p < m.mtp.depth && p < 8; ++p) {
+  for (int p = 0; p < m.mtp.depth && p < sched::SchedulerEngine::MtpAcceptance::kMaxDrafts; ++p) {
     if (p) out.push_back(',');
     append_json_int(&out, m.mtp.accepts[p]);
   }

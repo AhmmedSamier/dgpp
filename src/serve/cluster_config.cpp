@@ -433,7 +433,7 @@ ClusterConfig parse_cluster_config(const std::string& json, const std::string& w
         }
         else if (p.key == "l2_prefetch_merge") e.l2_prefetch_merge = boolean(x, ek, what);
         else if (p.key == "dflash_draft_batch") e.dflash_draft_batch = boolean(x, ek, what);
-        else if (p.key == "dflash_depth") e.dflash_depth = static_cast<int>(integer(x, ek, what, 0, 7));
+        else if (p.key == "dflash_depth") e.dflash_depth = static_cast<int>(integer(x, ek, what, 0, 15));
         else if (p.key == "mtp_depth") {
           e.mtp_depth = static_cast<int>(
               integer(x, ek, what, 1, 7));  // The loaded family validates its own draft width.

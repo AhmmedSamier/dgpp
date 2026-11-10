@@ -257,7 +257,8 @@ __global__ void block_attn_split_kernel(
     const uint16_t* __restrict__ q, int64_t q_stride, const uint16_t* __restrict__ k_cache,
     const uint16_t* __restrict__ v_cache, const int32_t* __restrict__ block_table, int block_tokens,
     int blocks_per_request, int block_rows, int64_t window, const int64_t* __restrict__ pos,
-    float scale, float* __restrict__ partials, int heads, int kv_heads, int dim) {
+    float scale, float* __restrict__ partials, int heads, int kv_heads, int dim,
+    bool causal_block) {
   dgpp_pdl_wait();
   const int row = blockIdx.x;
   const int kvh = blockIdx.y;
@@ -305,7 +306,7 @@ __global__ void block_attn_split_kernel(
     for (int span = 0; span < 2; ++span) {
       if (span == 1 && !last) break;
       const int64_t a = span == 0 ? s0 : blk_lo;
-      const int64_t b = span == 0 ? s1 : blk_hi;
+      const int64_t b = span == 0 ? s1 : (causal_block ? min(blk_hi, p) : blk_hi);
       for (int64_t kp = a; kp <= b; ++kp) {
         const int64_t slot = plane_slot(block_table, kp, block_tokens, blocks_per_request);
         const int64_t kbase = (slot * kv_heads + kvh) * dim;
@@ -902,7 +903,7 @@ void dflash2_block_attn_split(const uint16_t* q, int64_t q_row_stride, const uin
                               int blocks_per_request, int block_rows, int64_t window,
                               const int64_t* pos, int rows, int heads, int kv_heads, int dim,
                               float scale, float* partials, uint16_t* out, cudaStream_t stream,
-                              bool fp32_p) {
+                              bool fp32_p, bool causal_block) {
   if (rows <= 0) return;
   if (dim != 128 || heads % kv_heads || heads / kv_heads > 16)
     throw std::invalid_argument(
@@ -915,11 +916,11 @@ void dflash2_block_attn_split(const uint16_t* q, int64_t q_row_stride, const uin
   if (fp32_p)
     block_attn_split_kernel<true><<<grid, 32 * hpq, 0, stream>>>(
         q, q_row_stride, k_cache, v_cache, block_table, block_tokens, blocks_per_request,
-        block_rows, window, pos, scale, partials, heads, kv_heads, dim);
+        block_rows, window, pos, scale, partials, heads, kv_heads, dim, causal_block);
   else
     block_attn_split_kernel<false><<<grid, 32 * hpq, 0, stream>>>(
         q, q_row_stride, k_cache, v_cache, block_table, block_tokens, blocks_per_request,
-        block_rows, window, pos, scale, partials, heads, kv_heads, dim);
+        block_rows, window, pos, scale, partials, heads, kv_heads, dim, causal_block);
   DGPP_CUDA_OK(cudaGetLastError());
   const dim3 cgrid(rows, heads);
   block_attn_combine_kernel<<<cgrid, 32, 0, stream>>>(partials, heads, dim, out);

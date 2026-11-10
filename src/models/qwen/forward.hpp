@@ -66,6 +66,7 @@
 #include "kernels/pick.hpp"
 #include "models/qwen/config.hpp"
 #include "models/dflash2/drafter.hpp"
+#include "models/qwen/dspine_drafter.hpp"
 #include "models/qwen/kv_pool.hpp"
 #include "models/qwen/layers.hpp"
 #include "models/qwen/loader.hpp"
@@ -169,7 +170,7 @@ class QwenModel : public SessionModel<QwenModel> {
     dflash_depth_ = depth;
   }
   static bool dflash_verify_graph() { return dflash_verify_graph_; }
-  static bool dflash_draft_batch() { return dflash_draft_batch_; }
+  bool dflash_draft_batch() const { return dflash2_ && dflash_draft_batch_; }
   static int dflash_depth() { return dflash_depth_; }
   ~QwenModel();
   QwenModel(const QwenModel&) = delete;
@@ -213,12 +214,12 @@ class QwenModel : public SessionModel<QwenModel> {
   // draft's layers over that context, the mask rows' top-K through the
   // selector walk. The family hosts one DFlash2Drafter (df_) over its own
   // pool planes, exact-head dispatch and gemm row envelope.
-  bool dflash2_enabled() const { return dflash2_; }
+  bool dflash2_enabled() const { return dflash2_ || dspine_; }
   // The verifiable drafts a step proposes (the block; the engine caps the
   // verify at dflash_depth()).
-  int dflash2_drafts() const { return dflash2_ ? df_.drafts() : 0; }
+  int dflash2_drafts() const { return dflash2_ ? df_.drafts() : (dspine_ ? dspine_drafter_.drafts() : 0); }
   // Physical rows written by a redraft, independent of the verify cap.
-  int block_draft_rows() const { return dflash2_ ? df_.query_rows() : 0; }
+  int block_draft_rows() const { return dflash2_ ? df_.query_rows() : (dspine_ ? dspine_drafter_.query_rows() : 0); }
   // False without a draft (pool exhausted / context bound): the caller
   // runs the step without speculation.
   bool dflash2_draft(int req, int64_t bonus, std::vector<int32_t>* drafts);
@@ -228,7 +229,7 @@ class QwenModel : public SessionModel<QwenModel> {
                            const std::vector<int64_t>& bonuses,
                            std::vector<std::vector<int32_t>>* drafts);
   // The stacked draft batch width (slots per block forward).
-  int dflash2_batch_slots() const { return df_.batch_slots(); }
+  int dflash2_batch_slots() const { return dspine_ ? 1 : df_.batch_slots(); }
   // The captured-verify gate (the Qwen35 rule, model35.hpp:394): the
   // recorded block draft is ported, so the verified rows ride the step's
   // decode graph when they fit the graph's row ceiling (the eager engine
@@ -245,9 +246,9 @@ class QwenModel : public SessionModel<QwenModel> {
   // The recorded drafts' host copies (the engine reads them after a
   // replay's end event) and the mask rows' candidate lists (the
   // acceptance diagnostics).
-  const int32_t* block_drafts_host(int req) const { return df_.drafts_host(req); }
-  int block_candidates() const { return df_.cfg().selector_top_k; }
-  const int32_t* block_candidates_host(int req) const { return df_.candidates_host(req); }
+  const int32_t* block_drafts_host(int req) const { return dflash2_ ? df_.drafts_host(req) : nullptr; }
+  int block_candidates() const { return dflash2_ ? df_.cfg().selector_top_k : (dspine_ ? dspine_cfg_.code_head_topk : 0); }
+  const int32_t* block_candidates_host(int req) const { return dflash2_ ? df_.candidates_host(req) : nullptr; }
   // Let the engine arm the shared selector's sampled proposal distribution
   // before capture, so verification can apply the proposal ratio rule.
   void dflash2_arm_proposals(const SampleSpec* specs, DraftProposal* proposals,
@@ -544,7 +545,10 @@ class QwenModel : public SessionModel<QwenModel> {
   // the hc streams (df_mean_) — captured at the end of that layer's run
   // (run_rows).
   bool dflash2_ = false;
+  bool dspine_ = false;
   DFlash2Drafter df_;
+  DFlashConfig dspine_cfg_;
+  DSpineDrafter dspine_drafter_;
   uint16_t* df_mean_ = nullptr;        // [M, H] one tap's mean over the hc streams (the tap site's staging)
   // The capture-time step fields for the component.
   DFlash2CaptureCtx df_capture_ctx() const;

@@ -213,6 +213,7 @@ add_library(dgpp_kernels STATIC
   src/kernels/dsv4_attn.cu
   src/kernels/qwen_mtp.cu
   src/kernels/dflash2.cu
+  src/kernels/dspine.cu
   src/kernels/qsa.cu
   src/kernels/qsa_warp.cu
   src/kernels/qsa_fp8.cu
@@ -592,6 +593,7 @@ add_library(dgpp_models_qwen_layers STATIC
   src/models/qwen/layers.cpp
   src/models/qwen/kv_pool.cpp
   src/models/qwen/forward.cpp
+  src/models/qwen/dspine_drafter.cpp
   src/models/qwen/model35.cpp
   src/models/qwen/model35_kernels.cu)
 target_include_directories(dgpp_models_qwen_layers PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)

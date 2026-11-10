@@ -68,6 +68,7 @@ struct DFlash2Host {
   std::function<Plane(int l)> plane = nullptr;
   std::function<int64_t(int req)> session_position = nullptr;  // the committed end (-1: closed)
   const uint16_t* embed = nullptr;                 // the target's embedding table
+  const uint16_t* lm_head_bf16 = nullptr;          // exact full row-contiguous head for DSpine
   // The drafter's block GEMMs on the target's gemm object (the row
   // envelope is the family's configure call).
   CublasLtGemm* gemm = nullptr;

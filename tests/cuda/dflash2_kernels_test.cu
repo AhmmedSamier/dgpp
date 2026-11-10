@@ -19,6 +19,7 @@
 #include "common/test.hpp"
 #include "kda_test_helpers.hpp"
 #include "kernels/dflash2.hpp"
+#include "kernels/dspine.hpp"
 #include "kernels/pick.hpp"
 
 using namespace dgpp::kda_test;
@@ -80,6 +81,126 @@ DGPP_TEST(dflash2_grouped_conv_matches_the_reference) {
         want[static_cast<int64_t>(r) * hidden + c] = dgpp::float_to_bf16_bits(acc);
       }
     require_bf16("grouped conv side " + std::to_string(side), compare_bf16(y, want, 0), 0.0, 0.0);
+  }
+}
+
+DGPP_TEST(dspine_code_bridge_kernels_match_the_reference) {
+  cudaStream_t s = test_stream();
+  constexpr int rows = 4, block = 4, hidden = 4, code = 4, rank = 4, vocab = 5;
+  const std::vector<uint16_t> x = {dgpp::float_to_bf16_bits(1), dgpp::float_to_bf16_bits(2),
+                                    dgpp::float_to_bf16_bits(-1), dgpp::float_to_bf16_bits(0.5f),
+                                    dgpp::float_to_bf16_bits(0.5f), dgpp::float_to_bf16_bits(-1),
+                                    dgpp::float_to_bf16_bits(2), dgpp::float_to_bf16_bits(1)};
+  const std::vector<uint16_t> residual(x.size(), dgpp::float_to_bf16_bits(0.25f));
+  const std::vector<int64_t> ids = {2, 1, 3, 4};
+  const auto projected = random_bf16_normal(71, 16, 1.0f);
+  std::vector<uint16_t> codebook(static_cast<size_t>(vocab) * code);
+  for (int i = 0; i < vocab * code; ++i)
+    codebook[i] = dgpp::float_to_bf16_bits(static_cast<float>(i + 1) / 8.0f);
+  DevBuf dx(x.size() * 2), dr(residual.size() * 2), draw(x.size() * 2), dn(x.size() * 2),
+      dprojected(projected.size() * 2), dbook(codebook.size() * 2), dids(ids.size() * 8),
+      dcodes(projected.size() * 2), dpacked(rows * 3 * rank * 2), dbias(rank * 2),
+      dmessage(rows * rank * 2), ddelta(rows * hidden * 2), drms(rows * 4),
+      dpos(rows * 8), dnorm(hidden * 2), dout(rows * hidden * 2), dnormed(rows * hidden * 2);
+  dx.upload(x.data(), x.size() * 2);
+  dr.upload(residual.data(), residual.size() * 2);
+  dprojected.upload(projected.data(), projected.size() * 2);
+  dbook.upload(codebook.data(), codebook.size() * 2);
+  dids.upload(ids.data(), ids.size() * 8);
+  const auto packed_aos = random_bf16_normal(72, rows * 3 * rank, 0.2f);
+  std::vector<uint16_t> packed(packed_aos.size());
+  for (int r = 0; r < rows; ++r)
+    for (int part = 0; part < 3; ++part)
+      for (int j = 0; j < rank; ++j)
+        packed[static_cast<size_t>(part) * rows * rank + static_cast<size_t>(r) * rank + j] =
+            packed_aos[static_cast<size_t>(r) * 3 * rank + part * rank + j];
+  const auto bias = random_bf16_normal(73, rank, 0.1f);
+  const auto delta = random_bf16_normal(74, rows * hidden, 0.05f);
+  const auto normw = random_bf16_normal(75, hidden, 0.3f);
+  const std::vector<float> rms = {1.0f, 0.7f, 1.2f, 0.8f};
+  const std::vector<int64_t> pos = {0, 1, 2, 3};
+  dpacked.upload(packed.data(), packed.size() * 2);
+  dbias.upload(bias.data(), bias.size() * 2);
+  ddelta.upload(delta.data(), delta.size() * 2);
+  drms.upload(rms.data(), rms.size() * 4);
+  dpos.upload(pos.data(), pos.size() * 8);
+  dnorm.upload(normw.data(), normw.size() * 2);
+
+  dgpp::dspine_prepare_read(cb16(dx), cb16(dr), b16(draw), b16(dn), f32(drms), rows, hidden,
+                           1e-6f, true, s);
+  dgpp::dspine_normalize_codes(cb16(dprojected), cb16(dbook), ci64(dids), b16(dcodes), rows,
+                               block, vocab, code, 1e-6f, s);
+  dgpp::dspine_feature_message(cb16(dpacked), cb16(dbias), b16(dmessage), rows, block, rank, s);
+  dgpp::dspine_feature_finish(cb16(draw), cb16(ddelta), cf32(drms), ci64(dpos), cb16(dnorm),
+                              b16(dout), b16(dnormed), rows, block, hidden, 1e-6f, s);
+  DGPP_CUDA_OK(cudaStreamSynchronize(s));
+
+  std::vector<uint16_t> got_raw(x.size()), got_norm(x.size()), got_codes(projected.size()),
+      got_message(rows * rank), got_out(rows * hidden), got_normed(rows * hidden);
+  std::vector<float> got_rms(rows);
+  draw.download(got_raw.data(), got_raw.size() * 2);
+  dn.download(got_norm.data(), got_norm.size() * 2);
+  drms.download(got_rms.data(), got_rms.size() * 4);
+  dcodes.download(got_codes.data(), got_codes.size() * 2);
+  dmessage.download(got_message.data(), got_message.size() * 2);
+  dout.download(got_out.data(), got_out.size() * 2);
+  dnormed.download(got_normed.data(), got_normed.size() * 2);
+  for (int r = 0; r < rows; ++r) {
+    std::vector<float> raw(hidden);
+    float sq = 0;
+    for (int h = 0; h < hidden; ++h) {
+      const int i = r * hidden + h;
+      raw[h] = dgpp::bf16_bits_to_float(dgpp::float_to_bf16_bits(
+          dgpp::bf16_bits_to_float(x[i]) + dgpp::bf16_bits_to_float(residual[i])));
+      sq += raw[h] * raw[h];
+      require(got_raw[i] == dgpp::float_to_bf16_bits(raw[h]), "DSpine raw residual");
+    }
+    const float root = std::sqrt(sq / hidden);
+    require(std::abs(got_rms[r] - root) < 1e-6f, "DSpine RMS staging");
+    for (int h = 0; h < hidden; ++h) {
+      const uint16_t want = dgpp::float_to_bf16_bits(raw[h] / (root + 1e-6f));
+      require(got_norm[r * hidden + h] == want, "DSpine normalized read");
+    }
+    for (int c = 0; c < code; ++c) {
+      float want = dgpp::bf16_bits_to_float(projected[r * code + c]);
+      if (r == 0) want = dgpp::bf16_bits_to_float(codebook[ids[0] * code + c]) * std::sqrt(float(code));
+      else {
+        float n2 = 0;
+        for (int j = 0; j < code; ++j) {
+          const float v = dgpp::bf16_bits_to_float(projected[r * code + j]);
+          n2 += v * v;
+        }
+        want *= std::sqrt(float(code)) / (std::sqrt(n2) + 1e-6f);
+      }
+      require(got_codes[r * code + c] == dgpp::float_to_bf16_bits(want), "DSpine code normalization");
+    }
+    for (int j = 0; j < rank; ++j) {
+      float want = 0;
+      if (r != 0) {
+        const float q = dgpp::bf16_bits_to_float(packed[r * rank + j]);
+        const float sender = dgpp::bf16_bits_to_float(packed[rows * rank + (r - 1) * rank + j]);
+        const float value = dgpp::bf16_bits_to_float(packed[2 * rows * rank + (r - 1) * rank + j]);
+        const float b = dgpp::bf16_bits_to_float(bias[j]);
+        want = value / (1.0f + std::exp(-(q + sender + b)));
+      }
+      require(std::abs(dgpp::bf16_bits_to_float(got_message[r * rank + j]) - want) < 0.01f,
+              "DSpine predecessor message");
+    }
+    float variance = 0;
+    std::vector<float> result(hidden);
+    for (int h = 0; h < hidden; ++h) {
+      const int i = r * hidden + h;
+      float value = dgpp::bf16_bits_to_float(got_raw[i]);
+      if (r != 0) value += rms[r] * dgpp::bf16_bits_to_float(delta[i]);
+      result[h] = dgpp::bf16_bits_to_float(dgpp::float_to_bf16_bits(value));
+      require(got_out[i] == dgpp::float_to_bf16_bits(value), "DSpine feature write");
+      variance += result[h] * result[h];
+    }
+    variance /= hidden;
+    for (int h = 0; h < hidden; ++h) {
+      const float want = result[h] / std::sqrt(variance + 1e-6f) * dgpp::bf16_bits_to_float(normw[h]);
+      require(got_normed[r * hidden + h] == dgpp::float_to_bf16_bits(want), "DSpine fused norm");
+    }
   }
 }
 

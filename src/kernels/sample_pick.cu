@@ -1925,6 +1925,9 @@ void check_common(int rows, int world, int rank, int candidates,
                                 ": the device sampler decides T=1 rows or an "
                                 "MTP verify of up to " +
                                 std::to_string(kSampleVerdictRows) + " rows");
+  if (rows_per_request > 8 && candidates > 128)
+    throw std::invalid_argument(std::string(what) +
+                                ": speculative sampling above eight rows supports at most 128 candidates");
 }
 
 __global__ void adjust_count_kernel(int32_t* __restrict__ counts, int64_t token,
