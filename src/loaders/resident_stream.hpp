@@ -729,7 +729,12 @@ template <class F>
 typename ResidentLayerStream<F>::LoadWorker ResidentLayerStream<F>::make_worker() const {
   LoadWorker w;
   DGPP_CUDA_OK(cudaHostAlloc(&w.staging, staging_bytes_, cudaHostAllocDefault));
-  DGPP_CUDA_OK(cudaStreamCreate(&w.stream));
+  try {
+    DGPP_CUDA_OK(cudaStreamCreate(&w.stream));
+  } catch (...) {
+    cudaFreeHost(w.staging);
+    throw;
+  }
   return w;
 }
 
@@ -757,51 +762,53 @@ void ResidentLayerStream<F>::load_layers_parallel(int first, int last_exclusive,
                 F::who(), rank_, first, last_exclusive, threads,
                 static_cast<double>(staging_bytes_) / (1024.0 * 1024.0 * 1024.0));
   std::vector<LoadWorker> workers;
+  std::vector<std::thread> pool;
   workers.reserve(static_cast<size_t>(threads));
-  try {
-    for (int i = 0; i < threads; ++i) workers.push_back(make_worker());
-  } catch (...) {
-    for (const LoadWorker& w : workers) free_worker(w);
-    throw;
-  }
+  pool.reserve(static_cast<size_t>(threads));
   std::atomic<int> next(first);
   std::exception_ptr error;
   std::mutex error_mutex;
-  std::vector<std::thread> pool;
-  pool.reserve(static_cast<size_t>(threads));
-  for (int i = 0; i < threads; ++i) {
-    pool.emplace_back([&, i] {
-      LayerStats st;
-      const auto merge = [&] {
-        std::lock_guard<std::mutex> lk(error_mutex);
-        source_bytes_ += st.source_bytes;
-        verbatim_bytes_ += st.verbatim_bytes;
-        image_restored_ += st.restored;
-        image_captured_ += st.captured;
-      };
-      try {
-        for (int l = next.fetch_add(1); l < last_exclusive; l = next.fetch_add(1)) {
-          LayerStats one;
-          load_one_layer(l, workers[static_cast<size_t>(i)], one);
-          st.restored += one.restored;
-          st.captured += one.captured;
-          st.source_bytes += one.source_bytes;
-          st.verbatim_bytes += one.verbatim_bytes;
-        }
-      } catch (...) {
-        merge();
-        std::lock_guard<std::mutex> lk(error_mutex);
-        if (!error) error = std::current_exception();
-        return;
+  const auto run_worker = [&](int i) {
+    LayerStats st;
+    const auto merge = [&] {
+      std::lock_guard<std::mutex> lk(error_mutex);
+      source_bytes_ += st.source_bytes;
+      verbatim_bytes_ += st.verbatim_bytes;
+      image_restored_ += st.restored;
+      image_captured_ += st.captured;
+    };
+    try {
+      for (int l = next.fetch_add(1); l < last_exclusive; l = next.fetch_add(1)) {
+        LayerStats one;
+        load_one_layer(l, workers[static_cast<size_t>(i)], one);
+        st.restored += one.restored;
+        st.captured += one.captured;
+        st.source_bytes += one.source_bytes;
+        st.verbatim_bytes += one.verbatim_bytes;
       }
-      // Merge under the error mutex: workers finish at different times,
-      // the members stay plain and race-free.
+    } catch (...) {
       merge();
-    });
+      std::lock_guard<std::mutex> lk(error_mutex);
+      if (!error) error = std::current_exception();
+      return;
+    }
+    // Merge under the error mutex: workers finish at different times,
+    // the members stay plain and race-free.
+    merge();
+  };
+  std::exception_ptr startup_error;
+  try {
+    for (int i = 0; i < threads; ++i) workers.push_back(make_worker());
+    for (int i = 0; i < threads; ++i) pool.emplace_back(run_worker, i);
+  } catch (...) {
+    // Let any work already claimed finish, but stop handing out layers.
+    next.store(last_exclusive);
+    startup_error = std::current_exception();
   }
   for (auto& th : pool) th.join();
   for (const LoadWorker& w : workers) free_worker(w);
   sync_image_failure();
+  if (startup_error) std::rethrow_exception(startup_error);
   if (error) std::rethrow_exception(error);
 }
 
