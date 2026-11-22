@@ -179,6 +179,11 @@ class QwenModel : public SessionModel<QwenModel> {
   // a shape, itemized from the same formulas BEFORE anything is allocated
   // (engine/memory_plan.hpp): the serving app's pre-flight check.
   using MemoryPlan = dgpp::MemoryPlan;
+  // One cache block's bytes across every pool plane (the NVMe cold tier's
+  // record, issue #26) for a shape that is not built yet.
+  static size_t kv_block_bytes_static(const QwenTextConfig& cfg, int tp_rank, int tp_world, bool mtp,
+                                      LatentFormat kv_format = LatentFormat::kBf16,
+                                      const std::string& dflash2_dir = "");
   static MemoryPlan plan_memory(const QwenTextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
                                 int tp_rank = 0, int tp_world = 1,
                                 QwenResidency residency = QwenResidency::Streaming,
@@ -419,7 +424,7 @@ class QwenModel : public SessionModel<QwenModel> {
   bool head_screen_site_ = false;
   const uint8_t* head_greedy_verify_ = nullptr;
   const uint8_t* head_greedy_draft_ = nullptr;
-  int head_req_ = 0;                 // the request of a single-request head call
+  const int32_t* head_row_req_ = nullptr;  // device: the request of each row of the head call (the walk's table)
   float* head_ab_ = nullptr;         // [4][V] the argmax pass's upper bounds
   int32_t* head_lo_ = nullptr;       // [4] the best lower bounds (ordered ints)
   int32_t* head_cand_ = nullptr;     // [V] the candidate rows, compacted

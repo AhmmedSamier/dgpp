@@ -106,6 +106,10 @@ class MimoModel : public SessionModel<MimoModel> {
   // Every byte the constructor (and its layer objects) will allocate for
   // a shape, from the same formulas BEFORE anything is allocated.
   using MemoryPlan = dgpp::MemoryPlan;
+  // One cache block's bytes across every pool plane (the NVMe cold tier's
+  // record, issue #26) for a shape that is not built yet.
+  static size_t kv_block_bytes_static(const MimoTextConfig& cfg, int tp_rank, int tp_world, bool mtp,
+                                      LatentFormat kv_format);
   static MemoryPlan plan_memory(const MimoTextConfig& cfg, int max_tokens, int64_t max_cache_tokens,
                                 int tp_rank = 0, int tp_world = 1,
                                 MimoResidency residency = MimoResidency::Streaming,
@@ -144,6 +148,10 @@ class MimoModel : public SessionModel<MimoModel> {
   Outputs run_rows(const RowRun& run);
   void reset_slot_state(int req);
   GlmSpecSegments spec_segments(int req, int snapshot_row0 = 0) const;
+  // The snapshot is the pool's blocks and the two counters unless the
+  // native draft keeps its history rows in it: without them a request may
+  // open on the first tokens of a deeper snapshot.
+  bool attaches_within_snapshot() const { return !native_mtp(); }
   size_t snapshot_state_bytes() const { return kSnapshotStamp; }
   size_t draft_state_bytes() const {
     return native_mtp() ? size_t(kNativeHistoryRows) * cfg_.hidden_size * 2 : 0;
@@ -281,7 +289,7 @@ class MimoModel : public SessionModel<MimoModel> {
   // The early (normal-priority) prefetch of the next layer's projection
   // from fold 1 on, sized to the fold's idle DRAM time (0: off; an
   // experiment behind DGPP_MIMO_EARLY_QKV_MB together with the fp4 slot
-  // kernels' streaming loads, -DDGPP_FP4_SLOT_STREAMING=1).
+  // kernels' streaming loads, the gate/up launcher's `streaming`).
   size_t early_qkv_bytes_ = 0;
   void prefetch_ffn_side(const MimoLayerResident& r);
   void prefetch_attention_side(int layer);

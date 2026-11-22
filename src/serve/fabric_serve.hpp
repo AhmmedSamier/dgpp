@@ -3,9 +3,16 @@
 // Rank 0 accepts HTTP requests and sends newline-framed JSON over a TCP star:
 //
 //   {"op":"settings", ...}       model, world and engine settings, sent first
-//   {"op":"warm","adm":{...},"pc":N,"cfg":"<digest>"}
-//   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"pd":D,"od":F}
+//   {"op":"warm","adm":{...},"pc":N,"cfg":"<digest>","da":1}
+//   {"op":"tick","s":[{"id":"…","p":[ids],"m":N,"b":[...],"nc":1}],"c":["id"],"dk":[[op,1]],"pd":D,"od":F}
 //   {"op":"stop"}
+//
+// The NVMe cold tier (issue #26) adds the journal's one return path: a
+// peer writes "disk <op> <0|1>\n" when its tier finishes an op; rank 0
+// reads those lines between passes, and once every rank (itself
+// included) has reported an op it journals the world's verdict in the
+// next tick's "dk" — ok only when every rank succeeded — which every
+// scheduler applies before that tick.
 //
 // The settings record precedes model construction. Warm supplies admission
 // settings and prefix slot count, checks the configuration digest and
@@ -33,9 +40,12 @@
 #include <atomic>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "kernels/rope_scaling.hpp"
@@ -102,7 +112,8 @@ std::string encode_journal_stop();
 std::string encode_journal_warm(
     const dgpp::sched::AdmissionPolicy& policy = dgpp::sched::AdmissionPolicy{},
     int prefix_slots = 0,
-    const std::string& config_digest = "");
+    const std::string& config_digest = "",
+    bool disk_adopt = false);
 
 // The settings record (2026-09-06, the productionizing pass): what rank 0
 // pushes to every peer over the journal BEFORE anything builds — the first
@@ -112,6 +123,7 @@ std::string encode_journal_warm(
 // when they differed). The effective-config digest on the warm record
 // then holds by construction and stays as an assertion.
 struct WorldSettings {
+  std::string runtime_adapter_id;  // empty keeps ordinary serving unchanged
   std::string version;     // rank 0's dgpp version: a mixed-version world refuses to form
   std::string model;       // the HF model id ("" when rank 0 ran from a directory)
   std::string checkpoint;  // rank 0's checkpoint directory (a peer without an id uses it)
@@ -133,6 +145,7 @@ struct WorldSettings {
   bool prefill_fp8_gemm = false;
   bool prefill_fp8_per_tensor = false;  // the Qwen3.8-27B per-tensor prefill recipe (opt-in)
   std::string prefill_activations = "bf16";  // "native": the checkpoint's activation recipe on prefill rows
+  std::string activations = "bf16";  // MiniMax target: every row, including decode
   std::string prefill_attention = "bf16";    // Qwen3.5 / Flash-Next attention over an fp8 pool
   std::string decode_attention = "bf16";     // Flash-Next QSA: bf16 or native fp8 compute
   std::string dflash_model;             // the DFlash2 drafter (Qwen3.8-27B, world 1); empty: none
@@ -152,6 +165,8 @@ struct WorldSettings {
   bool expert_gemm_pair = false;
   bool ngram_prestage = true;
   std::string prefill = "bounded";           // the DeepSeek-V4.1 prefill mode: bounded | exact
+  int dory_loops = 0;                  // engine.dory_loops (Dory1.0-4B, world 1 only; 0 = the checkpoint's)
+  std::string dory_kv_cache = "per_loop";    // engine.dory_kv_cache: per_loop | last_loop
   std::string prefill_dense = "auto";        // family default | tile | streaming
   bool prefill_fold_overlap = true;
   bool decode_pdl = true;                    // the decode graph's kernel edges programmatic          // the DeepSeek-V4.1 prefill's boundary folds under the other row block's compute
@@ -183,6 +198,7 @@ struct WorldSettings {
   double mtp_schedule_lambda = 0.0;
   int mtp_schedule_min_depth = 1;
   int mtp_schedule_options = 0;
+  int mtp_schedule_max_live = 0;
   bool mtp_schedule_adapt = true;
   double mtp_schedule_sampled_scale = 0.93;  // engine.mtp_schedule_sampled_scale
   std::string mtp_draft = "auto";  // engine.mtp_draft: every rank resolves the same rule
@@ -209,11 +225,25 @@ struct WorldSettings {
   std::optional<bool> prefill_early_admission = false;
   int prefix_min_tokens = 0;          // the prefix cache's entry floor (2026-09-28); absent legacy field = 0
   bool prefix_head_snapshots = false;  // the head cut (2026-09-28); absent legacy field = off
+  bool prefix_partial_hits = false;    // the attach inside an entry (2026-11-13); absent legacy field = off
+  int prefix_pin_max_pct = 50;        // the pin cap (2026-10-28); absent legacy field = 50
   double bulk_pace_gbps = 0.0;
   int bulk_inflight = 0;
   int rendezvous_timeout_ms = 0;
   double stats_interval_s = 0.0;
   bool reasoning_in_content = false;
+  // The NVMe cold tier (issue #26): on/off and the capacity every rank's
+  // slab is sized to (the page count is a decision input, so the world
+  // runs one capacity); the path stays each rank's own.
+  bool nvme_cache = false;
+  double nvme_cache_capacity_gib = 0.0;
+  int64_t nvme_cache_min_tokens = 0;
+  int64_t nvme_cache_chunk_mib = 64;   // the staging slice (pacing, the memory plan)
+  int64_t nvme_cache_max_ops = 4;      // ops started but not committed (a decision input)
+  double nvme_cache_reserve_gib = 1.0;  // the pre-flight's free-space reserve
+  bool nvme_cache_persist = true;      // the slab outlives the process
+  std::string nvme_cache_reuse_binding;  // explicit existing binding, shared by the world
+  int64_t nvme_cache_op_timeout_s = 120;  // an op without progress this long fails
   bool operator==(const WorldSettings&) const = default;
 };
 std::string encode_journal_settings(const WorldSettings& s);
@@ -227,6 +257,7 @@ struct JournalRecord {
   dgpp::sched::AdmissionPolicy admission;
   int prefix_slots = 0;          // warm: rank 0's prefix cache slots
   std::string config_digest;     // warm: rank 0's effective-config digest ("cfg", 2026-09-06)
+  bool disk_adopt = false;       // warm: the world adopts its previous NVMe cache index ("da")
   bool has_prefix_digest = false;  // tick: rank 0's digest rode along
   uint64_t prefix_digest = 0;
   bool has_op_digest = false;      // tick: rank 0's op-stream fold rode along
@@ -236,6 +267,32 @@ struct JournalRecord {
   std::vector<std::string> cancels;
   std::vector<std::string> stops;  // the stop-string retires,
                                    // applied like cancels ("sp")
+  std::vector<dgpp::sched::Scheduler::DiskCommit> disk_commits;  // "dk"
+};
+// The peer's status line for a finished cold tier op (the return path),
+// and its parse; false when the line is not one.
+std::string encode_disk_status(uint64_t op, bool ok);
+bool decode_disk_status(std::string_view line, uint64_t* op, bool* ok);
+
+// Rank 0's collector of the world's verdicts (issue #26): every rank's
+// completion of an op lands here; once all `world` ranks have reported it,
+// take_ready() hands the commit out — ok when every rank succeeded — in
+// op order.
+class DiskCommitCollector {
+ public:
+  explicit DiskCommitCollector(int world) : world_(world) {}
+  void add(int rank, uint64_t op, bool ok);
+  std::vector<dgpp::sched::Scheduler::DiskCommit> take_ready();
+  size_t pending() const { return pending_.size(); }
+
+ private:
+  struct Pending {
+    int reports = 0;
+    bool ok = true;
+    std::vector<int> ranks;
+  };
+  int world_ = 1;
+  std::map<uint64_t, Pending> pending_;
 };
 // The tick record's cross-rank check (M7): rank 0's prefix-cache digest
 // after the previous tick against this rank's. Throws on a mismatch — the
@@ -275,12 +332,16 @@ class JournalWriter {
   // Hold the warm record until all have arrived, using the startup timeout,
   // so cold loading cannot spend the first collective's execution deadline.
   // Returns false on shutdown; throws on a missing, closed or malformed peer.
-  bool wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop);
+  // Every peer's "ready" line; a peer may append a note (the NVMe cache's
+  // candidate index digest), returned per rank through `notes`.
+  bool wait_peers_ready(int timeout_ms, const std::function<bool()>& should_stop,
+                        std::vector<std::pair<int, std::string>>* notes = nullptr);
 
   // One line to every peer. A peer that cannot take it is a dead
   // member of a live-serving world — the fabric is broken, and this
   // says so loudly.
   void broadcast(const std::string& line);
+  void broadcast_payload(const std::string& payload, int timeout_ms);
 
   // The peer liveness watch (the death discipline above): a thread
   // polling every peer connection each `poll_ms`; the first closed or
@@ -296,12 +357,21 @@ class JournalWriter {
   // Closes every peer connection now — what rank 0's process exit does;
   // the tests' stand-in for it (the peers see EOF).
   void close_peers();
+  // The return path (issue #26): every complete line the peers have
+  // written since the last poll, as (rank, line), without blocking. The
+  // engine thread's alone (broadcast's too); the death watch only peeks.
+  std::vector<std::pair<int, std::string>> poll_peer_lines();
+  // Separate research protocol phase: bounded binary replies on the existing
+  // journal star. Do not mix with readiness/line replies in the same phase.
+  // A shared deadline covers the complete gather, including partial reads.
+  std::vector<std::pair<int, std::string>> gather_peer_payloads(size_t max_bytes, int timeout_ms);
   ~JournalWriter();
 
  private:
   dgpp::net::TcpListener listener_;
   std::vector<dgpp::net::TcpConn> peers_;  // arrival order; peer_ranks_ names them
   std::vector<int> peer_ranks_;
+  std::vector<std::string> peer_pending_;  // per peer: the unfinished line
   std::thread watch_;
   std::atomic<bool> watch_stop_{false};
 };
@@ -320,7 +390,7 @@ class JournalReader {
                 int connect_timeout_ms, int rank);
 
   // Called after settings and model construction, before waiting for warm.
-  void send_ready();
+  void send_ready(const std::string& note = "");
 
   // The next complete record (newline stripped). false when rank 0's
   // journal closed (clean stop or crash — EOF either way) or the
@@ -337,6 +407,13 @@ class JournalReader {
   // sees the FIN.
   void close() { conn_.close(); }
   void shutdown() { conn_.shutdown_rw(); }
+  // The return path (issue #26): one status line to rank 0. False when
+  // the connection is gone (the loop sees the EOF next).
+  bool send_line(const std::string& line);
+  // Counterpart to gather_peer_payloads. The caller's control record selects
+  // the binary phase; ordinary serving never calls these operations.
+  bool send_payload(const std::string& payload, int timeout_ms);
+  std::string read_payload(size_t expected_bytes, int timeout_ms);
 
  private:
   dgpp::net::TcpConn conn_;
@@ -352,7 +429,8 @@ bool wait_journal_warm(JournalReader* reader,
                        const std::function<bool()>& should_stop,
                        dgpp::sched::AdmissionPolicy* policy = nullptr,
                        int* prefix_slots = nullptr,
-                       std::string* config_digest = nullptr);
+                       std::string* config_digest = nullptr,
+                       bool* disk_adopt = nullptr);
 // The peer's first read (2026-09-06): rank 0's settings record, sent right
 // after the journal star forms and before either side builds a model.
 // Returns false when the stream ended or a stop arrived first; throws when

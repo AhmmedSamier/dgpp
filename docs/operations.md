@@ -7,6 +7,24 @@ Other model templates use the same launcher with their own memory and
 engine settings. See the [configuration reference](configuration.md) for
 settings, defaults and their effects.
 
+For LoRA adapter loading or access to logits and activations, see
+[runtime adapters and research inference](runtime-adapters.md). Adapter serving
+uses `engine.runtime_adapters=true` and `engine.runtime_adapter_path`; the
+launcher stages the bundle on every node, and each server validates it against
+the base checkpoint. Changing the adapter requires restarting the serving world.
+Startup verifies metadata and factor hashes without scanning base weight contents.
+Set `engine.runtime_adapter_verify_weights=true` for full base-weight hashing on
+every rank, with per-shard progress logs; this can add minutes to startup.
+The shipped Mixed346 template retains its graphs, MTP, prefix caching and
+memory formats with the adapter flag and path added. The guide lists other
+supported settings and compatibility bounds.
+
+Inspection and tensor capture use a separate worker with
+`engine.heretic_research=true`. Inspection reads metadata only; the worker
+loads the checkpoint on demand across one, two or four nodes. Its launcher
+owns separate process records and research ports. Reserve the participating
+nodes for the worker and stop it before starting a serving deployment there.
+
 ## Sampling penalty defaults
 
 Set `engine.repetition_penalty`, `engine.frequency_penalty` and
@@ -86,6 +104,24 @@ probes, but slows the prose probe relative to MTP1. Use the
 representative traffic. The [native MTP experiment](experiments/mimo-native-mtp.md)
 and [prefill experiment](experiments/mimo-upstream-ports.md) describe the
 configurations and limitations.
+
+## Dory1.0-4B loop options
+
+Dory serves the exact path by default: the checkpoint's own
+`n_recurrent_loops` (2) and the `per_loop` K/V policy, where every loop of
+the recurrent block keeps its own paged K/V planes. Both are
+[engine keys](configuration.md), not environment variables:
+`engine.dory_loops` overrides the loop count and `engine.dory_kv_cache:
+"last_loop"` shares one plane per attention layer and keeps only the last
+loop's rows, roughly halving the recurrent block's pool at a lossy cost —
+one cold prefill is bitwise the same under either policy, but decode rows
+and prefix reuse of a mid-loop state differ from the exact walk. The
+family is one rank and has no draft layer: `--world > 1`, `engine.mtp`,
+the drafter keys and the other families' loop keys are refused at startup,
+not ignored. The pool is BF16 only (`engine.kv_dtype` other than `bf16`
+says so and stays BF16). See the
+[model card](model_cards/Dory1.0-4B-NVFP4.md) and the
+[architecture plan](dory_plan.md).
 
 ## Qwen sparse prefill attention
 
@@ -554,7 +590,16 @@ version; a rollback is `up` naming the previous one, which is still
 installed. `dgpp-cluster releases` shows what each node has;
 `dgpp-serve --version` prints a binary's version, and rank 0 puts its
 version on the journal's settings record so a peer of another version
-exits before its first tick rather than form a mixed world.
+exits before its first tick rather than form a mixed world. By default a new
+build selects a fresh NVMe cache binding. To keep an existing compatible
+cache, record its 16-character binding from the current startup log or cache
+directory and set `nvme_cache.reuse_binding` to it in the deployment before
+starting the new version. Keep the setting on later upgrades and keep the
+cache capacity unchanged. This bypasses automatic build/settings identity;
+the model artifacts and cached-state interpretation must remain compatible.
+See [reuse across upgrades](nvme-cache.md#across-restarts) for the full example
+and refusal behavior. Keep the old cache directory while it is selected or
+needed for rollback.
 
 ## What a node needs
 
@@ -582,8 +627,10 @@ exits before its first tick rather than form a mixed world.
 For prefix caching, size the snapshot arena and KV pool separately. Startup
 and `--memory-plan` report snapshot slots, bytes per slot and actual arena
 allocation. The [prefix-cache guide](prefix-cache.md) lists the current recipe
-capacities and explains when a larger `prefix_cache_gib` helps. The cache is
-memory-resident; it does not spill evicted prefixes to NVMe.
+capacities and explains when a larger `prefix_cache_gib` helps. With
+`nvme_cache.enabled`, the entries the arena evicts are kept on each node's
+NVMe instead of being lost, as [the cold tier](nvme-cache.md) describes and
+[its subsection below](#the-nvme-cold-tier) operates.
 
 Reserve enough node memory for weights, model state and runtime buffers.
 The GLM-5.3-FP8 main stack alone uses about 82 GiB per rank at TP=4;
@@ -898,7 +945,12 @@ prefill at the prompt's first structural boundary past its start (a long
 system prompt's end), where the next conversation under that prompt or the
 turn after a client-side compaction attaches. Both are world settings pushed
 to every peer; `/v1/metrics` shows them under `prefix_cache` as `min_tokens`
-and `head_cuts`, with `head_snapshots` counting the head entries taken. See
+and `head_cuts`, with `head_snapshots` counting the head entries taken.
+`engine.prefix_partial_hits` (`--prefix-partial-hits`,
+`--no-prefix-partial-hits`, default on) lets a prompt that differs from every
+entry before a stored position open on the tokens it shares with the nearest
+one, on model families whose cached state is the KV rows alone. `/v1/metrics`
+counts those admissions as `partial_hits`. See
 [the sizing guide](prefix-cache.md).
 
 Unfinished prefills share the selected budget in deterministic arrival order,
@@ -969,7 +1021,8 @@ quoting it. Qwen3.5-122B-A10B templates select depth 2; throughput and
 acceptance measurements for the shipped templates remain pending under
 [the benchmark protocol](benchmarks.md#workload-and-timing).
 
-**The draft depth** (`engine.mtp_depth`, `--mtp-depth`, 1–5, with `mtp`)
+**The draft depth** (`engine.mtp_depth`, `--mtp-depth`, 1–5 for MTP chains,
+7 for MiniMax DSpark, with `mtp`)
 is the number of draft tokens verified per decode step. Depth 1 is the
 two-row step: the pending token and one draft through the main stack, the
 draft block proposing the next draft. A deeper step feeds 1 + depth rows,
@@ -1027,7 +1080,9 @@ cost with the draft, default 28), `mtp_schedule_lambda`
 default, is the reservation rate `1 / (base + row)` — a verify row is
 taken only when it beats a plain step's rate), `mtp_schedule_min_depth`
 (`--mtp-schedule-min-depth`, the fewest drafts a step verifies, default
-1). The scheduled path gives up the pipelined replay's launch-ahead (the
+1), `mtp_schedule_max_live` (`--mtp-schedule-max-live`, default 0: past
+that many live requests a step verifies and drafts the minimum depth
+only, the pass a fixed depth of the minimum runs). The scheduled path gives up the pipelined replay's launch-ahead (the
 graph to launch is not known until the previous replay's confidence is
 published at its tail), so a stream that stays at the full block pays the
 graph launch (~0.5 ms a step) for nothing; the win is on the streams the
@@ -1176,6 +1231,32 @@ throughout decode on its own and the measured step distribution is the same
 locked or unlocked. NTP between nodes only matters for reading logs side by
 side, and `scripts/fabric_run.sh --node-probe` records each node's clock
 offset per run so even that works without it.
+
+### The NVMe cold tier
+
+With `nvme_cache.enabled`, the prefix entries memory evicts are kept in a
+preallocated slab on each node's local NVMe and restored for later matching
+requests. Startup refuses to boot when the slab's directory, free space or
+minimum size does not fit, on every rank and under `--memory-plan`.
+[The cold tier](nvme-cache.md) describes what is kept and how it moves.
+
+Watch `nvme_cache` in `/v1/metrics`. `pages_used` against `pages_total`
+says how full the slab is, `evictions` that retention is at work,
+`spill_skipped` that an entry found no room, and `restore_failed` that a
+read came back wrong on some rank, which the world treats as a cold miss. A
+stalled operation is logged after 30 s without progress and fails after
+`op_timeout_s`.
+
+The slab persists across restarts under a directory named by the build
+version, checkpoint, effective settings and slab geometry. A build or
+settings change selects a new directory by default. Set
+`nvme_cache.reuse_binding` to the existing binding to retain a compatible
+cache across those changes; the file format, geometry, checksum and
+cross-rank checks remain active. Explicit reuse refuses startup if the
+selected cache cannot be adopted, leaving its files intact. After a
+successful start, `nvme_cache.adopted` reports the retained entries.
+Startup names other binding directories and their sizes; remove only caches
+that are no longer selected by a deployment or needed for rollback.
 
 ### The resident image cache
 
@@ -1361,7 +1442,10 @@ the prompts. Its artifacts land under `build-ci/fabric-runs/failure_drill_*`.
 - **Per request:** `GET /metrics` (also available at `GET /v1/metrics`
   for backward compatibility) — JSON counters for requests, sheds, cancellations,
   failures, the admission policy, the prefix cache (entries, hits, tokens
-  saved, hop snapshots, the TTFT split by hit and miss), sampling
+  saved, hop snapshots, the TTFT split by hit and miss), the NVMe cache
+  (`nvme_cache`: pages used and total, entries and block records, spills
+  and restores begun / committed / failed, tokens restored, disk evictions,
+  ops in flight, bytes moved and average op times), sampling
   fallbacks. `scheduler.spec_decode` reports cumulative MTP draft rounds,
   attempted and accepted draft tokens, and per-position counters; see the
   [counter definitions](openai-compatibility.md#speculative-decoding-counters)

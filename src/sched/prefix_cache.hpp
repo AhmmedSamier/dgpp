@@ -35,6 +35,10 @@ class PrefixCache {
     int64_t align = 1;          // kpool: every entry position is a multiple
     int64_t chunk_tokens = 2048;  // the cold prefill's chunk length
     size_t image_bytes = kMaxRequestImageBytes;  // shared immutable pixel identities
+    // prompt_cache_key pins protect their entries while the pinned entries
+    // hold at most this share of the slots; past it a pin protects nothing
+    // (one tenant cannot pin the whole arena). 100: pins always protect.
+    int pin_max_pct = 50;
   };
   struct Entry {
     std::vector<int64_t> ids;   // the first `position` ids of the sequence
@@ -44,11 +48,20 @@ class PrefixCache {
     int slot = -1;              // the arena slot; -1 once evicted
     uint64_t hash = 0;
     uint64_t last_use = 0;      // the tick of the last attach / insert
-    int attached = 0;           // live requests attached (never evicted)
+    int attached = 0;           // live or planned request references (never evicted)
     bool live = false;
+    // The NVMe cold tier (issue #26): the disk entry holding this
+    // entry's state (-1: none), and whether a spill is reading it — a
+    // busy entry is never evicted (its slot and blocks are being copied).
+    int disk = -1;
+    bool busy = false;
+    // prompt_cache_key: a pinned entry gives way only when no unpinned
+    // entry can (the request's, or the first keyed attach's).
+    std::string key;
   };
   struct Stats {
     int64_t hits = 0;
+    int64_t partial_hits = 0;   // of them, attached inside an entry (below its position)
     int64_t misses = 0;
     int64_t tokens_saved = 0;   // sum of attach positions
     int64_t snapshots = 0;      // entries taken at a prefill cut
@@ -119,6 +132,23 @@ class PrefixCache {
     int64_t common = 0;  // ids shared with the entry, from the start
   };
   Nearest nearest(const std::vector<int64_t>& prompt, const Images& images = {}) const;
+  // The deepest position at which the prompt can open inside a live entry,
+  // short of the entry's own: the aligned image of one less than the tokens
+  // the two share (the draft block's row before a position embeds the token
+  // at it, so that token is shared too), below the entry's position. Among
+  // equals the shallowest entry (it pins the fewest blocks while attached),
+  // then the oldest record. A pass over the entries' ids; a decision, so a
+  // function of the index and the prompt alone.
+  struct Shared {
+    int entry = -1;
+    int64_t position = 0;
+  };
+  Shared shared(const std::vector<int64_t>& prompt, const Images& images = {}) const;
+  // Counts the entries inserted. With stats().evictions it dates an answer
+  // of shared(): evictions alone leave it standing while its entry lives
+  // (the deepest of a set is the deepest of what remains of it), an insert
+  // may better it and may reuse a dead record's index.
+  uint64_t inserts() const { return inserts_; }
   // The ghosts: the last kGhosts evicted entries by (hash,
   // position, last use, eviction ordinal), so a miss can say "an entry at
   // this prompt's cut was evicted" — the case the nearest entry cannot
@@ -140,10 +170,12 @@ class PrefixCache {
   // The smallest free slot, or -1.
   int take_free_slot();
   void give_back_slot(int slot);
-  // The least recently used live entry with no attached request: its slot
-  // is freed (the caller releases it on the engine) and the entry dies.
-  // Returns the slot, or -1 when nothing is evictable.
-  int evict_lru();
+  // The least recently used live entry with no attached request and no
+  // spill in flight: its slot is freed (the caller releases it on the
+  // engine) and the entry dies. Returns the slot, or -1 when nothing is
+  // evictable; `disk` (optional) receives the victim's disk entry (-1:
+  // none) so the caller can tell the cold tier its memory copy went.
+  int evict_lru(int* disk = nullptr);
   // A free slot, evicting once when none is free. -1 when neither works.
   int acquire_slot();
 
@@ -152,12 +184,23 @@ class PrefixCache {
   // or -1 when an identical entry is live or pixel storage is full (the caller keeps the slot out
   // of the entry and gives it back).
   int insert(const int64_t* ids, int64_t position, int slot, uint64_t now,
-             const Images& images = {}, int64_t next_token = -1);
+             const Images& images = {}, int64_t next_token = -1, const std::string& key = "");
   const Entry& entry(int index) const { return entries_.at(static_cast<size_t>(index)); }
-  void attach(int index, uint64_t now);
+  int size() const { return static_cast<int>(entries_.size()); }  // records, live or dead
+  // `key` (prompt_cache_key) pins the entry when it carries none yet.
+  // `position` (> 0) is an attach inside the entry; otherwise the entry's own.
+  void attach(int index, uint64_t now, const std::string& key = "", int64_t position = 0);
+  // Protect a planned attach until admission takes its own reference. No
+  // hit, LRU or digest change; pair with detach even if admission throws.
+  void retain(int index);
+  int pinned_entries() const;  // live entries with a key
   void detach(int index);
   // Refreshes an entry's LRU stamp without a decision (no stats, no digest).
   void touch(int index, uint64_t now);
+  // The cold tier's links (issue #26): the disk entry an entry is stored
+  // in, and the busy flag while a spill copies it.
+  void set_disk(int index, int disk);
+  void set_busy(int index, bool busy);
   int64_t blocks_pinned(int64_t block_tokens) const;  // every live entry's
 
   // ---- the decision digest -----------------------------------------------
@@ -173,6 +216,7 @@ class PrefixCache {
   size_t ghost_next_ = 0;
   std::unordered_multimap<uint64_t, int> by_hash_;  // hash -> entry index
   std::vector<int> free_;  // sorted ascending
+  uint64_t inserts_ = 0;
   Stats stats_;
   uint64_t digest_ = kSeed;
 };

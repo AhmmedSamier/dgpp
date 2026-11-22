@@ -4,6 +4,19 @@ Choose a template here, then use the [configuration reference](../docs/configura
 for site setup, defaults and the effect of each setting. Templates set model-specific
 values that can differ from the program defaults.
 
+[LoRA adapter loading](../docs/runtime-adapters.md) uses
+`engine.runtime_adapters: true` and `engine.runtime_adapter_path`. Adapter
+serving retains the shipped Mixed346 template's graphs, MTP, prefix cache,
+memory formats and request limits. Copy that template and add only the two
+adapter fields. The guide's compatibility table covers other execution settings.
+Relative bundle paths are resolved beside the deployment JSON and staged to
+every node.
+
+Logits and activation capture require `engine.heretic_research: true` in a
+separate research config for one, two or four nodes. The worker is serial and
+has its own allowed settings and token limits. Both feature flags default to
+`false` and are omitted from the standard serving templates.
+
 One template per model, quantization and world size:
 `cluster_<model>_<quant>_w<n>.example.json`. An optional trailing
 `_<variant>` names a template that deviates from that shape in one documented
@@ -20,9 +33,10 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
 
 - Model names are `glm-5.3-flash`, `glm-5.3` (the full model), `glm-4.7`,
   `qwen-3.8-flash-next`, `qwen3.8-27b`, `deepseek-v4-flash`,
+  `deepseek-v4.1-flash`, `mimo-v2.6-flash` and `dory1.0-4b`.
   `deepseek-v4.1-flash`, `deepseek-v4.1-flash-1017` (the 2026-10-17
   refinement of V4.1-Flash: the same architecture and config, re-trained
-  weights), `mimo-v2.6-flash` and `flint`.
+  weights), `mimo-v2.6-flash`, `flint` and `minimax-m3.1-flash`.
 - The quant names the checkpoint representation: `fp8`, `nvfp4`,
   `nvfp4-fp8` for the custom GLM-5.3-Flash hybrid, `int4-int8` for the full
   GLM-5.3's pack-quantized release (int4 group-64 routed experts, int8
@@ -35,6 +49,8 @@ it. Rank 0 serves metrics on its HTTP endpoint. See the
   fused attention projections and dense MLPs, BF16 o_proj / head),
   `fp8-nvfp4` for Flint's mixed export (FP8 or NVFP4 routed experts per
   projection as the export names them, every other tensor BF16),
+  `nvfp4-mxfp8` for MiniMax M3.1 Flash (NVFP4 routed experts and MXFP8 dense
+  projections),
   `exl3-3.5bpw` for the EXL3 trellis re-pack of DeepSeek-V4.1-Flash-1017
   (every projection a 3–8-bit trellis-coded matrix under the pack's
   k-map, decoded by the engine's own kernels; the Engram tables read from
@@ -55,7 +71,24 @@ never its own template: `--dflash-model DIR_OR_ID` selects the drafter on a
 template that names MTP (it takes the MTP draft's settings back to their
 defaults unless the command line names them) and `--no-dflash` runs plain,
 so one model, quant and world has one file however many worlds it serves.
-The shapes
+MiniMax M3.1 Flash ships its bundled DSpark with eight request slots and
+native activations. It drafts seven proposals and adaptively verifies one,
+three, five or seven for greedy requests; sampled requests verify all seven.
+Use `--no-mtp-schedule` for full-seven verification or `--no-mtp` for plain
+decoding.
+
+The long-context templates also carry a top-level `nvme_cache` block, off by
+default: set `enabled` to true and size `capacity_gib` to the node's free
+NVMe to keep evicted prefix entries on disk. The slab outlives the process
+by default, so a restart under the same build, checkpoint and settings
+adopts its entries. To retain an existing compatible cache across upgrades,
+set `nvme_cache.reuse_binding` to its 16-character binding from the previous
+startup log or cache directory. Keep the same capacity; all ranks must have
+that binding. [Reuse across upgrades](../docs/nvme-cache.md#across-restarts)
+explains the compatibility assertion and the checks that remain enforced.
+[The cold tier](../docs/nvme-cache.md) describes the
+behaviour and the [configuration reference](../docs/configuration.md#nvme-cache)
+lists the keys. The shapes
 a template does not name are knobs appended at boot:
 `scripts/dgpp-cluster up --config FILE --knobs "FLAGS"`.
 
@@ -69,6 +102,7 @@ planner adds a separate 4 GiB headroom allowance to these totals.
 
 | Template | Deployment | The shapes it replaced, as knobs |
 |---|---|---|
+| [cluster_minimax-m3.1-flash_nvfp4-mxfp8_w4.example.json](cluster_minimax-m3.1-flash_nvfp4-mxfp8_w4.example.json) | MiniMax M3.1 Flash on four nodes: published NVFP4 experts and MXFP8 dense weights, native activations and Q8KV4 attention, eight request slots, a 2M shared token pool (1M request ceiling), seven-proposal DSpark with adaptive verification at 1/3/5/7, images and video. Measured throughput, quality and validation scope are in the [model card](../docs/model_cards/MiniMax-M3.1-Flash.md). | full-seven verification: `--no-mtp-schedule`; plain decoding: `--no-mtp`; sixteen plain slots: `--no-mtp --max-concurrency 16` |
 | [cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w4.example.json) | GLM-5.3-Flash hybrid on four nodes: MTP depth 1, bf16 latent cache, 768K context, a 22 GiB prefix arena (639 snapshots), four request slots | the 8K-context template: `--kv-capacity 8192 --prefix-cache-gib 1.5`; T=1: `--no-mtp` |
 | [cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json](cluster_glm-5.3-flash_nvfp4-fp8_w2.example.json) | the same hybrid on two nodes: MTP depth 1, FP8 latent cache, 160K context, four request slots; the BF16 decode weights resident in their 12-bit form alone (`"bf12"`: 110.0 GiB per rank with its 4.5 GiB prefix arena of 65 snapshots, 1.8 GiB of the node left at boot) | both forms resident (no prefill cost, 132K context): `--bf16-weights bf12+bf16 --kv-capacity 135168`; the 256K-context two-slot shape: `--max-concurrency 2 --kv-capacity 262144 --prefix-cache-gib 2` |
 | [cluster_qwen-3.8-flash-next_fp8_w4.example.json](cluster_qwen-3.8-flash-next_fp8_w4.example.json) | Qwen3.8-Flash-Next FP8 on four nodes: MTP depth 1, 256K context, four request slots, a 1,052,672-token shared KV pool and a 40 GiB prefix arena (1476 snapshots) | T=1: `--no-mtp`; depth 2: `--mtp-depth 2` |
@@ -108,6 +142,8 @@ planner adds a separate 4 GiB headroom allowance to these totals.
 | [cluster_qwen3.8-27b_fp8_w1.example.json](cluster_qwen3.8-27b_fp8_w1.example.json) | Qwen3.8-27B-FP8 on one Spark: the dense 27B (48 Gated-DeltaNet + 16 full-attention layers) from its native block-FP8 checkpoint — the checkpoint's own blockwise fp8 product on every prefill row (`engine.prefill_activations: "native"`, 2026-10-16: one Spark cold prefill 2K / 8K / 32K 1.90 / 6.49 / 27.9 s against the bf16 chain's 2.70 / 8.30 / 35.3, the evals identical) — with the DFlash2 block drafter (`engine.dflash_model: z-lab/Qwen3.8-27B-DFlash2`, five bidirectional draft layers off five target taps, a block of eight; the block proposal recorded inside the decode graph's step, no MTP), its K/V in the fp8 pool at unit scales with the prefill attention on the fp8 tensor cores (`kv_dtype: "fp8"`, `prefill_attention: "fp8"`, 2026-10-18: 262K cold prefill 325 s against 395 on the bf16 cache, decode at 256K 181 against 216 ms a pass, the teacher-forced probe, the needle grids and the 300-item evals at the bf16 cache's floor), a 786 432-token pool (three full contexts) with a 20 GiB prefix arena (100.2 GiB planned; a 256K bf16 pool and 1.5 GiB until 2026-10-17), eight request slots, the lm head requantized to block FP8 (`dense_weights: "fp8"`), the drafter's five block matrices served as block FP8 (`dflash_weights: "fp8"`: lossy for the PROPOSALS only — the verify is exact, transcripts bitwise — at the same acceptance, 145.5 → 142.2 ms a pass), its other bf16 matrices packed lossless 12-bit (`bf16_weights: "bf12"`), the rest exact. The drafter is the faster single-node recipe on every prompt class (C1 19–44 tok/s greedy against MTP depth 2's 16–22 in the 2026-10-05 campaign; the same model, an exact verify), so the MTP world ships as this template's mode, not a second file. The verify depth is scheduled a step at a time from the selector walk's confidence (`mtp_schedule`, 2.0 ms a row over a 130 ms pass): C1 level, eight slots a few percent ahead of whole blocks | plain decode: `--no-dflash`; MTP depth 2: `--no-dflash --mtp --mtp-depth 2`; the drafter on the eager engine: `engine.decode_graph: false` in the recipe (the same transcripts, chat 95 against 71 ms a token); the checkpoint's BF16 head: `--dense-weights checkpoint`; the opt-in prefill recipe `--prefill-fp8-per-tensor`; `--dflash-depth N` verifies the first N drafts (the eager engine); `--no-prefill-group`: one cold prompt per prefill walk (bitwise prompts in a burst) |
 | [cluster_qwen3.8-27b_fp8_w2.example.json](cluster_qwen3.8-27b_fp8_w2.example.json) | Qwen3.8-27B-FP8 on two Sparks (tensor parallel: the GDN and attention heads, the MLP and the lm head split across the ranks, two boundary folds a layer) with the DFlash2 block drafter on the decode graph (the block proposal recorded in the graph step, the drafter sharded across the ranks, its block matrices as block FP8 (`dflash_weights: "fp8"`, lossy for the proposals only), `bf16_weights: "bf12"`; a sampled request's drafts drawn at 0.7 of its temperature under the ratio verify, `mtp_draft_temperature`), the fp8 K/V pool with the fp8 prefill attention (as the one-node template, 2026-10-18), a 2 097 152-token pool (one full context per slot) under full admission with a 24 GiB prefix arena (101.9 GiB planned a rank), eight request slots, the FP8 lm head. Greedy C1 35 / 55 / 77 / 63 / 33 tok/s (prose / code / JSON / math / chat) at 82 ms a pass in the 2026-10-05 campaign against MTP depth 3's 34 / 40 / 46 / 42 / 31 at 78; the drafter is the template since 2026-10-05, when its drawn proposals also took the sampled classes; the verify depth scheduled from the selector's confidence (`mtp_schedule`, 2.0 ms a row over a 66 ms pass) | plain decode: `--no-dflash`; MTP depth 3 (the template until 2026-10-05): `--no-dflash --mtp --mtp-depth 3`; the argmax walk for sampled requests: `--mtp-draft greedy`; the checkpoint's BF16 head: `--dense-weights checkpoint` |
 | [cluster_qwen3.8-27b_fp8_w4.example.json](cluster_qwen3.8-27b_fp8_w4.example.json) | Qwen3.8-27B-FP8 on four Sparks (tensor parallel: the GDN and attention heads — one kv head a rank — the MLP and the lm head split across the ranks, two boundary folds a layer) with the DFlash2 block drafter on the decode graph (as the two-node template), the fp8 K/V pool with the fp8 prefill attention, a 2 097 152-token pool (one full context per slot) under full admission with a 48 GiB prefix arena (92.2 GiB planned a rank), eight request slots, the FP8 lm head. Greedy C1 57 / 88 / 122 / 102 / 53 tok/s (prose / code / JSON / math / chat) at 50 ms a pass in the 2026-10-05 campaign against MTP depth 3's 58 / 69 / 78 / 72 / 51 at 45: ahead on code / JSON / math by 29–56 %, level on prose, 6 % ahead on chat, and ahead on sampled traffic with the drawn proposals. The verify depth is scheduled a step at a time from the selector walk's confidence (`mtp_schedule`, 2.0 ms a row over a 34 ms pass): eight slots 205 / 301 / 352 / 310 / 216 tok/s at 92 ms a step since the one-chain split-K (184 / 273 / 326 / 284 / 196 at 106 before it; 154 / 270 / 320 / 260 / 170 at 117 for whole blocks), C1 level; transcripts matched across the tested isolated and joining-co-tenant cases | plain decode: `--no-dflash`; MTP depth 3 (the template until 2026-10-05): `--no-dflash --mtp --mtp-depth 3`; the argmax walk for sampled requests: `--mtp-draft greedy`; the checkpoint's BF16 head: `--dense-weights checkpoint` |
+
+| [cluster_dory1.0-4b_nvfp4_w1.example.json](cluster_dory1.0-4b_nvfp4_w1.example.json) | Dory1.0-4B-NVFP4 (the looped normalized GPT: a 16-layer input block, a 40-layer recurrent block walked twice with the input re-injected, a 16-layer output block; docs/dory_plan.md) on one Spark: the 2.98 GiB NVFP4 W4A16 image resident, every projection served as shipped (the packed e2m1 codes, the E4M3 block-scale grid, the F32 globals — no requantization; the activations BF16), the paged BF16 K/V pool at the model's full 262 144 positions under the exact `per_loop` policy (one plane per attention layer per loop, the sliding layers reading their last 1024 through the window; ≈ 56 GiB of planes), eight request slots, a 4 GiB prefix arena, the decode graph. The checkpoint ships no draft layer, so the served world is plain: the MTP, drafter and `engine.kv_dtype` speculation keys are refused by name, not ignored | the half-pool `last_loop` cache (lossy: the loops before the last lose their K/V): `engine.dory_kv_cache: "last_loop"`; a different loop count than the checkpoint's 2: `engine.dory_loops` (both change what the engine computes — [the configuration reference](../docs/configuration.md)) |
 
 The full GLM-5.3 templates keep MTP depth 1 for their eight slots: at
 eight concurrent requests a second verify row costs more than it returns

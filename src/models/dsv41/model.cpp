@@ -1,4 +1,5 @@
 #include "models/dsv41/model.hpp"
+#include "models/staged_prefill_record.hpp"
 
 #include "kernels/dsv41_dspark.hpp"
 #include "kernels/exl3_gemv.hpp"
@@ -59,6 +60,20 @@ Csa2PoolShape Dsv41Model::pool_shape(const Dsv41TextConfig& cfg, int max_request
   s.block_tokens = kBlockTokens;
   s.ring_slots = std::max(kRingSlots, cfg.sliding_window + 32);
   return s;
+}
+
+size_t Dsv41Model::kv_block_bytes_static(const Dsv41TextConfig& cfg) {
+  const auto bytes = [&](int64_t tokens) {
+    const Csa2PoolShape s = pool_shape(cfg, 1, tokens);
+    size_t total = 0;
+    for (const int r : s.cache_ratio) {
+      const size_t slots = static_cast<size_t>(tokens / s.block_tokens) * static_cast<size_t>(s.block_tokens / r);
+      total += slots * latent_row_bytes(Csa2StatePool::kMainFormat, kCsa2Latent) + slots * kCsa2IndexDim +
+               slots * sizeof(float);
+    }
+    return total;
+  };
+  return bytes(2 * kBlockTokens) - bytes(kBlockTokens);
 }
 
 int Dsv41Model::cache_ordinal(int layer) const { return cache_ord_[static_cast<size_t>(layer)]; }
@@ -352,6 +367,7 @@ HeadMatrix Dsv41Model::draft_head_matrix() const {
 
 Dsv41Model::~Dsv41Model() {
   cudaStreamSynchronize(stream_);
+  log_staged_prefill_tiles("dsv41", stream_);
   for (cudaEvent_t e : ov_ev_)
     if (e) cudaEventDestroy(e);
   csa2_.reset();
@@ -512,13 +528,19 @@ Dsv41Model::MemoryPlan Dsv41Model::plan_memory(const Dsv41TextConfig& cfg, int m
   return plan;
 }
 
-size_t Dsv41Model::session_snapshot_bytes(const Dsv41TextConfig& cfg, int, bool) {
+size_t Dsv41Model::session_snapshot_bytes(const Dsv41TextConfig& cfg, int, bool mtp) {
   const size_t ring = static_cast<size_t>(std::max(kRingSlots, cfg.sliding_window + 32)) *
                       latent_row_bytes(Csa2StatePool::kRingFormat, kCsa2Latent);
   size_t tails = 0;
   for (const int l : cfg.kv_source_layer_ids)
     if (cfg.compress_ratio(l) == 2) ++tails;
-  return static_cast<size_t>(cfg.max_layer()) * ring + tails * 2 * kCsa2Latent * sizeof(float) + 16;
+  size_t b = static_cast<size_t>(cfg.max_layer()) * ring + tails * 2 * kCsa2Latent * sizeof(float) + 16;
+  // Under MTP the snapshot carries the draft window's row too ([h_t1 | h_t2
+  // | h_t3]: targets x H bf16 — SessionModel::session_snapshot_bytes adds
+  // draft_width * 2), which the estimate left out: the arena came out one
+  // page per slot above the plan (2026-10-27).
+  if (mtp) b += cfg.dspark_target_layer_ids.size() * static_cast<size_t>(cfg.hidden_size) * 2;
+  return b;
 }
 
 size_t Dsv41Model::snapshot_state_bytes() const { return session_snapshot_bytes(cfg_, world_, false); }
