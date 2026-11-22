@@ -146,6 +146,19 @@ void Qwen35KvPool::reset_all(cudaStream_t stream) {
   table_.reset_all(stream);
 }
 
+std::vector<CachePlane> Qwen35KvPool::planes() const {
+  std::vector<CachePlane> out;
+  if (!initialized_) return out;
+  const size_t span = static_cast<size_t>(shape_.block_tokens) * kv_row_elems() * elem_bytes();
+  for (int l = 0; l < shape_.layers; ++l) {
+    const size_t base = static_cast<size_t>(l) * layer_kv_bytes();
+    out.push_back({k_base_ + base, span});
+    out.push_back({v_base_ + base, span});
+  }
+  draft_.append_planes(out);
+  return out;
+}
+
 void Qwen35KvPool::copy_block_contents(int32_t src, int32_t dst, cudaStream_t stream) {
   if (src < 0 || src >= total_blocks() || dst < 0 || dst >= total_blocks())
     throw std::out_of_range("Qwen35KvPool: block out of range in copy_block_contents");
@@ -1465,6 +1478,48 @@ void Qwen35Model::build_native_maps() {
     m->tma = &native_tmaps_.back();
   }
   DGPP_LOG_INFO("Qwen35Model: native channel form: TMA maps over {} matrices", items.size());
+}
+
+size_t Qwen35Model::kv_block_bytes_static(const Qwen35TextConfig& cfg, int rank, int world, bool mtp,
+                                          const std::string& dflash2_dir, LatentFormat kv_format) {
+  // The pool shape plan_memory builds, at one and at two blocks: the
+  // difference is one block's bytes across every token-linear plane (the
+  // Full layers' K/V, the drafter's planes); the block table is subtracted.
+  std::unique_ptr<DFlash2Config> dfcfg;
+  std::unique_ptr<DFlashConfig> df1cfg;
+  if (!dflash2_dir.empty()) {
+    if (drafter_architecture(dflash2_dir) == "DFlashDraftModel")
+      df1cfg = std::make_unique<DFlashConfig>(DFlashConfig::from_json_file(dflash2_dir + "/config.json"));
+    else
+      dfcfg = std::make_unique<DFlash2Config>(DFlash2Config::from_json_file(dflash2_dir + "/config.json"));
+  }
+  const LoaderHeadSharding head = world > 1 ? LoaderHeadSharding::VocabSharded : LoaderHeadSharding::Full;
+  const auto bytes = [&](int64_t tokens) {
+    Qwen35KvPoolShape shape;
+    shape.layers = 0;
+    for (Qwen35LayerKind k : cfg.layers)
+      if (k != Qwen35LayerKind::Gdn) ++shape.layers;
+    if (mtp) ++shape.layers;
+    shape.kv_heads = Qwen35LocalGeometry::from_config(cfg, rank, world, head).local_kv_heads;
+    shape.dim = cfg.head_dim;
+    shape.block_tokens = kv_block_tokens_static();
+    shape.max_requests = 1;
+    shape.token_slots = tokens;
+    shape.fp8 = kv_format_is_fp8(kv_format, cfg, mtp);
+    if (dfcfg) {
+      shape.draft_layers = dfcfg->num_hidden_layers;
+      shape.draft_kv_heads = dfcfg->local_kv_heads(world);
+      shape.draft_dim = dfcfg->head_dim;
+    }
+    if (df1cfg) {
+      shape.draft_layers = df1cfg->num_hidden_layers;
+      shape.draft_kv_heads = df1cfg->local_kv_heads(world);
+      shape.draft_dim = df1cfg->head_dim;
+    }
+    return Qwen35KvPool::cache_bytes(shape) - PagedBlockTable::table_bytes(1, tokens / shape.block_tokens);
+  };
+  const int64_t bt = kv_block_tokens_static();
+  return bytes(2 * bt) - bytes(bt);
 }
 
 MemoryPlan Qwen35Model::plan_memory(const Qwen35TextConfig& cfg, int max_tokens, int64_t max_cache_tokens,

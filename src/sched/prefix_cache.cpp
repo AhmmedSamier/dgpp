@@ -1,6 +1,7 @@
 #include "sched/prefix_cache.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -9,7 +10,8 @@ namespace dgpp::sched {
 namespace {
 bool same_image(const ImageInput& a, const ImageInput& b) {
   return a.offset == b.offset && a.tokens == b.tokens && a.width == b.width &&
-         a.height == b.height && a.grid == b.grid && a.rgb == b.rgb;
+         a.height == b.height && a.grid == b.grid && a.frames == b.frames &&
+         a.frame_offsets == b.frame_offsets && a.rgb == b.rgb;
 }
 bool same_image_key(const PrefixCache::ImageKey& a, const PrefixCache::ImageKey& b) {
   return a.input == b.input || (a.hash == b.hash && same_image(*a.input, *b.input));
@@ -18,6 +20,23 @@ size_t image_count(const PrefixCache::Images& images, int64_t position) {
   size_t n = 0;
   while (n < images.size() && images[n].input->offset <= position) ++n;
   return n;
+}
+// The ids an entry and a prompt share from the start, stopping at the first
+// image the two do not have in common.
+size_t common_prefix(const PrefixCache::Entry& e, const std::vector<int64_t>& prompt,
+                     const PrefixCache::Images& images) {
+  const size_t n = std::min(e.ids.size(), prompt.size());
+  // Whole runs first: an arena of entries under one long system prompt
+  // shares tens of thousands of ids with every prompt, entry after entry.
+  constexpr size_t kRun = 256;
+  size_t k = 0;
+  while (k + kRun <= n && std::memcmp(e.ids.data() + k, prompt.data() + k, kRun * sizeof(int64_t)) == 0) k += kRun;
+  while (k < n && e.ids[k] == prompt[k]) ++k;
+  size_t j = 0;
+  while (j < e.images.size() && j < images.size() && same_image_key(e.images[j], images[j])) ++j;
+  if (j < e.images.size()) k = std::min(k, static_cast<size_t>(e.images[j].input->offset));
+  if (j < images.size()) k = std::min(k, static_cast<size_t>(images[j].input->offset));
+  return k;
 }
 }  // namespace
 
@@ -29,6 +48,10 @@ PrefixCache::Images PrefixCache::image_keys(const std::vector<ImageInput>& image
     h = extend_hash(h, image.width);
     h = extend_hash(h, image.height);
     h = extend_hash(h, image.grid);
+    if (image.is_video()) {
+      h = extend_hash(h, image.frames);
+      for (int64_t at : image.frame_offsets) h = extend_hash(h, at);
+    }
     for (uint8_t byte : image.rgb) h = (h ^ byte) * 0x100000001b3ull;
     std::shared_ptr<const ImageInput> input;
     // Repeated conversation turns share the existing immutable image data.
@@ -137,18 +160,30 @@ PrefixCache::Ghost PrefixCache::ghost_at(const std::vector<int64_t>& cuts,
   return none;
 }
 
+PrefixCache::Shared PrefixCache::shared(const std::vector<int64_t>& prompt, const Images& images) const {
+  Shared best;
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const Entry& e = entries_[i];
+    // An entry no deeper than the position in hand can neither pass nor tie it.
+    if (!e.live || e.position <= best.position) continue;
+    const int64_t common = static_cast<int64_t>(common_prefix(e, prompt, images));
+    const int64_t position = (std::min(common, e.position) - 1) / cfg_.align * cfg_.align;
+    if (position <= 0) continue;
+    if (position > best.position ||
+        (position == best.position && e.position < entries_[static_cast<size_t>(best.entry)].position)) {
+      best.entry = static_cast<int>(i);
+      best.position = position;
+    }
+  }
+  return best;
+}
+
 PrefixCache::Nearest PrefixCache::nearest(const std::vector<int64_t>& prompt, const Images& images) const {
   Nearest best;
   for (size_t i = 0; i < entries_.size(); ++i) {
     const Entry& e = entries_[i];
     if (!e.live) continue;
-    const size_t n = std::min(e.ids.size(), prompt.size());
-    size_t k = 0;
-    while (k < n && e.ids[k] == prompt[k]) ++k;
-    size_t j = 0;
-    while (j < e.images.size() && j < images.size() && same_image_key(e.images[j], images[j])) ++j;
-    if (j < e.images.size()) k = std::min(k, static_cast<size_t>(e.images[j].input->offset));
-    if (j < images.size()) k = std::min(k, static_cast<size_t>(images[j].input->offset));
+    const size_t k = common_prefix(e, prompt, images);
     // The longest shared prefix; among equals the deeper entry, then the
     // older (a stable answer for the log).
     if (best.entry < 0 || static_cast<int64_t>(k) > best.common ||
@@ -192,20 +227,36 @@ void PrefixCache::give_back_slot(int slot) {
   free_.insert(it, slot);
 }
 
-int PrefixCache::evict_lru() {
+int PrefixCache::evict_lru(int* disk) {
+  // The least recently used unpinned entry; a pinned one only when every
+  // candidate is pinned — or when the pinned entries hold more slots than
+  // the cap allows, where a pin protects nothing.
+  int pinned_slots = 0;
+  for (const Entry& e : entries_) pinned_slots += e.live && !e.key.empty() ? 1 : 0;
+  const bool protect = cfg_.pin_max_pct >= 100 ||
+                       (cfg_.pin_max_pct > 0 && pinned_slots * 100 <= cfg_.pin_max_pct * cfg_.slots);
   int victim = -1;
   for (size_t i = 0; i < entries_.size(); ++i) {
     const Entry& e = entries_[i];
-    if (!e.live || e.attached > 0) continue;
-    if (victim < 0 ||
-        e.last_use < entries_[static_cast<size_t>(victim)].last_use)
+    if (!e.live || e.attached > 0 || e.busy) continue;
+    if (victim < 0) {
+      victim = static_cast<int>(i);
+      continue;
+    }
+    const Entry& v = entries_[static_cast<size_t>(victim)];
+    const bool pinned = protect && !e.key.empty(), victim_pinned = protect && !v.key.empty();
+    if ((victim_pinned && !pinned) || (pinned == victim_pinned && e.last_use < v.last_use))
       victim = static_cast<int>(i);
   }
+  if (disk != nullptr) *disk = -1;
   if (victim < 0) return -1;
   Entry& e = entries_[static_cast<size_t>(victim)];
   const int slot = e.slot;
+  if (disk != nullptr) *disk = e.disk;
+  e.disk = -1;
   e.live = false;
   e.slot = -1;
+  e.key.clear();
   e.ids.clear();
   e.ids.shrink_to_fit();
   Images().swap(e.images);
@@ -232,7 +283,7 @@ int PrefixCache::acquire_slot() {
 }
 
 int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t now,
-                        const Images& images, int64_t next_token) {
+                        const Images& images, int64_t next_token, const std::string& key) {
   if (position <= 0) throw std::invalid_argument("PrefixCache: empty entry");
   if (slot < 0 || slot >= cfg_.slots)
     throw std::out_of_range("PrefixCache: slot out of range");
@@ -267,6 +318,7 @@ int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t
   e.hash = h;
   e.last_use = now;
   e.live = true;
+  e.key = key;
   // Reuse a dead record's index when one exists (bounded memory), else
   // append; either way the choice is deterministic.
   int index = -1;
@@ -290,25 +342,56 @@ int PrefixCache::insert(const int64_t* ids, int64_t position, int slot, uint64_t
     entries_[static_cast<size_t>(index)] = std::move(e);
   }
   by_hash_.emplace(h, index);
+  ++inserts_;
   note(2, static_cast<uint64_t>(position), static_cast<uint64_t>(slot));
   if (next_token >= 0) note(6, static_cast<uint64_t>(slot), static_cast<uint64_t>(next_token));
   return index;
 }
 
-void PrefixCache::attach(int index, uint64_t now) {
+void PrefixCache::attach(int index, uint64_t now, const std::string& key, int64_t position) {
+  retain(index);
   Entry& e = entries_.at(static_cast<size_t>(index));
-  if (!e.live) throw std::logic_error("PrefixCache: attach to a dead entry");
-  ++e.attached;
+  if (position > e.position) throw std::logic_error("PrefixCache: attach past the entry's position");
+  const bool within = position > 0 && position < e.position;
   e.last_use = now;
+  if (e.key.empty() && !key.empty()) e.key = key;
   ++stats_.hits;
-  stats_.tokens_saved += e.position;
-  note(1, static_cast<uint64_t>(e.position), static_cast<uint64_t>(e.slot));
+  if (within) ++stats_.partial_hits;
+  stats_.tokens_saved += within ? position : e.position;
+  note(1, static_cast<uint64_t>(within ? position : e.position), static_cast<uint64_t>(e.slot));
+  // An attach inside the entry is its own decision in the digest: the
+  // position alone would not tell it from a whole attach to a shallower one.
+  if (within) note(13, static_cast<uint64_t>(e.position), static_cast<uint64_t>(e.slot));
+}
+
+void PrefixCache::retain(int index) {
+  Entry& e = entries_.at(static_cast<size_t>(index));
+  if (!e.live) throw std::logic_error("PrefixCache: retain of a dead entry");
+  ++e.attached;
 }
 
 void PrefixCache::touch(int index, uint64_t now) {
   Entry& e = entries_.at(static_cast<size_t>(index));
   if (!e.live) throw std::logic_error("PrefixCache: touch of a dead entry");
   e.last_use = now;
+}
+
+int PrefixCache::pinned_entries() const {
+  int n = 0;
+  for (const Entry& e : entries_) n += e.live && !e.key.empty() ? 1 : 0;
+  return n;
+}
+
+void PrefixCache::set_disk(int index, int disk) {
+  Entry& e = entries_.at(static_cast<size_t>(index));
+  if (!e.live) throw std::logic_error("PrefixCache: disk link on a dead entry");
+  e.disk = disk;
+}
+
+void PrefixCache::set_busy(int index, bool busy) {
+  Entry& e = entries_.at(static_cast<size_t>(index));
+  if (!e.live) throw std::logic_error("PrefixCache: busy flag on a dead entry");
+  e.busy = busy;
 }
 
 void PrefixCache::detach(int index) {

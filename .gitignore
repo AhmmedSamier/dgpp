@@ -38,8 +38,13 @@ venv/
 benchmarks/*
 !benchmarks/micro/
 benchmarks/micro/*
+!benchmarks/micro/minimax_index_bench.cpp
+!benchmarks/micro/minimax_head_bench.cpp
 !benchmarks/micro/qsa_fp8_bench.cu
 !benchmarks/micro/host_penalties_bench.cpp
+!benchmarks/micro/minimax_moe_bench.cpp
+!benchmarks/micro/mxfp8_gemm_bench.cu
+!benchmarks/micro/dsa_attn_tile_bench.cu
 
 # --- Debug residue ---------------------------------------------------------------
 
@@ -111,6 +116,7 @@ mimo_engine_cap_fixture/
 dsv41_model_fixture/
 mimo_decode_fixture/
 mimo_window_fixture/
+dory_forward*_fixture/
 # Serve runtime state (scripts/dgpp_serve.sh STATE_DIR): logs + pid, and the
 # tool-eval-bench .md reports it drops under runs/YYYY/MM/. Never tracked.
 runs/

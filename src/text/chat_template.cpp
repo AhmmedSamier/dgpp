@@ -14,6 +14,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace dgpp::text {
 
@@ -64,12 +65,13 @@ struct MacroDef {
   std::vector<std::string> params;
   std::vector<ExprPtr> defaults;  // aligned with params; null = required
   std::vector<StmtPtr> body;  // owned here so the in-scope Value shares it
+  std::vector<std::string> hoisted;  // the body's scope (resolve_scopes)
 };
 
 using Frame = std::unordered_map<std::string, Value>;
 
 struct Stmt {
-  enum class Tag { Text, Output, Set, If, For, Macro, Break };
+  enum class Tag { Text, Output, Set, If, For, Macro, Break, Generation };
   Tag tag;
   size_t line = 1;
   std::string text;               // Text
@@ -77,8 +79,12 @@ struct Stmt {
   std::string target;             // Set target name
   std::string target_attr;        // Set target attribute ({% set ns.a = %})
   std::vector<std::string> names;  // For loop variables (1 or 2)
+  ExprPtr filter;                 // For: the trailing `if <cond>` inline filter
   std::shared_ptr<MacroDef> macro;      // Macro definition
-  std::vector<StmtPtr> body;            // If-then / For / Macro body
+  std::vector<StmtPtr> body;            // If-then / For / Macro / Generation body
+  // For / block Set / Generation: the names the body's scope owns from its
+  // first statement, undefined until it assigns them (resolve_scopes).
+  std::vector<std::string> hoisted;
   std::vector<std::pair<ExprPtr, std::vector<StmtPtr>>> elifs;
   std::vector<StmtPtr> else_body;
 };
@@ -545,8 +551,8 @@ class ExprParser {
     if (accept_kw("is")) {
       const bool inv = accept_kw("not");
       if (peek().t != ETok::T::Ident) fail(line_, "'is' needs a test name");
-      static const char* kTests[] = {"defined", "undefined", "none", "string",
-                                     "mapping", "sequence", "iterable", "true", "false"};
+      static const char* kTests[] = {"defined",  "undefined", "none", "string", "mapping",
+                                     "iterable", "sequence",  "true", "false",  "boolean"};
       ExprPtr e = make(Expr::Tag::Test);
       e->name = peek().s;
       e->inverted = inv;
@@ -887,6 +893,23 @@ class StmtParser {
         s->line = t.line;
         out.push_back(std::move(s));
         ++pos_;
+      } else if (kw == "generation") {
+        // {% generation %} ... {% endgeneration %}: transformers' marker
+        // for the span an assistant turn generates (its assistant-token
+        // mask). A render takes the body as written. The reference parses
+        // it as a call block, so the body reads the enclosing scope, its
+        // own assignments end with it, and a break may not leave it.
+        if (rest.find_first_not_of(" \t") != std::string::npos)
+          fail(t.line, "generation: the tag takes no arguments");
+        auto s = std::make_unique<Stmt>();
+        s->tag = Stmt::Tag::Generation;
+        s->line = t.line;
+        ++pos_;
+        static const char* kGenerationTerm[] = {"endgeneration"};
+        std::string ended;
+        s->body = parse_statements(kGenerationTerm, 1, &ended);
+        if (breaks_out(s->body)) fail(t.line, "generation: 'break' outside loop");
+        out.push_back(std::move(s));
       } else {
         fail(t.line, "unsupported statement '" + kw + "'");
       }
@@ -896,6 +919,20 @@ class StmtParser {
  private:
   static ExprPtr parse_expr_str(std::string_view src, size_t line) {
     return ExprParser(src, line).parse();
+  }
+
+  // Whether a break in these statements would leave them: one outside any
+  // loop of theirs. A nested generation block was checked when it closed.
+  static bool breaks_out(const std::vector<StmtPtr>& stmts) {
+    for (const StmtPtr& s : stmts) {
+      if (s->tag == Stmt::Tag::Break) return true;
+      if (s->tag == Stmt::Tag::Set && breaks_out(s->body)) return true;
+      if (s->tag != Stmt::Tag::If) continue;
+      if (breaks_out(s->body) || breaks_out(s->else_body)) return true;
+      for (const auto& [cond, branch] : s->elifs)
+        if (breaks_out(branch)) return true;
+    }
+    return false;
   }
 
   StmtPtr parse_set(std::string rest, size_t line) {
@@ -982,7 +1019,47 @@ class StmtParser {
     }
     const size_t ib = rest.find_first_not_of(" \t", in + 4);
     if (ib == std::string::npos) fail(line, "for: missing iterable");
-    s->expr = parse_expr_str(rest.substr(ib), line);
+    const std::string es = rest.substr(ib);
+    try {
+      s->expr = parse_expr_str(es, line);  // the whole string, if it parses whole
+    } catch (const std::exception&) {
+      // e.g. a filter's `x if cond` with no else: a legal inline-if, tried below.
+    }
+    // The trailing inline filter, `for x in ys if cond` (the generic
+    // transformers template's render_extra_keys uses it). jinja consumes
+    // the iterable as one expression, so the split is the LAST top-level
+    // `if` whose two halves each parse: a `a if b else c` iterable leaves
+    // an `else` in the tail that no filter expression swallows, and the
+    // whole string stays the ternary it is.
+    std::vector<size_t> ifs;
+    int depth = 0;
+    char quote = 0;
+    for (size_t p = 0; p < es.size(); ++p) {
+      const char c = es[p];
+      if (quote) {
+        if (c == '\\') ++p;
+        else if (c == quote) quote = 0;
+        continue;
+      }
+      if (c == '\'' || c == '"') quote = c;
+      else if (c == '(' || c == '[' || c == '{') ++depth;
+      else if (c == ')' || c == ']' || c == '}') --depth;
+      else if (depth == 0 && c == 'i' && es.compare(p, 2, "if") == 0 &&
+               (p == 0 || es[p - 1] == ' ' || es[p - 1] == '\t') &&
+               (p + 2 >= es.size() || es[p + 2] == ' ' || es[p + 2] == '\t'))
+        ifs.push_back(p);
+    }
+    for (auto it = ifs.rbegin(); it != ifs.rend(); ++it) {
+      try {
+        ExprPtr f = parse_expr_str(es.substr(*it + 2), line);
+        ExprPtr e = parse_expr_str(es.substr(0, *it), line);
+        s->expr = std::move(e);
+        s->filter = std::move(f);
+        break;
+      } catch (const std::exception&) {
+      }
+    }
+    if (!s->expr) s->expr = parse_expr_str(es, line);  // the whole's own error message
     ++pos_;
     static const char* kForTerm[] = {"endfor"};
     std::string ended;
@@ -1362,7 +1439,7 @@ enum class Flow { Next, Break };
 
 struct Ctx {
   Frame* root = nullptr;    // the render's global frame (macro closure)
-  std::vector<Frame> stack; // loop frames and macro parameter frames
+  std::vector<Frame> stack; // a frame for each scope inside the top level (push_scope)
   size_t line = 1;          // current statement, for error messages
 
   const Value* find(std::string_view name) const {
@@ -1406,6 +1483,16 @@ struct Renderer {
     append(out, text);
   }
 
+  // Enters a scope: a frame of its own in which the names the scope owns
+  // from its first statement are present and undefined (resolve_scopes). A
+  // read of one stops here, where a lookup that only knew the assignments
+  // made so far would go on to an enclosing value or the global.
+  Frame& push_scope(const std::vector<std::string>& hoisted) {
+    Frame& frame = ctx_.stack.emplace_back();
+    for (const std::string& name : hoisted) frame[name] = Value();
+    return frame;
+  }
+
   // A macro call renders its body into a fresh buffer with a stack of
   // just the parameter frame: macros close over the root frame only
   // (this template's macros reference nothing else across scopes).
@@ -1417,17 +1504,25 @@ struct Renderer {
                      std::to_string(def.params.size()) +
                      " argument(s), got " + std::to_string(args.size()));
     Frame params;
+    for (const std::string& name : def.hoisted) params[name] = Value();
     for (size_t k = 0; k < args.size(); ++k) params[def.params[k]] = args[k];
-    // Absent trailing arguments take their defaults (evaluated now, in
-    // the caller's context); a parameter without one is required.
+    // A parameter without a default is required. An absent one with a
+    // default is the macro's own name from the start, undefined until its
+    // default is evaluated below.
     for (size_t k = args.size(); k < def.params.size(); ++k) {
       if (!def.defaults[k])
         fail(ctx_.line, "macro '" + def.name + "': missing argument '" + def.params[k] + "'");
-      params[def.params[k]] = eval(*def.defaults[k]);
+      params[def.params[k]] = Value();
     }
     std::vector<Frame> saved = std::move(ctx_.stack);
     ctx_.stack.clear();
     ctx_.stack.push_back(std::move(params));
+    // Defaults in order, in the macro's own scope: one reads the parameters
+    // before it and the top level, never a name of the caller's.
+    for (size_t k = args.size(); k < def.params.size(); ++k) {
+      Value value = eval(*def.defaults[k]);
+      ctx_.stack.front()[def.params[k]] = std::move(value);
+    }
     std::string buf;
     if (exec(def.body, &buf) == Flow::Break)
       fail(ctx_.line, "'break' outside of a loop");
@@ -1592,8 +1687,13 @@ struct Renderer {
       const size_t e = x.find_last_not_of(ws);
       return Value::string_value(x.substr(b, e - b + 1));
     }
-    if (name == "default") {  // undefined -> the default (boolean=false form)
-      if (args.size() != 1) fail(ctx_.line, "default: takes one argument");
+    if (name == "default") {  // undefined -> the default; the two-value
+                              // form (fallback, true) adds the truthiness
+                              // test — falsy wraps take the fallback too
+                              // (Dory's `content | default('', true)`).
+      if (args.empty() || args.size() > 2)
+        fail(ctx_.line, "default: takes one or two arguments");
+      if (args.size() == 2 && args[1].truthy() && !v.truthy()) return args[0];
       return v.is_defined() ? v : args[0];
     }
     if (name == "string") {  // str(x); strings stay themselves
@@ -1861,10 +1961,12 @@ struct Renderer {
           r = v.kind() == Value::Kind::Null;
         else if (e.name == "string")
           r = v.kind() == Value::Kind::String;
+        else if (e.name == "boolean")
+          r = v.kind() == Value::Kind::Bool;
         else if (e.name == "mapping")
           r = v.kind() == Value::Kind::Map;  // namespaces are not mappings
         else if (e.name == "sequence")
-          r = v.kind() == Value::Kind::String || v.kind() == Value::Kind::List;  // Jinja: str counts
+          r = v.kind() == Value::Kind::String || v.kind() == Value::Kind::List;  // Python truth: a str is a sequence, a map is not
         else  // iterable (strings, lists and maps — Python truth)
           r = v.kind() == Value::Kind::String || v.kind() == Value::Kind::List ||
               v.kind() == Value::Kind::Map;
@@ -1913,8 +2015,13 @@ struct Renderer {
           break;
         case Stmt::Tag::Set:
           if (!s->expr) {  // the block form: the body's render is the value
+            // The body is a scope of its own, and a break in it ends the
+            // enclosing loop before the name is assigned.
             std::string captured;
-            exec(s->body, &captured);
+            push_scope(s->hoisted);
+            const Flow f = exec(s->body, &captured);
+            ctx_.stack.pop_back();
+            if (f == Flow::Break) return f;
             ctx_.set(s->target, Value::string_value(std::move(captured)));
           } else if (s->target_attr.empty()) {
             ctx_.set(s->target, eval(*s->expr));
@@ -1951,21 +2058,56 @@ struct Renderer {
         }
         case Stmt::Tag::For: {
           const Value iter = eval(*s->expr);
-          if (iter.kind() != Value::Kind::List)
+          // Items: a list's elements or a map's KEYS (jinja iterates a
+          // mapping by keys — the generic template's render_extra_keys).
+          // The inline `if` filter drops items BEFORE the walk, so the loop
+          // metadata and the body see the filtered sequence (the generic
+          // template reads no loop.* inside a filtered loop).
+          std::vector<const Value*> items;
+          std::vector<Value> keys;  // storage for map-key iteration (reserved first)
+          if (iter.kind() == Value::Kind::List) {
+            for (const Value& it : iter.as_list()) items.push_back(&it);
+          } else if (iter.kind() == Value::Kind::Map) {
+            keys.reserve(iter.as_members()->size());
+            for (const auto& m : *iter.as_members()) {
+              keys.push_back(Value::string_value(m.first));
+              items.push_back(&keys.back());
+            }
+          } else {
             fail(s->line, "for: cannot iterate a non-list");
+          }
+          if (s->filter) {
+            std::vector<const Value*> kept;
+            for (const Value* it : items) {
+              ctx_.stack.emplace_back();
+              Frame& fframe = *ctx_.stack.rbegin();
+              const bool ftuple = s->names.size() == 2;
+              if (ftuple) {
+                if (it->kind() != Value::Kind::List || it->as_list().size() != 2)
+                  fail(s->line, "for: tuple target needs 2-element items");
+                fframe[s->names[0]] = it->as_list()[0];
+                fframe[s->names[1]] = it->as_list()[1];
+              } else {
+                fframe[s->names[0]] = *it;
+              }
+              const bool keep = eval(*s->filter).truthy();
+              ctx_.stack.pop_back();
+              if (keep) kept.push_back(it);
+            }
+            items.swap(kept);
+          }
           const bool tuple = s->names.size() == 2;
-          for (size_t idx = 0; idx < iter.as_list().size(); ++idx) {
+          for (size_t idx = 0; idx < items.size(); ++idx) {
             step();
-            ctx_.stack.emplace_back();
-            Frame& frame = *ctx_.stack.rbegin();
+            Frame& frame = push_scope(s->hoisted);
             if (tuple) {
-              const Value& item = iter.as_list()[idx];
+              const Value& item = *items[idx];
               if (item.kind() != Value::Kind::List || item.as_list().size() != 2)
                 fail(s->line, "for: tuple target needs 2-element items");
               frame[s->names[0]] = item.as_list()[0];
               frame[s->names[1]] = item.as_list()[1];
             } else {
-              frame[s->names[0]] = iter.as_list()[idx];
+              frame[s->names[0]] = *items[idx];
             }
             // Fresh loop metadata each iteration (index0/index/first/
             // last/length).
@@ -1976,16 +2118,13 @@ struct Renderer {
             lm.emplace_back("first", Value::boolean(idx == 0));
             lm.emplace_back("last", Value::boolean(
                                         static_cast<int64_t>(idx) + 1 ==
-                                        static_cast<int64_t>(
-                                            iter.as_list().size())));
+                                        static_cast<int64_t>(items.size())));
             lm.emplace_back("length",
-                            Value::integer(
-                                static_cast<int64_t>(iter.as_list().size())));
+                            Value::integer(static_cast<int64_t>(items.size())));
             // previtem / nextitem: undefined at the ends.
-            lm.emplace_back("previtem", idx > 0 ? iter.as_list()[idx - 1] : Value());
-            lm.emplace_back("nextitem", idx + 1 < iter.as_list().size()
-                                            ? iter.as_list()[idx + 1]
-                                            : Value());
+            lm.emplace_back("previtem", idx > 0 ? *items[idx - 1] : Value());
+            lm.emplace_back("nextitem",
+                            idx + 1 < items.size() ? *items[idx + 1] : Value());
             frame["loop"] = Value::namespace_value(std::move(lm));
             const Flow f = exec(s->body, out);
             ctx_.stack.pop_back();
@@ -1998,6 +2137,15 @@ struct Renderer {
           break;
         case Stmt::Tag::Break:
           return Flow::Break;
+        case Stmt::Tag::Generation: {
+          // The body in a frame of its own: it reads every enclosing name,
+          // and what it sets ends with the block (a namespace attribute is
+          // shared storage and stays set).
+          push_scope(s->hoisted);
+          exec(s->body, out);
+          ctx_.stack.pop_back();
+          break;
+        }
       }
     }
     return Flow::Next;
@@ -2005,6 +2153,164 @@ struct Renderer {
 
   Ctx ctx_;
 };
+
+// Calls `f` with every name an expression reads. Every other tag's `name` is
+// a member, filter or test name, never a variable; only its operands can
+// read one.
+template <typename F>
+void each_name(const Expr& e, F&& f) {
+  if (e.tag == Expr::Tag::Name) {
+    f(e.name);
+    return;
+  }
+  for (const ExprPtr& k : e.kids)
+    if (k) each_name(*k, f);
+  for (const auto& [key, v] : e.kwargs)
+    if (v) each_name(*v, f);
+}
+
+// ---------------------------------------------------------------------------
+// Which scope owns a name — resolved once at compile, from the syntax tree,
+// as jinja2 does (idtracking.py). The top level, a for body, a macro body,
+// the body of a block set and a generation block are each a scope. A scope
+// that assigns a name keeps its own copy of it for its whole extent, and
+// every scope nested in it reads that copy. How the copy starts follows the
+// scope's own statements in order:
+//   - a parameter (a loop variable, `loop`, a macro parameter) is bound;
+//   - a name an enclosing scope mentions starts as that scope's value;
+//   - a name the scope reads before it assigns it, or assigns only under an
+//     `if`, starts as the global;
+//   - any other name the scope assigns starts UNDEFINED and stays so until
+//     the assignment runs.
+// The last kind is what a lookup of "the frames assigned so far, then the
+// globals" gets wrong: a nested scope that reads the name before the
+// assignment would see the global, where the reference sees nothing.
+// `hoisted` lists those names for each scope, and the renderer puts them in
+// the scope's frame when it enters (push_scope; the top level's go in the
+// root frame).
+//
+// A scope's own statements stop at a nested scope. Of a loop the parent
+// reads the iterable, of a block set and a macro definition it assigns the
+// name, and it sees nothing of their bodies or of a generation block. So
+// one statement further down the parent decides how a nested scope reads a
+// name: the parent is scanned whole before the scopes inside it.
+// ---------------------------------------------------------------------------
+
+struct Scope {
+  const Scope* enclosing;
+  std::unordered_set<std::string> names;  // the names this scope keeps a copy of
+  std::vector<std::string> hoisted;       // of those, the ones that start undefined
+
+  explicit Scope(const Scope* enclosing_scope = nullptr) : enclosing(enclosing_scope) {}
+
+  bool knows(const std::string& name) const {
+    for (const Scope* s = this; s; s = s->enclosing)
+      if (s->names.count(name)) return true;
+    return false;
+  }
+  void bind(const std::string& name) { names.insert(name); }
+  void read(const std::string& name) {
+    if (!knows(name)) names.insert(name);
+  }
+  void read(const Expr& e) {
+    each_name(e, [this](const std::string& name) { read(name); });
+  }
+  // `conditional`: under an `if` of this scope, where the assignment may
+  // not run, so the copy cannot start undefined.
+  void assign(const std::string& name, bool conditional) {
+    if (names.count(name)) return;
+    const bool outer = enclosing && enclosing->knows(name);
+    names.insert(name);
+    if (!outer && !conditional) hoisted.push_back(name);
+  }
+};
+
+void scan_scope(const std::vector<StmtPtr>& stmts, Scope& scope, bool conditional) {
+  for (const StmtPtr& s : stmts) {
+    switch (s->tag) {
+      case Stmt::Tag::Text:
+      case Stmt::Tag::Break:
+      case Stmt::Tag::Generation:
+        break;
+      case Stmt::Tag::Output:
+        scope.read(*s->expr);
+        break;
+      case Stmt::Tag::Set:
+        if (s->expr) scope.read(*s->expr);  // the value, before the target
+        if (s->target_attr.empty()) scope.assign(s->target, conditional);
+        else scope.read(s->target);  // {% set ns.attr = value %} reads ns
+        break;
+      case Stmt::Tag::If:
+        scope.read(*s->expr);
+        scan_scope(s->body, scope, true);
+        for (const auto& [cond, branch] : s->elifs) {
+          scope.read(*cond);
+          scan_scope(branch, scope, true);
+        }
+        scan_scope(s->else_body, scope, true);
+        break;
+      case Stmt::Tag::For:
+        scope.read(*s->expr);  // the iterable; the filter and the body are the loop's
+        break;
+      case Stmt::Tag::Macro:
+        scope.assign(s->macro->name, conditional);
+        break;
+    }
+  }
+}
+
+void resolve_nested(std::vector<StmtPtr>& stmts, const Scope& scope);
+
+// Resolves a scope from its statements, `scope` holding its parameters:
+// its own statements first, then the scopes nested in them.
+void resolve_scopes(std::vector<StmtPtr>& stmts, Scope& scope,
+                    std::vector<std::string>& hoisted) {
+  scan_scope(stmts, scope, false);
+  hoisted = scope.hoisted;
+  resolve_nested(stmts, scope);
+}
+
+void resolve_nested(std::vector<StmtPtr>& stmts, const Scope& scope) {
+  for (StmtPtr& s : stmts) {
+    switch (s->tag) {
+      case Stmt::Tag::Text:
+      case Stmt::Tag::Output:
+      case Stmt::Tag::Break:
+        break;
+      case Stmt::Tag::If:
+        resolve_nested(s->body, scope);
+        for (auto& [cond, branch] : s->elifs) resolve_nested(branch, scope);
+        resolve_nested(s->else_body, scope);
+        break;
+      case Stmt::Tag::Set:
+        if (!s->expr) {  // the block form
+          Scope body(&scope);
+          resolve_scopes(s->body, body, s->hoisted);
+        }
+        break;
+      case Stmt::Tag::Generation: {
+        Scope body(&scope);
+        resolve_scopes(s->body, body, s->hoisted);
+        break;
+      }
+      case Stmt::Tag::For: {
+        Scope body(&scope);
+        body.bind("loop");
+        for (const std::string& name : s->names) body.bind(name);
+        resolve_scopes(s->body, body, s->hoisted);
+        break;
+      }
+      case Stmt::Tag::Macro: {
+        Scope body(&scope);
+        for (const std::string& param : s->macro->params) body.bind(param);
+        for (const ExprPtr& d : s->macro->defaults)
+          if (d) body.read(*d);
+        resolve_scopes(s->macro->body, body, s->macro->hoisted);
+        break;
+      }
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Which globals the program reads — ChatTemplate::reads, resolved once at
@@ -2017,25 +2323,28 @@ struct Renderer {
 // ---------------------------------------------------------------------------
 
 // `bound` names what the current scope already rebinds (a {% set %} target,
-// a {% for %} target, a macro parameter), which is what separates a read of
-// the global from a read of a local with the same spelling.
+// a {% for %} target, a macro parameter, a name a scope owns from its first
+// statement), which is what separates a read of the global from a read of a
+// local with the same spelling.
 void collect_name_reads(const Expr& e, const std::vector<std::string>& bound,
                         std::vector<std::string>& out) {
-  if (e.tag == Expr::Tag::Name) {
-    if (std::find(bound.begin(), bound.end(), e.name) == bound.end())
-      out.push_back(e.name);
-    return;
-  }
-  // Every other tag's `name` is a member, filter or test name, never a
-  // global; only its operands can read one.
-  for (const ExprPtr& k : e.kids)
-    if (k) collect_name_reads(*k, bound, out);
-  for (const auto& [key, v] : e.kwargs)
-    if (v) collect_name_reads(*v, bound, out);
+  each_name(e, [&](const std::string& name) {
+    if (std::find(bound.begin(), bound.end(), name) == bound.end()) out.push_back(name);
+  });
 }
 
+// `bound` and the names a scope owns from its first statement.
+std::vector<std::string> with_hoisted(std::vector<std::string> bound,
+                                      const std::vector<std::string>& hoisted) {
+  bound.insert(bound.end(), hoisted.begin(), hoisted.end());
+  return bound;
+}
+
+// `top`: the names the top level owns from its first statement, which hide
+// the global of the same name from the whole program.
 void collect_global_reads(const std::vector<StmtPtr>& body,
                           std::vector<std::string> bound,
+                          const std::vector<std::string>& top,
                           std::vector<std::string>& out) {
   for (const StmtPtr& s : body) {
     if (!s) continue;
@@ -2048,37 +2357,44 @@ void collect_global_reads(const std::vector<StmtPtr>& body,
         break;
       case Stmt::Tag::Set:
         if (s->expr) collect_name_reads(*s->expr, bound, out);
-        else collect_global_reads(s->body, bound, out);  // the block form
+        else collect_global_reads(s->body, with_hoisted(bound, s->hoisted), top, out);  // the block form
         // From here down the scope, this name is the template's own.
         // (A {% set ns.attr = value %} target binds no name.)
         if (s->target_attr.empty()) bound.push_back(s->target);
         break;
       case Stmt::Tag::If:
         collect_name_reads(*s->expr, bound, out);
-        collect_global_reads(s->body, bound, out);
+        collect_global_reads(s->body, bound, top, out);
         for (const auto& [cond, branch] : s->elifs) {
           collect_name_reads(*cond, bound, out);
-          collect_global_reads(branch, bound, out);
+          collect_global_reads(branch, bound, top, out);
         }
-        collect_global_reads(s->else_body, bound, out);
+        collect_global_reads(s->else_body, bound, top, out);
         break;
       case Stmt::Tag::For: {
         collect_name_reads(*s->expr, bound, out);  // the iterable is the parent's
         std::vector<std::string> inner = bound;
         for (const std::string& n : s->names) inner.push_back(n);
-        collect_global_reads(s->body, std::move(inner), out);
+        if (s->filter) collect_name_reads(*s->filter, inner, out);  // the loop's own
+        collect_global_reads(s->body, with_hoisted(std::move(inner), s->hoisted), top, out);
         break;
       }
       case Stmt::Tag::Macro:
         if (s->macro) {
-          for (const ExprPtr& d : s->macro->defaults)
-            if (d) collect_name_reads(*d, bound, out);
-          // A macro body closes over the root frame only (call_macro), so
-          // its scope is its parameters — not the definition site's.
-          std::vector<std::string> inner;
+          // A macro closes over the root frame only (call_macro), so its
+          // scope is its parameters and what it owns itself — not the
+          // definition site's. What the top level owns is never the global.
+          // A parameter's default is evaluated in that scope too.
+          std::vector<std::string> inner = with_hoisted(top, s->macro->hoisted);
           for (const std::string& p : s->macro->params) inner.push_back(p);
-          collect_global_reads(s->macro->body, std::move(inner), out);
+          for (const ExprPtr& d : s->macro->defaults)
+            if (d) collect_name_reads(*d, inner, out);
+          collect_global_reads(s->macro->body, std::move(inner), top, out);
         }
+        break;
+      case Stmt::Tag::Generation:
+        // The block's own bindings end with it (`bound` is this call's copy).
+        collect_global_reads(s->body, with_hoisted(bound, s->hoisted), top, out);
         break;
     }
   }
@@ -2094,6 +2410,8 @@ struct ChatTemplate::Impl {
   std::string source;
   uint64_t hash = 0;
   std::vector<StmtPtr> root;
+  // The names the top level owns from its first statement (resolve_scopes).
+  std::vector<std::string> hoisted;
   // Sorted, unique: every global the program can read (reads()'s table).
   std::vector<std::string> globals_read;
 };
@@ -2117,7 +2435,9 @@ ChatTemplate ChatTemplate::compile(std::string source) {
   impl->source = std::move(source);
   impl->hash = fnv1a64(impl->source.data(), impl->source.size());
   impl->root = std::move(root);
-  collect_global_reads(impl->root, {}, impl->globals_read);
+  Scope top;
+  resolve_scopes(impl->root, top, impl->hoisted);
+  collect_global_reads(impl->root, impl->hoisted, impl->hoisted, impl->globals_read);
   std::sort(impl->globals_read.begin(), impl->globals_read.end());
   impl->globals_read.erase(std::unique(impl->globals_read.begin(),
                                        impl->globals_read.end()),
@@ -2150,6 +2470,9 @@ std::string ChatTemplate::render(const Value& globals) const {
     throw std::runtime_error("chat-template: render globals must be a map");
   Frame root;
   for (const auto& [k, v] : *members) root[k] = v;
+  // A name the top level owns from its first statement hides the global of
+  // the same name for the whole render.
+  for (const std::string& name : impl_->hoisted) root[name] = Value();
   Renderer r;
   r.ctx_.root = &root;
   std::string out;

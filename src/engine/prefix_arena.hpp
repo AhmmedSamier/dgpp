@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common/cuda_check.hpp"
@@ -131,6 +132,20 @@ class PrefixArena {
     check(slot);
     return metas_.at(static_cast<size_t>(slot));
   }
+  // The NVMe cold tier's restore (issue #26): the slot's bytes for the
+  // tier to fill, and the metadata it adopts once the blocks a restore
+  // acquired are the slot's own — the slot reads as filled from then on
+  // (a release drops those blocks exactly as it drops a snapshot's).
+  void* slot_data_mutable(int slot) {
+    check(slot);
+    return ptr(slot);
+  }
+  void adopt(int slot, typename Model::SessionSnapshotMeta meta) {
+    check(slot);
+    release(slot);
+    metas_[static_cast<size_t>(slot)] = std::move(meta);
+    filled_[static_cast<size_t>(slot)] = true;
+  }
 
   // A snapshot request for the model's prefill (taken mid-prefill when a
   // chunk ends at `position`); commit() afterwards records whether it was.
@@ -158,6 +173,27 @@ class PrefixArena {
     Timer& t = begin_timer();
     model_->session_attach(req, ptr(slot), metas_[static_cast<size_t>(slot)]);
     end_timer(t, &attach_ms_, &attaches_);
+  }
+
+  // Opens closed session `req` at `position`: the slot's own position, or
+  // one inside it on a family that opens on a snapshot's first tokens.
+  void attach(int req, int slot, int64_t position) {
+    check(slot);
+    if (!filled_[static_cast<size_t>(slot)])
+      throw std::logic_error("PrefixArena: attach from empty slot " + std::to_string(slot));
+    const auto& meta = metas_[static_cast<size_t>(slot)];
+    if (position == meta.position) {
+      attach(req, slot);
+      return;
+    }
+    if constexpr (requires { model_->session_attach_within(req, meta, position); }) {
+      Timer& t = begin_timer();
+      model_->session_attach_within(req, meta, position);
+      end_timer(t, &attach_ms_, &attaches_);
+    } else {
+      throw std::logic_error("PrefixArena: slot " + std::to_string(slot) + " sits at " +
+                             std::to_string(meta.position) + ", the attach expects " + std::to_string(position));
+    }
   }
 
   // Drops the slot's block references; the slot is empty afterwards.

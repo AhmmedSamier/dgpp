@@ -359,6 +359,44 @@ QwenModel::QwenModel(const QwenTextConfig& cfg, const std::string& checkpoint_di
   }
 }
 
+size_t QwenModel::kv_block_bytes_static(const QwenTextConfig& cfg, int tp_rank, int tp_world, bool mtp,
+                                        LatentFormat kv_format, const std::string& dflash2_dir) {
+  // The pool shape plan_memory builds, at one and at two blocks: the
+  // difference is one block's bytes across every token-linear plane (K/V,
+  // fp8 scales, index keys, the drafter's planes); the rings are per
+  // request and the block table is subtracted.
+  const QwenHeadSharding head = tp_world > 1 ? QwenHeadSharding::VocabSharded : QwenHeadSharding::Full;
+  const QwenLocalGeometry geo = QwenLocalGeometry::from_config(cfg, tp_rank, tp_world, head);
+  int num_qsa = 0;
+  for (QwenLayerKind k : cfg.layers) num_qsa += k == QwenLayerKind::Gdn ? 0 : 1;
+  const int pool_layers = num_qsa + (mtp ? 1 : 0);
+  std::unique_ptr<DFlash2Config> dfcfg;
+  if (!dflash2_dir.empty())
+    dfcfg = std::make_unique<DFlash2Config>(DFlash2Config::from_json_file(dflash2_dir + "/config.json"));
+  if (pool_layers <= 0 && !dfcfg) return 0;
+  const auto bytes = [&](int64_t tokens) {
+    QwenKvPoolShape shape;
+    shape.layers = pool_layers;
+    shape.kv_heads = geo.local_kv_heads;
+    shape.dim = cfg.head_dim;
+    shape.idx_dim = cfg.indexer_head_dim;
+    shape.kpool = cfg.indexer_compress_ratio;
+    shape.block_tokens = kBlockTokens;
+    shape.max_requests = 1;
+    shape.token_slots = tokens;
+    shape.format = kv_format;
+    shape.fp8_prefill_attention = fp8_prefill_attention_;
+    shape.fp8_decode_attention = fp8_decode_attention_;
+    if (dfcfg) {
+      shape.draft_layers = dfcfg->num_hidden_layers;
+      shape.draft_kv_heads = dfcfg->local_kv_heads(tp_world);
+      shape.draft_dim = dfcfg->head_dim;
+    }
+    return QwenKvPool::cache_bytes(shape) - PagedBlockTable::table_bytes(1, tokens / kBlockTokens);
+  };
+  return bytes(2 * kBlockTokens) - bytes(kBlockTokens);
+}
+
 QwenModel::MemoryPlan QwenModel::plan_memory(const QwenTextConfig& cfg, int max_tokens,
                                              int64_t max_cache_tokens, int tp_rank, int tp_world,
                                              QwenResidency residency, int max_requests, bool mtp,
@@ -697,15 +735,16 @@ void QwenModel::lm_head_logits(const uint16_t* hidden, int rows, cudaStream_t st
       // The plane layout (kernels/packq_head.hpp): a decode call whose
       // rows all belong to greedy slots reads the argmax form; a prefill's
       // last row, an eager oracle (no flags) and sampled slots read the
-      // full form, bitwise the row layout's chain. The draft's call takes
-      // the vocabulary slice when one is configured (engine.draft_vocab):
-      // its rows scattered to their ids, every other id -inf.
+      // full form, bitwise the row layout's chain. A row's slot is the
+      // walk's own request id for that row, whatever the call's shape. The
+      // draft's call takes the vocabulary slice when one is configured
+      // (engine.draft_vocab): its rows scattered to their ids, every other
+      // id -inf.
       PackqHeadMode mode;
       if (!selected && rows <= max_decode_rows_) {
+        if (head_row_req_ == nullptr) throw std::logic_error("Qwen head: a decode-shaped call without its row table");
         mode.greedy = head_dump_site_ == 1 ? head_greedy_draft_ : head_greedy_verify_;
-        mode.request_map = graph_batch_map_source_ ? d_batch_map_ : nullptr;
-        mode.rows_per_request = graph_rows_per_request_ > 0 ? graph_rows_per_request_ : rows;
-        mode.req0 = head_req_;
+        mode.row_slots = head_row_req_;
       }
       PackqHeadScratch scratch{head_ab_, head_lo_, head_cand_, head_cand_count_};
       const bool slice = head_dump_site_ == 1 && globals_.draft_head_packed.packed != nullptr;
@@ -1469,7 +1508,7 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
   const bool last_row_only = !run.decode && !run.all_rows && run.num_spans == 0 && T > 1 &&
                              (globals_.lm_head_fp8.payload != nullptr || globals_.lm_head_packed.packed != nullptr) &&
                              !mma_envelope && !head_all_rows;
-  head_req_ = req;
+  head_row_req_ = d_req;
   const bool packed_logits = packed_prefill_logits(run);
   if (packed_logits) {
     // FP8 and packed heads preserve the full product's dispatch. BF16
@@ -1479,7 +1518,6 @@ QwenModel::Outputs QwenModel::run_rows(const RowRun& run) {
       if (mixed && input == 0) {
         // Project the decoder prefix together, preserving decode dispatch.
         configure_gemm_rows(count, true);
-        head_req_ = 0;
         lm_head_logits(h_, count, stream_, false);
         configure_gemm_rows(T, false);
       } else {
@@ -1966,7 +2004,7 @@ void QwenModel::mtp_run_rows(int req, const int64_t* tokens, int64_t first_pos, 
   uint16_t* head_in = mtp_r_ + static_cast<size_t>(T - head_rows) * W;
   mtp_mixer_->mix(head_in, h_, head_rows, stream_);
   head_dump_site_ = 1;
-  head_req_ = req;
+  head_row_req_ = d_req + (T - head_rows);
   head_screen_site_ = decode_row && head_rows <= max_decode_rows_;
   lm_head_logits(h_, head_rows, stream_);
   head_screen_site_ = false;
